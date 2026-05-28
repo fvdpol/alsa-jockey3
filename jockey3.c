@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Reloop Jockey 3 Remix ALSA Driver (MIDI IN & ALSA Registration)
+ * Reloop Jockey 3 Remix ALSA Driver (MIDI OUT & LED Control)
  *
  * This driver claims the Reloop Jockey 3 Remix (200c:1037), performs the
- * Ploytec handshake, and registers an ALSA MIDI device. It filters
- * 0xFD padding from EP 0x83 and forwards raw MIDI to ALSA.
+ * Ploytec handshake, and registers a duplex ALSA MIDI device. It supports
+ * MIDI IN (with 0xFD filtering) and MIDI OUT (via EP 0x05 injection).
  */
 
 #include <linux/module.h>
@@ -66,9 +66,11 @@ struct jockey3_chip {
 	struct snd_rawmidi_substream *midi_in_substream;
 	spinlock_t midi_in_lock;
 
-	/* Heartbeat OUT */
+	/* MIDI OUT / Heartbeat */
 	struct urb *out_urb;
 	unsigned char *out_buf;
+	struct snd_rawmidi_substream *midi_out_substream;
+	spinlock_t midi_out_lock;
 };
 
 static void jockey3_midi_in_callback(struct urb *urb)
@@ -103,6 +105,7 @@ static void jockey3_midi_in_callback(struct urb *urb)
 static void jockey3_out_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
+	unsigned long flags;
 	int ret;
 
 	if (urb->status) {
@@ -111,6 +114,19 @@ static void jockey3_out_callback(struct urb *urb)
 			dev_err(&chip->intf0->dev, "OUT Heartbeat URB failed: %d\n", urb->status);
 		return;
 	}
+
+	/* Check if we have MIDI bytes to send */
+	spin_lock_irqsave(&chip->midi_out_lock, flags);
+	if (chip->midi_out_substream) {
+		u8 byte;
+		if (snd_rawmidi_transmit(chip->midi_out_substream, &byte, 1) == 1)
+			chip->out_buf[480] = byte;
+		else
+			chip->out_buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
+	} else {
+		chip->out_buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
+	}
+	spin_unlock_irqrestore(&chip->midi_out_lock, flags);
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0)
@@ -137,10 +153,36 @@ static void jockey3_midi_in_trigger(struct snd_rawmidi_substream *substream, int
 	spin_unlock_irqrestore(&chip->midi_in_lock, flags);
 }
 
+static int jockey3_midi_out_open(struct snd_rawmidi_substream *substream)
+{
+	return 0;
+}
+
+static int jockey3_midi_out_close(struct snd_rawmidi_substream *substream)
+{
+	return 0;
+}
+
+static void jockey3_midi_out_trigger(struct snd_rawmidi_substream *substream, int up)
+{
+	struct jockey3_chip *chip = substream->rmidi->private_data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&chip->midi_out_lock, flags);
+	chip->midi_out_substream = up ? substream : NULL;
+	spin_unlock_irqrestore(&chip->midi_out_lock, flags);
+}
+
 static const struct snd_rawmidi_ops jockey3_midi_in_ops = {
 	.open = jockey3_midi_in_open,
 	.close = jockey3_midi_in_close,
 	.trigger = jockey3_midi_in_trigger,
+};
+
+static const struct snd_rawmidi_ops jockey3_midi_out_ops = {
+	.open = jockey3_midi_out_open,
+	.close = jockey3_midi_out_close,
+	.trigger = jockey3_midi_out_trigger,
 };
 
 static int jockey3_midi_init(struct jockey3_chip *chip)
@@ -148,14 +190,18 @@ static int jockey3_midi_init(struct jockey3_chip *chip)
 	struct snd_rawmidi *rmidi;
 	int ret;
 
-	ret = snd_rawmidi_new(chip->card, "Jockey 3 MIDI", 0, 0, 1, &rmidi);
+	/* 1 Output (LEDs), 1 Input (Controls) */
+	ret = snd_rawmidi_new(chip->card, "Jockey 3 MIDI", 0, 1, 1, &rmidi);
 	if (ret < 0) return ret;
 
 	strscpy(rmidi->name, "Jockey 3 MIDI", sizeof(rmidi->name));
 	rmidi->private_data = chip;
-	rmidi->info_flags = SNDRV_RAWMIDI_INFO_INPUT;
+	rmidi->info_flags = SNDRV_RAWMIDI_INFO_OUTPUT |
+			   SNDRV_RAWMIDI_INFO_INPUT |
+			   SNDRV_RAWMIDI_INFO_DUPLEX;
 
 	snd_rawmidi_set_ops(rmidi, SNDRV_RAWMIDI_STREAM_INPUT, &jockey3_midi_in_ops);
+	snd_rawmidi_set_ops(rmidi, SNDRV_RAWMIDI_STREAM_OUTPUT, &jockey3_midi_out_ops);
 
 	chip->rmidi = rmidi;
 	return 0;
@@ -256,6 +302,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->intf0 = intf;
 	chip->intf1 = intf1;
 	spin_lock_init(&chip->midi_in_lock);
+	spin_lock_init(&chip->midi_out_lock);
 
 	chip->xfer_buf = kmalloc(64, GFP_KERNEL);
 	chip->midi_in_buf = kmalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
@@ -333,5 +380,6 @@ static struct usb_driver jockey3_driver = {
 module_usb_driver(jockey3_driver);
 
 MODULE_AUTHOR("Frank van de Pol");
-MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (MIDI IN)");
+MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (MIDI OUT)");
 MODULE_LICENSE("GPL");
+MODULE_SOFTDEP("pre: snd-rawmidi");
