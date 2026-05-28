@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Reloop Jockey 3 Remix ALSA Driver (Handshake Part 1)
+ * Reloop Jockey 3 Remix ALSA Driver (Handshake Part 2)
  *
  * This driver claims the Reloop Jockey 3 Remix (200c:1037) and performs
- * the first part of the Ploytec handshake: reading firmware and status.
+ * the full Ploytec handshake: firmware read, status read, altsetting
+ * switch, and status confirmation (arming).
  */
 
 #include <linux/module.h>
@@ -36,6 +37,8 @@ struct jockey3_chip {
 static int jockey3_handshake(struct jockey3_chip *chip)
 {
 	int ret;
+	uint8_t status;
+	uint16_t wvalue;
 
 	/* 1. Read Firmware Version (15 bytes) */
 	ret = usb_control_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0),
@@ -54,7 +57,32 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 	if (ret < 0)
 		return ret;
 
-	dev_info(&chip->intf0->dev, "Initial status: 0x%02x\n", chip->xfer_buf[0]);
+	status = chip->xfer_buf[0];
+	dev_info(&chip->intf0->dev, "Initial status: 0x%02x\n", status);
+
+	/* 3. Set Alternate Setting 1 for both interfaces */
+	ret = usb_set_interface(chip->dev, 0, 1);
+	if (ret < 0)
+		return ret;
+
+	ret = usb_set_interface(chip->dev, 1, 1);
+	if (ret < 0)
+		return ret;
+
+	/* 4. Confirm Status (write back with bit 5 set)
+	 * Official driver uses (short)(char)(status | 0x20)
+	 * which sets MODE5 (LegacyActive) and sign-extends.
+	 */
+	wvalue = (uint16_t)(int16_t)(int8_t)(status | 0x20);
+
+	ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0),
+			      PLOYTEC_CMD_STATUS, 0x40,
+			      wvalue, PLOYTEC_REG_AJ_INPUT_SEL,
+			      NULL, 0, 2000);
+	if (ret < 0)
+		return ret;
+
+	dev_info(&chip->intf0->dev, "Handshake complete, device armed (wrote 0x%04x)\n", wvalue);
 
 	return 0;
 }
@@ -146,5 +174,5 @@ static struct usb_driver jockey3_driver = {
 module_usb_driver(jockey3_driver);
 
 MODULE_AUTHOR("Frank van de Pol");
-MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (Handshake Part 1)");
+MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (Handshake Part 2)");
 MODULE_LICENSE("GPL");
