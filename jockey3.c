@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Reloop Jockey 3 Remix ALSA Driver (Handshake & Rate Init)
+ * Reloop Jockey 3 Remix ALSA Driver (MIDI IN & Heartbeat)
  *
- * This driver claims the Reloop Jockey 3 Remix (200c:1037) and performs
- * the full Ploytec handshake, including sample rate initialization.
+ * This driver claims the Reloop Jockey 3 Remix (200c:1037), performs the
+ * Ploytec handshake, and sets up a Bulk OUT heartbeat on EP 0x05 to
+ * trigger the device's streaming engine, enabling MIDI IN on EP 0x83.
  */
 
 #include <linux/module.h>
@@ -25,6 +26,10 @@
 #define PLOYTEC_EP_RATE_IN          0x0086
 #define PLOYTEC_EP_RATE_OUT         0x0005
 
+#define PLOYTEC_EP_MIDI_IN          0x83
+#define PLOYTEC_EP_PCM_OUT          0x05
+#define PLOYTEC_PKT_SIZE            512
+
 static const struct usb_device_id jockey3_ids[] = {
 	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_REMIX_PID) },
 	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_MASTER_PID) },
@@ -37,13 +42,74 @@ struct jockey3_chip {
 	struct usb_interface *intf0;
 	struct usb_interface *intf1;
 	unsigned char *xfer_buf; /* DMA-safe buffer for control transfers */
+
+	/* MIDI IN */
+	struct urb *midi_in_urb;
+	unsigned char *midi_in_buf;
+
+	/* Heartbeat OUT (kickstarts the device engine) */
+	struct urb *out_urb;
+	unsigned char *out_buf;
 };
+
+static void jockey3_midi_in_callback(struct urb *urb)
+{
+	struct jockey3_chip *chip = urb->context;
+	int ret;
+
+	if (urb->status) {
+		if (urb->status != -ENOENT && urb->status != -ECONNRESET &&
+		    urb->status != -ESHUTDOWN)
+			dev_err(&chip->intf0->dev, "MIDI IN URB failed: %d\n", urb->status);
+		return;
+	}
+
+	if (urb->actual_length > 0) {
+		/* Log actual MIDI bytes, skipping 0xFD idle markers */
+		int i;
+		bool has_data = false;
+		for (i = 0; i < urb->actual_length; i++) {
+			if (chip->midi_in_buf[i] != 0xFD) {
+				has_data = true;
+				break;
+			}
+		}
+
+		if (has_data) {
+			dev_info(&chip->intf0->dev, "MIDI IN data: %*ph\n",
+				 urb->actual_length > 32 ? 32 : urb->actual_length,
+				 chip->midi_in_buf);
+		}
+	}
+
+	/* Resubmit URB */
+	ret = usb_submit_urb(urb, GFP_ATOMIC);
+	if (ret < 0)
+		dev_err(&chip->intf0->dev, "Failed to resubmit MIDI IN URB: %d\n", ret);
+}
+
+static void jockey3_out_callback(struct urb *urb)
+{
+	struct jockey3_chip *chip = urb->context;
+	int ret;
+
+	if (urb->status) {
+		if (urb->status != -ENOENT && urb->status != -ECONNRESET &&
+		    urb->status != -ESHUTDOWN)
+			dev_err(&chip->intf0->dev, "OUT Heartbeat URB failed: %d\n", urb->status);
+		return;
+	}
+
+	/* Keep the heart beating */
+	ret = usb_submit_urb(urb, GFP_ATOMIC);
+	if (ret < 0)
+		dev_err(&chip->intf0->dev, "Failed to resubmit OUT URB: %d\n", ret);
+}
 
 static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 {
 	int ret;
 
-	/* Encode rate as 3-byte little-endian */
 	chip->xfer_buf[0] = rate & 0xFF;
 	chip->xfer_buf[1] = (rate >> 8) & 0xFF;
 	chip->xfer_buf[2] = (rate >> 16) & 0xFF;
@@ -68,16 +134,11 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 	uint8_t status;
 	uint16_t wvalue;
 
-	/* 1. Read Firmware Version (15 bytes) */
+	/* 1. Read Firmware Version */
 	ret = usb_control_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0),
 			      PLOYTEC_CMD_FIRMWARE, 0xC0, 0x0000, 0,
 			      chip->xfer_buf, 15, 2000);
-	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Firmware read failed: %d\n", ret);
-		return ret;
-	}
-
-	dev_info(&chip->intf0->dev, "Firmware read: %*ph\n", 15, chip->xfer_buf);
+	if (ret < 0) return ret;
 	msleep(20);
 
 	/* 2. Read Status Byte */
@@ -85,63 +146,55 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 			      PLOYTEC_CMD_STATUS, 0xC0, 0x0000,
 			      PLOYTEC_REG_AJ_INPUT_SEL,
 			      chip->xfer_buf, 1, 2000);
-	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Status read failed: %d\n", ret);
-		return ret;
-	}
+	if (ret < 0) return ret;
 
 	status = chip->xfer_buf[0];
-	dev_info(&chip->intf0->dev, "Initial status: 0x%02x\n", status);
 	msleep(20);
 
-	/* 3. Set Alternate Setting 1 for both interfaces */
-	dev_info(&chip->intf0->dev, "Setting AltSetting 1 for Interface 0...\n");
+	/* 3. Set Alternate Setting 1 */
 	ret = usb_set_interface(chip->dev, 0, 1);
-	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Set AltSetting 1 (Intf 0) failed: %d\n", ret);
-		return ret;
-	}
+	if (ret < 0) return ret;
 	msleep(20);
 
-	dev_info(&chip->intf0->dev, "Setting AltSetting 1 for Interface 1...\n");
 	ret = usb_set_interface(chip->dev, 1, 1);
-	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Set AltSetting 1 (Intf 1) failed: %d\n", ret);
-		return ret;
-	}
+	if (ret < 0) return ret;
 	msleep(20);
 
-	/* 4. Set Default Sample Rate (44.1kHz) */
+	/* 4. Set Sample Rate */
 	ret = jockey3_set_rate(chip, 44100);
-	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Initial rate setup failed: %d\n", ret);
-		return ret;
-	}
+	if (ret < 0) return ret;
 	msleep(20);
 
-	/* 5. Confirm Status (write back with bit 5 set) */
+	/* 5. Confirm Status (Arm) */
 	if (!(status & 0x20)) {
 		wvalue = (uint16_t)(int16_t)(int8_t)(status | 0x20);
-
-		dev_info(&chip->intf0->dev, "Confirming status (writing 0x%04x)...\n", wvalue);
 		ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0),
 				      PLOYTEC_CMD_STATUS, 0x40,
 				      wvalue, PLOYTEC_REG_AJ_INPUT_SEL,
 				      NULL, 0, 2000);
-		if (ret < 0) {
-			dev_err(&chip->intf0->dev, "Status confirmation failed: %d\n", ret);
-			return ret;
-		}
-	} else {
-		dev_info(&chip->intf0->dev, "Device already armed (status 0x%02x), skipping confirm.\n", status);
+		if (ret < 0) return ret;
 	}
 
 	dev_info(&chip->intf0->dev, "Handshake complete, device armed.\n");
 
+	/* 6. Start Heartbeat OUT Stream */
+	ret = usb_submit_urb(chip->out_urb, GFP_KERNEL);
+	if (ret < 0) {
+		dev_err(&chip->intf0->dev, "Failed to submit Heartbeat OUT URB: %d\n", ret);
+		return ret;
+	}
+
+	/* 7. Start MIDI IN URB */
+	ret = usb_submit_urb(chip->midi_in_urb, GFP_KERNEL);
+	if (ret < 0) {
+		dev_err(&chip->intf0->dev, "Failed to submit MIDI IN URB: %d\n", ret);
+		return ret;
+	}
+
 	return 0;
 }
 
-static struct usb_driver jockey3_driver; /* forward declaration */
+static struct usb_driver jockey3_driver;
 
 static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id *id)
 {
@@ -150,53 +203,63 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	struct jockey3_chip *chip;
 	int ret;
 
-	/* Only handle Interface 0 in probe; we claim Interface 1 manually */
 	if (intf->cur_altsetting->desc.bInterfaceNumber != 0)
 		return -ENODEV;
 
-	dev_info(&intf->dev, "Reloop Jockey 3 Remix detected (VID=0x%04x, PID=0x%04x)\n",
-		 id->idVendor, id->idProduct);
-
 	intf1 = usb_ifnum_to_if(dev, 1);
-	if (!intf1) {
-		dev_err(&intf->dev, "Interface 1 not found\n");
-		return -ENODEV;
-	}
+	if (!intf1) return -ENODEV;
 
 	chip = kzalloc(sizeof(*chip), GFP_KERNEL);
-	if (!chip)
-		return -ENOMEM;
+	if (!chip) return -ENOMEM;
 
 	chip->xfer_buf = kmalloc(64, GFP_KERNEL);
-	if (!chip->xfer_buf) {
-		kfree(chip);
-		return -ENOMEM;
+	chip->midi_in_buf = kmalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
+	chip->out_buf = kmalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
+	chip->midi_in_urb = usb_alloc_urb(0, GFP_KERNEL);
+	chip->out_urb = usb_alloc_urb(0, GFP_KERNEL);
+
+	if (!chip->xfer_buf || !chip->midi_in_buf || !chip->out_buf ||
+	    !chip->midi_in_urb || !chip->out_urb) {
+		ret = -ENOMEM;
+		goto err_free;
 	}
 
 	chip->dev = dev;
 	chip->intf0 = intf;
 	chip->intf1 = intf1;
 
-	/* Claim Interface 1 */
+	/* Setup Heartbeat buffer (Ploytec Idle Pattern) */
+	memset(chip->out_buf, 0, PLOYTEC_PKT_SIZE);
+	chip->out_buf[480] = 0xFD; /* MIDI Idle */
+	chip->out_buf[481] = 0xFF; /* Sync */
+
+	usb_fill_bulk_urb(chip->out_urb, dev,
+			  usb_sndbulkpipe(dev, PLOYTEC_EP_PCM_OUT),
+			  chip->out_buf, PLOYTEC_PKT_SIZE,
+			  jockey3_out_callback, chip);
+
+	usb_fill_bulk_urb(chip->midi_in_urb, dev,
+			  usb_rcvbulkpipe(dev, PLOYTEC_EP_MIDI_IN),
+			  chip->midi_in_buf, PLOYTEC_PKT_SIZE,
+			  jockey3_midi_in_callback, chip);
+
 	ret = usb_driver_claim_interface(&jockey3_driver, intf1, chip);
-	if (ret < 0) {
-		dev_err(&intf->dev, "Failed to claim interface 1: %d\n", ret);
-		goto err_free;
-	}
+	if (ret < 0) goto err_free;
 
 	usb_set_intfdata(intf, chip);
 
 	ret = jockey3_handshake(chip);
-	if (ret < 0) {
-		dev_err(&intf->dev, "Handshake failed: %d\n", ret);
-		goto err_unclaim;
-	}
+	if (ret < 0) goto err_unclaim;
 
 	return 0;
 
 err_unclaim:
 	usb_driver_release_interface(&jockey3_driver, intf1);
 err_free:
+	if (chip->out_urb) usb_free_urb(chip->out_urb);
+	if (chip->midi_in_urb) usb_free_urb(chip->midi_in_urb);
+	kfree(chip->out_buf);
+	kfree(chip->midi_in_buf);
 	kfree(chip->xfer_buf);
 	kfree(chip);
 	return ret;
@@ -206,14 +269,16 @@ static void jockey3_disconnect(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
-	if (chip) {
-		/* Only handle disconnect for the primary interface */
-		if (intf == chip->intf0) {
-			usb_driver_release_interface(&jockey3_driver, chip->intf1);
-			dev_info(&intf->dev, "Reloop Jockey 3 Remix disconnected.\n");
-			kfree(chip->xfer_buf);
-			kfree(chip);
-		}
+	if (chip && intf == chip->intf0) {
+		usb_kill_urb(chip->midi_in_urb);
+		usb_kill_urb(chip->out_urb);
+		usb_driver_release_interface(&jockey3_driver, chip->intf1);
+		usb_free_urb(chip->midi_in_urb);
+		usb_free_urb(chip->out_urb);
+		kfree(chip->out_buf);
+		kfree(chip->midi_in_buf);
+		kfree(chip->xfer_buf);
+		kfree(chip);
 	}
 	usb_set_intfdata(intf, NULL);
 }
@@ -228,5 +293,5 @@ static struct usb_driver jockey3_driver = {
 module_usb_driver(jockey3_driver);
 
 MODULE_AUTHOR("Frank van de Pol");
-MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (Handshake & Rate Init)");
+MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (MIDI Heartbeat)");
 MODULE_LICENSE("GPL");
