@@ -3,8 +3,8 @@
  * Reloop Jockey 3 Remix ALSA Driver (Handshake Stabilization)
  *
  * This driver claims the Reloop Jockey 3 Remix (200c:1037) and performs
- * the full Ploytec handshake with granular logging and delays to
- * diagnose protocol errors.
+ * the full Ploytec handshake with granular logging and delays.
+ * Includes conditional arming to prevent -71 errors on re-plug.
  */
 
 #include <linux/module.h>
@@ -84,17 +84,24 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 	}
 	msleep(20);
 
-	/* 4. Confirm Status (write back with bit 5 set) */
-	wvalue = (uint16_t)(int16_t)(int8_t)(status | 0x20);
+	/* 4. Confirm Status (write back with bit 5 set)
+	 * Only send this if bit 5 (0x20) is not already set in the initial status.
+	 * Redundant arming commands can trigger a -71 protocol error.
+	 */
+	if (!(status & 0x20)) {
+		wvalue = (uint16_t)(int16_t)(int8_t)(status | 0x20);
 
-	dev_info(&chip->intf0->dev, "Confirming status (writing 0x%04x)...\n", wvalue);
-	ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0),
-			      PLOYTEC_CMD_STATUS, 0x40,
-			      wvalue, PLOYTEC_REG_AJ_INPUT_SEL,
-			      NULL, 0, 2000);
-	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Status confirmation failed: %d\n", ret);
-		return ret;
+		dev_info(&chip->intf0->dev, "Confirming status (writing 0x%04x)...\n", wvalue);
+		ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0),
+				      PLOYTEC_CMD_STATUS, 0x40,
+				      wvalue, PLOYTEC_REG_AJ_INPUT_SEL,
+				      NULL, 0, 2000);
+		if (ret < 0) {
+			dev_err(&chip->intf0->dev, "Status confirmation failed: %d\n", ret);
+			return ret;
+		}
+	} else {
+		dev_info(&chip->intf0->dev, "Device already armed (status 0x%02x), skipping confirm.\n", status);
 	}
 
 	dev_info(&chip->intf0->dev, "Handshake complete, device armed.\n");
