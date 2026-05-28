@@ -1,15 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Reloop Jockey 3 Remix ALSA Driver (Handshake Part 2)
+ * Reloop Jockey 3 Remix ALSA Driver (Handshake Stabilization)
  *
  * This driver claims the Reloop Jockey 3 Remix (200c:1037) and performs
- * the full Ploytec handshake: firmware read, status read, altsetting
- * switch, and status confirmation (arming).
+ * the full Ploytec handshake with granular logging and delays to
+ * diagnose protocol errors.
  */
 
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/slab.h>
+#include <linux/delay.h>
 
 #define RELOOP_VENDOR_ID          0x200c
 #define RELOOP_JOCKEY3_REMIX_PID  0x1037
@@ -44,45 +45,59 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 	ret = usb_control_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0),
 			      PLOYTEC_CMD_FIRMWARE, 0xC0, 0x0000, 0,
 			      chip->xfer_buf, 15, 2000);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(&chip->intf0->dev, "Firmware read failed: %d\n", ret);
 		return ret;
+	}
 
 	dev_info(&chip->intf0->dev, "Firmware read: %*ph\n", 15, chip->xfer_buf);
+	msleep(20);
 
 	/* 2. Read Status Byte */
 	ret = usb_control_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0),
 			      PLOYTEC_CMD_STATUS, 0xC0, 0x0000,
 			      PLOYTEC_REG_AJ_INPUT_SEL,
 			      chip->xfer_buf, 1, 2000);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(&chip->intf0->dev, "Status read failed: %d\n", ret);
 		return ret;
+	}
 
 	status = chip->xfer_buf[0];
 	dev_info(&chip->intf0->dev, "Initial status: 0x%02x\n", status);
+	msleep(20);
 
 	/* 3. Set Alternate Setting 1 for both interfaces */
+	dev_info(&chip->intf0->dev, "Setting AltSetting 1 for Interface 0...\n");
 	ret = usb_set_interface(chip->dev, 0, 1);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(&chip->intf0->dev, "Set AltSetting 1 (Intf 0) failed: %d\n", ret);
 		return ret;
+	}
+	msleep(20);
 
+	dev_info(&chip->intf0->dev, "Setting AltSetting 1 for Interface 1...\n");
 	ret = usb_set_interface(chip->dev, 1, 1);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(&chip->intf0->dev, "Set AltSetting 1 (Intf 1) failed: %d\n", ret);
 		return ret;
+	}
+	msleep(20);
 
-	/* 4. Confirm Status (write back with bit 5 set)
-	 * Official driver uses (short)(char)(status | 0x20)
-	 * which sets MODE5 (LegacyActive) and sign-extends.
-	 */
+	/* 4. Confirm Status (write back with bit 5 set) */
 	wvalue = (uint16_t)(int16_t)(int8_t)(status | 0x20);
 
+	dev_info(&chip->intf0->dev, "Confirming status (writing 0x%04x)...\n", wvalue);
 	ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0),
 			      PLOYTEC_CMD_STATUS, 0x40,
 			      wvalue, PLOYTEC_REG_AJ_INPUT_SEL,
 			      NULL, 0, 2000);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(&chip->intf0->dev, "Status confirmation failed: %d\n", ret);
 		return ret;
+	}
 
-	dev_info(&chip->intf0->dev, "Handshake complete, device armed (wrote 0x%04x)\n", wvalue);
+	dev_info(&chip->intf0->dev, "Handshake complete, device armed.\n");
 
 	return 0;
 }
@@ -174,5 +189,5 @@ static struct usb_driver jockey3_driver = {
 module_usb_driver(jockey3_driver);
 
 MODULE_AUTHOR("Frank van de Pol");
-MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (Handshake Part 2)");
+MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (Handshake Stabilization)");
 MODULE_LICENSE("GPL");
