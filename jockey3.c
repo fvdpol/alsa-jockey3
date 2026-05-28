@@ -1,23 +1,28 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Reloop Jockey 3 Remix ALSA Driver (Skeleton)
+ * Reloop Jockey 3 Remix ALSA Driver (Handshake Part 1)
  *
- * This is a minimal driver to claim the Reloop Jockey 3 Remix (200c:1037).
- * It does not yet implement any audio or MIDI functionality.
+ * This driver claims the Reloop Jockey 3 Remix (200c:1037) and performs
+ * the first part of the Ploytec handshake: reading firmware and status.
  */
 
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/slab.h>
 
-#define RELOOP_VENDOR_ID         0x200c
-#define RELOOP_JOCKEY3_REMIX_PID 0x1037
+#define RELOOP_VENDOR_ID          0x200c
+#define RELOOP_JOCKEY3_REMIX_PID  0x1037
 #define RELOOP_JOCKEY3_MASTER_PID 0x1009
+
+/* Ploytec Vendor Commands */
+#define PLOYTEC_CMD_FIRMWARE        0x56
+#define PLOYTEC_CMD_STATUS          0x49
+#define PLOYTEC_REG_AJ_INPUT_SEL    0
 
 static const struct usb_device_id jockey3_ids[] = {
 	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_REMIX_PID) },
-	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_MASTER_PID) }, /* Unverified */
-	{ } /* Terminating entry */
+	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_MASTER_PID) },
+	{ }
 };
 MODULE_DEVICE_TABLE(usb, jockey3_ids);
 
@@ -25,7 +30,34 @@ struct jockey3_chip {
 	struct usb_device *dev;
 	struct usb_interface *intf0;
 	struct usb_interface *intf1;
+	unsigned char *xfer_buf; /* DMA-safe buffer for control transfers */
 };
+
+static int jockey3_handshake(struct jockey3_chip *chip)
+{
+	int ret;
+
+	/* 1. Read Firmware Version (15 bytes) */
+	ret = usb_control_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0),
+			      PLOYTEC_CMD_FIRMWARE, 0xC0, 0x0000, 0,
+			      chip->xfer_buf, 15, 2000);
+	if (ret < 0)
+		return ret;
+
+	dev_info(&chip->intf0->dev, "Firmware read: %*ph\n", 15, chip->xfer_buf);
+
+	/* 2. Read Status Byte */
+	ret = usb_control_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0),
+			      PLOYTEC_CMD_STATUS, 0xC0, 0x0000,
+			      PLOYTEC_REG_AJ_INPUT_SEL,
+			      chip->xfer_buf, 1, 2000);
+	if (ret < 0)
+		return ret;
+
+	dev_info(&chip->intf0->dev, "Initial status: 0x%02x\n", chip->xfer_buf[0]);
+
+	return 0;
+}
 
 static struct usb_driver jockey3_driver; /* forward declaration */
 
@@ -53,6 +85,12 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	if (!chip)
 		return -ENOMEM;
 
+	chip->xfer_buf = kmalloc(64, GFP_KERNEL);
+	if (!chip->xfer_buf) {
+		kfree(chip);
+		return -ENOMEM;
+	}
+
 	chip->dev = dev;
 	chip->intf0 = intf;
 	chip->intf1 = intf1;
@@ -61,16 +99,25 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	ret = usb_driver_claim_interface(&jockey3_driver, intf1, chip);
 	if (ret < 0) {
 		dev_err(&intf->dev, "Failed to claim interface 1: %d\n", ret);
-		kfree(chip);
-		return ret;
+		goto err_free;
 	}
 
 	usb_set_intfdata(intf, chip);
 
-	dev_info(&intf->dev, "Reloop Jockey 3 Remix interface 0 claimed.\n");
-	dev_info(&intf1->dev, "Reloop Jockey 3 Remix interface 1 claimed.\n");
+	ret = jockey3_handshake(chip);
+	if (ret < 0) {
+		dev_err(&intf->dev, "Handshake failed: %d\n", ret);
+		goto err_unclaim;
+	}
 
 	return 0;
+
+err_unclaim:
+	usb_driver_release_interface(&jockey3_driver, intf1);
+err_free:
+	kfree(chip->xfer_buf);
+	kfree(chip);
+	return ret;
 }
 
 static void jockey3_disconnect(struct usb_interface *intf)
@@ -82,6 +129,7 @@ static void jockey3_disconnect(struct usb_interface *intf)
 		if (intf == chip->intf0) {
 			usb_driver_release_interface(&jockey3_driver, chip->intf1);
 			dev_info(&intf->dev, "Reloop Jockey 3 Remix disconnected.\n");
+			kfree(chip->xfer_buf);
 			kfree(chip);
 		}
 	}
@@ -98,5 +146,5 @@ static struct usb_driver jockey3_driver = {
 module_usb_driver(jockey3_driver);
 
 MODULE_AUTHOR("Frank van de Pol");
-MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver Skeleton");
+MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (Handshake Part 1)");
 MODULE_LICENSE("GPL");
