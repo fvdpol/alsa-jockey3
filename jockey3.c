@@ -1,10 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Reloop Jockey 3 Remix ALSA Driver (Handshake Stabilization)
+ * Reloop Jockey 3 Remix ALSA Driver (Handshake & Rate Init)
  *
  * This driver claims the Reloop Jockey 3 Remix (200c:1037) and performs
- * the full Ploytec handshake with granular logging and delays.
- * Includes conditional arming to prevent -71 errors on re-plug.
+ * the full Ploytec handshake, including sample rate initialization.
  */
 
 #include <linux/module.h>
@@ -21,6 +20,11 @@
 #define PLOYTEC_CMD_STATUS          0x49
 #define PLOYTEC_REG_AJ_INPUT_SEL    0
 
+#define PLOYTEC_CMD_SET_RATE_REQ    0x01
+#define PLOYTEC_CMD_SET_RATE_TYPE   0x22
+#define PLOYTEC_EP_RATE_IN          0x0086
+#define PLOYTEC_EP_RATE_OUT         0x0005
+
 static const struct usb_device_id jockey3_ids[] = {
 	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_REMIX_PID) },
 	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_MASTER_PID) },
@@ -34,6 +38,29 @@ struct jockey3_chip {
 	struct usb_interface *intf1;
 	unsigned char *xfer_buf; /* DMA-safe buffer for control transfers */
 };
+
+static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
+{
+	int ret;
+
+	/* Encode rate as 3-byte little-endian */
+	chip->xfer_buf[0] = rate & 0xFF;
+	chip->xfer_buf[1] = (rate >> 8) & 0xFF;
+	chip->xfer_buf[2] = (rate >> 16) & 0xFF;
+
+	dev_info(&chip->intf0->dev, "Setting sample rate to %u Hz (EP 0x86)...\n", rate);
+	ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0),
+			      PLOYTEC_CMD_SET_RATE_REQ, PLOYTEC_CMD_SET_RATE_TYPE,
+			      0x0100, PLOYTEC_EP_RATE_IN, chip->xfer_buf, 3, 2000);
+	if (ret < 0) return ret;
+	msleep(20);
+
+	dev_info(&chip->intf0->dev, "Setting sample rate to %u Hz (EP 0x05)...\n", rate);
+	ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0),
+			      PLOYTEC_CMD_SET_RATE_REQ, PLOYTEC_CMD_SET_RATE_TYPE,
+			      0x0100, PLOYTEC_EP_RATE_OUT, chip->xfer_buf, 3, 2000);
+	return ret;
+}
 
 static int jockey3_handshake(struct jockey3_chip *chip)
 {
@@ -84,10 +111,15 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 	}
 	msleep(20);
 
-	/* 4. Confirm Status (write back with bit 5 set)
-	 * Only send this if bit 5 (0x20) is not already set in the initial status.
-	 * Redundant arming commands can trigger a -71 protocol error.
-	 */
+	/* 4. Set Default Sample Rate (44.1kHz) */
+	ret = jockey3_set_rate(chip, 44100);
+	if (ret < 0) {
+		dev_err(&chip->intf0->dev, "Initial rate setup failed: %d\n", ret);
+		return ret;
+	}
+	msleep(20);
+
+	/* 5. Confirm Status (write back with bit 5 set) */
 	if (!(status & 0x20)) {
 		wvalue = (uint16_t)(int16_t)(int8_t)(status | 0x20);
 
@@ -196,5 +228,5 @@ static struct usb_driver jockey3_driver = {
 module_usb_driver(jockey3_driver);
 
 MODULE_AUTHOR("Frank van de Pol");
-MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (Handshake Stabilization)");
+MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (Handshake & Rate Init)");
 MODULE_LICENSE("GPL");
