@@ -15,6 +15,7 @@
 
 #define PLOYTEC_EP_MIDI_IN          0x83
 #define PLOYTEC_EP_PCM_OUT          0x05
+#define PLOYTEC_EP_PCM_IN           0x86
 #define PLOYTEC_PKT_SIZE            512
 #define PLOYTEC_MIDI_IDLE_BYTE      0xFD
 #define PLOYTEC_FRAMES_PER_PKT      10
@@ -59,6 +60,14 @@ struct jockey3_chip {
 	unsigned int dma_off;
 	unsigned int period_off;
 	bool stream_running;
+
+	struct snd_pcm_substream *capture_substream;
+	struct urb *capture_urbs[JOCKEY3_N_URBS];
+	unsigned char *capture_bufs[JOCKEY3_N_URBS];
+	spinlock_t capture_lock;
+	unsigned int capture_dma_off;
+	unsigned int capture_period_off;
+	bool capture_running;
 };
 
 static void jockey3_encode_frame(uint8_t *dest, const uint8_t *src)
@@ -124,6 +133,110 @@ static void jockey3_process_out_packet(struct jockey3_chip *chip, uint8_t *urb_b
 		chip->period_off %= runtime->period_size * alsa_frame_size;
 		snd_pcm_period_elapsed(substream);
 	}
+}
+
+static void jockey3_decode_frame(uint8_t *dest, const uint8_t *src)
+{
+	int i;
+
+	// Channel 1: odd channel 1 (bit 0 of bytes 0x00-0x17)
+	dest[0x00] = 0; dest[0x01] = 0; dest[0x02] = 0;
+	for (i = 0; i < 8; i++) {
+		dest[0x00] |= ((src[0x10 + i] & 0x01) << (7 - i));
+		dest[0x01] |= ((src[0x08 + i] & 0x01) << (7 - i));
+		dest[0x02] |= ((src[0x00 + i] & 0x01) << (7 - i));
+	}
+
+	// Channel 2: even channel 2 (bit 0 of bytes 0x20-0x37)
+	dest[0x03] = 0; dest[0x04] = 0; dest[0x05] = 0;
+	for (i = 0; i < 8; i++) {
+		dest[0x03] |= ((src[0x30 + i] & 0x01) << (7 - i));
+		dest[0x04] |= ((src[0x28 + i] & 0x01) << (7 - i));
+		dest[0x05] |= ((src[0x20 + i] & 0x01) << (7 - i));
+	}
+
+	// Channel 3: odd channel 3 (bit 1 of bytes 0x00-0x17)
+	dest[0x06] = 0; dest[0x07] = 0; dest[0x08] = 0;
+	for (i = 0; i < 8; i++) {
+		dest[0x06] |= (((src[0x10 + i] & 0x02) >> 1) << (7 - i));
+		dest[0x07] |= (((src[0x08 + i] & 0x02) >> 1) << (7 - i));
+		dest[0x08] |= (((src[0x00 + i] & 0x02) >> 1) << (7 - i));
+	}
+
+	// Channel 4: even channel 4 (bit 1 of bytes 0x20-0x37)
+	dest[0x09] = 0; dest[0x0A] = 0; dest[0x0B] = 0;
+	for (i = 0; i < 8; i++) {
+		dest[0x09] |= (((src[0x30 + i] & 0x02) >> 1) << (7 - i));
+		dest[0x0A] |= (((src[0x28 + i] & 0x02) >> 1) << (7 - i));
+		dest[0x0B] |= (((src[0x20 + i] & 0x02) >> 1) << (7 - i));
+	}
+
+	// Channel 5: odd channel 5 (bit 2 of bytes 0x00-0x17)
+	dest[0x0C] = 0; dest[0x0D] = 0; dest[0x0E] = 0;
+	for (i = 0; i < 8; i++) {
+		dest[0x0C] |= (((src[0x10 + i] & 0x04) >> 2) << (7 - i));
+		dest[0x0D] |= (((src[0x08 + i] & 0x04) >> 2) << (7 - i));
+		dest[0x0E] |= (((src[0x00 + i] & 0x04) >> 2) << (7 - i));
+	}
+
+	// Channel 6: even channel 6 (bit 2 of bytes 0x20-0x37)
+	dest[0x0F] = 0; dest[0x10] = 0; dest[0x11] = 0;
+	for (i = 0; i < 8; i++) {
+		dest[0x0F] |= (((src[0x30 + i] & 0x04) >> 2) << (7 - i));
+		dest[0x10] |= (((src[0x28 + i] & 0x04) >> 2) << (7 - i));
+		dest[0x11] |= (((src[0x20 + i] & 0x04) >> 2) << (7 - i));
+	}
+}
+
+static void jockey3_process_in_packet(struct jockey3_chip *chip, const uint8_t *urb_buf)
+{
+	struct snd_pcm_substream *substream = chip->capture_substream;
+	struct snd_pcm_runtime *runtime;
+	unsigned int pcm_buffer_size;
+	unsigned int alsa_frame_size;
+	int f;
+
+	if (unlikely(!substream || !substream->runtime))
+		return;
+
+	runtime = substream->runtime;
+	if (unlikely(!runtime->dma_area))
+		return;
+
+	pcm_buffer_size = snd_pcm_lib_buffer_bytes(substream);
+	alsa_frame_size = runtime->channels * 3; // 6 * 3 = 18 bytes
+
+	for (f = 0; f < 8; f++) {
+		jockey3_decode_frame(runtime->dma_area + chip->capture_dma_off, urb_buf + f * 64);
+		chip->capture_dma_off += alsa_frame_size;
+		if (chip->capture_dma_off >= pcm_buffer_size)
+			chip->capture_dma_off -= pcm_buffer_size;
+		chip->capture_period_off += alsa_frame_size;
+	}
+
+	if (chip->capture_period_off >= runtime->period_size * alsa_frame_size) {
+		chip->capture_period_off %= runtime->period_size * alsa_frame_size;
+		snd_pcm_period_elapsed(substream);
+	}
+}
+
+static void jockey3_capture_callback(struct urb *urb)
+{
+	struct jockey3_chip *chip = urb->context;
+	unsigned long flags;
+
+	if (urb->status) {
+		if (urb->status == -ENOENT || urb->status == -ECONNRESET || urb->status == -ESHUTDOWN)
+			return;
+	} else {
+		spin_lock_irqsave(&chip->capture_lock, flags);
+		if (chip->capture_running && chip->capture_substream) {
+			jockey3_process_in_packet(chip, urb->transfer_buffer);
+		}
+		spin_unlock_irqrestore(&chip->capture_lock, flags);
+	}
+
+	usb_submit_urb(urb, GFP_ATOMIC);
 }
 
 static void jockey3_playback_callback(struct urb *urb)
@@ -195,30 +308,44 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 			    SNDRV_PCM_RATE_88200 | SNDRV_PCM_RATE_96000;
 	runtime->hw.rate_min = 44100;
 	runtime->hw.rate_max = 96000;
-	runtime->hw.channels_min = 4;
-	runtime->hw.channels_max = 4;
 	runtime->hw.buffer_bytes_max = 1024 * 1024;
 	runtime->hw.period_bytes_min = 64;
 	runtime->hw.period_bytes_max = 512 * 1024;
 	runtime->hw.periods_min = 2;
 	runtime->hw.periods_max = 1024;
 
-	chip->playback_substream = substream;
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		runtime->hw.channels_min = 4;
+		runtime->hw.channels_max = 4;
+		chip->playback_substream = substream;
+	} else {
+		runtime->hw.channels_min = 6;
+		runtime->hw.channels_max = 6;
+		chip->capture_substream = substream;
+	}
 	return 0;
 }
 
 static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
-	chip->playback_substream = NULL;
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		chip->playback_substream = NULL;
+	else
+		chip->capture_substream = NULL;
 	return 0;
 }
 
 static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
-	chip->dma_off = 0;
-	chip->period_off = 0;
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		chip->dma_off = 0;
+		chip->period_off = 0;
+	} else {
+		chip->capture_dma_off = 0;
+		chip->capture_period_off = 0;
+	}
 	return 0;
 }
 
@@ -226,10 +353,17 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 
-	if (cmd == SNDRV_PCM_TRIGGER_START)
-		chip->stream_running = true;
-	else if (cmd == SNDRV_PCM_TRIGGER_STOP)
-		chip->stream_running = false;
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		if (cmd == SNDRV_PCM_TRIGGER_START)
+			chip->stream_running = true;
+		else if (cmd == SNDRV_PCM_TRIGGER_STOP)
+			chip->stream_running = false;
+	} else {
+		if (cmd == SNDRV_PCM_TRIGGER_START)
+			chip->capture_running = true;
+		else if (cmd == SNDRV_PCM_TRIGGER_STOP)
+			chip->capture_running = false;
+	}
 
 	return 0;
 }
@@ -237,7 +371,10 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
-	return bytes_to_frames(substream->runtime, chip->dma_off);
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		return bytes_to_frames(substream->runtime, chip->dma_off);
+	else
+		return bytes_to_frames(substream->runtime, chip->capture_dma_off);
 }
 
 static const struct snd_pcm_ops jockey3_pcm_ops = {
@@ -322,8 +459,10 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 
 	j3_dbg(&chip->intf0->dev, "Handshake complete.\n");
 
-	for (i = 0; i < JOCKEY3_N_URBS; i++)
+	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		usb_submit_urb(chip->playback_urbs[i], GFP_KERNEL);
+		usb_submit_urb(chip->capture_urbs[i], GFP_KERNEL);
+	}
 
 	return usb_submit_urb(chip->midi_in_urb, GFP_KERNEL);
 }
@@ -370,6 +509,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->intf1 = intf1;
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback_lock);
+	spin_lock_init(&chip->capture_lock);
 
 	chip->xfer_buf = kmalloc(64, GFP_KERNEL);
 	chip->midi_in_buf = kmalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
@@ -382,15 +522,21 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 		chip->playback_bufs[i][481] = 0xFF;
 		usb_fill_bulk_urb(chip->playback_urbs[i], dev, usb_sndbulkpipe(dev, PLOYTEC_EP_PCM_OUT),
 				  chip->playback_bufs[i], PLOYTEC_PKT_SIZE, jockey3_playback_callback, chip);
+
+		chip->capture_bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
+		chip->capture_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
+		usb_fill_bulk_urb(chip->capture_urbs[i], dev, usb_rcvbulkpipe(dev, PLOYTEC_EP_PCM_IN),
+				  chip->capture_bufs[i], PLOYTEC_PKT_SIZE, jockey3_capture_callback, chip);
 	}
 
 	usb_fill_bulk_urb(chip->midi_in_urb, dev, usb_rcvbulkpipe(dev, PLOYTEC_EP_MIDI_IN),
 			  chip->midi_in_buf, PLOYTEC_PKT_SIZE, jockey3_midi_in_callback, chip);
 
-	snd_pcm_new(card, "Jockey 3 Audio", 0, 1, 0, &chip->pcm);
+	snd_pcm_new(card, "Jockey 3 Audio", 0, 1, 1, &chip->pcm);
 	strscpy(chip->pcm->name, "Jockey 3 Audio", sizeof(chip->pcm->name));
 	chip->pcm->private_data = chip;
 	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_PLAYBACK, &jockey3_pcm_ops);
+	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_CAPTURE, &jockey3_pcm_ops);
 	snd_pcm_set_managed_buffer_all(chip->pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
 
 	snd_rawmidi_new(card, "Jockey 3 MIDI", 0, 1, 1, &chip->rmidi);
@@ -418,9 +564,12 @@ static void jockey3_disconnect(struct usb_interface *intf)
 
 	if (chip && intf == chip->intf0) {
 		chip->stream_running = false;
+		chip->capture_running = false;
 		usb_kill_urb(chip->midi_in_urb);
-		for (i = 0; i < JOCKEY3_N_URBS; i++)
+		for (i = 0; i < JOCKEY3_N_URBS; i++) {
 			usb_kill_urb(chip->playback_urbs[i]);
+			usb_kill_urb(chip->capture_urbs[i]);
+		}
 
 		snd_card_disconnect(chip->card);
 		usb_driver_release_interface(&jockey3_driver, chip->intf1);
@@ -430,6 +579,8 @@ static void jockey3_disconnect(struct usb_interface *intf)
 		for (i = 0; i < JOCKEY3_N_URBS; i++) {
 			usb_free_urb(chip->playback_urbs[i]);
 			kfree(chip->playback_bufs[i]);
+			usb_free_urb(chip->capture_urbs[i]);
+			kfree(chip->capture_bufs[i]);
 		}
 		kfree(chip->xfer_buf);
 		snd_card_free_when_closed(chip->card);
