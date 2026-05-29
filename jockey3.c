@@ -17,7 +17,7 @@
 #define PLOYTEC_EP_PCM_OUT          0x05
 #define PLOYTEC_PKT_SIZE            512
 #define PLOYTEC_MIDI_IDLE_BYTE      0xFD
-#define PLOYTEC_FRAMES_PER_PKT      20
+#define PLOYTEC_FRAMES_PER_PKT      10
 #define JOCKEY3_N_URBS              8
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
@@ -65,23 +65,32 @@ static void jockey3_encode_frame(uint8_t *dest, const uint8_t *src)
 {
 	int i;
 
+	// First 24 bytes: odd channels (ALSA Channel 1 = Master L, ALSA Channel 3 = Headphone L)
 	for (i = 0; i < 8; i++) {
 		dest[i] = (((src[2] >> (7 - i)) & 1) << 0) |
-			  (((src[5] >> (7 - i)) & 1) << 1) |
-			  (((src[8] >> (7 - i)) & 1) << 2) |
-			  (((src[11] >> (7 - i)) & 1) << 3);
+			  (((src[8] >> (7 - i)) & 1) << 1);
 	}
 	for (i = 0; i < 8; i++) {
 		dest[8 + i] = (((src[1] >> (7 - i)) & 1) << 0) |
-			      (((src[4] >> (7 - i)) & 1) << 1) |
-			      (((src[7] >> (7 - i)) & 1) << 2) |
-			      (((src[10] >> (7 - i)) & 1) << 3);
+			      (((src[7] >> (7 - i)) & 1) << 1);
 	}
 	for (i = 0; i < 8; i++) {
 		dest[16 + i] = (((src[0] >> (7 - i)) & 1) << 0) |
-			       (((src[3] >> (7 - i)) & 1) << 1) |
-			       (((src[6] >> (7 - i)) & 1) << 2) |
-			       (((src[9] >> (7 - i)) & 1) << 3);
+			       (((src[6] >> (7 - i)) & 1) << 1);
+	}
+
+	// Second 24 bytes: even channels (ALSA Channel 2 = Master R, ALSA Channel 4 = Headphone R)
+	for (i = 0; i < 8; i++) {
+		dest[24 + i] = (((src[5] >> (7 - i)) & 1) << 0) |
+			       (((src[11] >> (7 - i)) & 1) << 1);
+	}
+	for (i = 0; i < 8; i++) {
+		dest[24 + 8 + i] = (((src[4] >> (7 - i)) & 1) << 0) |
+				   (((src[10] >> (7 - i)) & 1) << 1);
+	}
+	for (i = 0; i < 8; i++) {
+		dest[24 + 16 + i] = (((src[3] >> (7 - i)) & 1) << 0) |
+				    (((src[9] >> (7 - i)) & 1) << 1);
 	}
 }
 
@@ -104,7 +113,7 @@ static void jockey3_process_out_packet(struct jockey3_chip *chip, uint8_t *urb_b
 	alsa_frame_size = runtime->channels * 3;
 
 	for (f = 0; f < PLOYTEC_FRAMES_PER_PKT; f++) {
-		jockey3_encode_frame(urb_buf + f * 24, runtime->dma_area + chip->dma_off);
+		jockey3_encode_frame(urb_buf + f * 48, runtime->dma_area + chip->dma_off);
 		chip->dma_off += alsa_frame_size;
 		if (chip->dma_off >= pcm_buffer_size)
 			chip->dma_off -= pcm_buffer_size;
