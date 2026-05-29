@@ -61,20 +61,50 @@ struct jockey3_chip {
 	bool stream_running;
 };
 
-static void jockey3_encode_frame_silence(uint8_t *dest)
+static void jockey3_encode_frame(uint8_t *dest, const uint8_t *src)
 {
-	memset(dest, 0, 24);
+	int i;
+
+	for (i = 0; i < 8; i++) {
+		dest[i] = (((src[2] >> (7 - i)) & 1) << 0) |
+			  (((src[5] >> (7 - i)) & 1) << 1) |
+			  (((src[8] >> (7 - i)) & 1) << 2) |
+			  (((src[11] >> (7 - i)) & 1) << 3);
+	}
+	for (i = 0; i < 8; i++) {
+		dest[8 + i] = (((src[1] >> (7 - i)) & 1) << 0) |
+			      (((src[4] >> (7 - i)) & 1) << 1) |
+			      (((src[7] >> (7 - i)) & 1) << 2) |
+			      (((src[10] >> (7 - i)) & 1) << 3);
+	}
+	for (i = 0; i < 8; i++) {
+		dest[16 + i] = (((src[0] >> (7 - i)) & 1) << 0) |
+			       (((src[3] >> (7 - i)) & 1) << 1) |
+			       (((src[6] >> (7 - i)) & 1) << 2) |
+			       (((src[9] >> (7 - i)) & 1) << 3);
+	}
 }
 
 static void jockey3_process_out_packet(struct jockey3_chip *chip, uint8_t *urb_buf)
 {
-	struct snd_pcm_runtime *runtime = chip->playback_substream->runtime;
-	unsigned int pcm_buffer_size = snd_pcm_lib_buffer_bytes(chip->playback_substream);
-	unsigned int alsa_frame_size = runtime->channels * 3;
+	struct snd_pcm_substream *substream = chip->playback_substream;
+	struct snd_pcm_runtime *runtime;
+	unsigned int pcm_buffer_size;
+	unsigned int alsa_frame_size;
 	int f;
 
+	if (unlikely(!substream || !substream->runtime))
+		return;
+
+	runtime = substream->runtime;
+	if (unlikely(!runtime->dma_area))
+		return;
+
+	pcm_buffer_size = snd_pcm_lib_buffer_bytes(substream);
+	alsa_frame_size = runtime->channels * 3;
+
 	for (f = 0; f < PLOYTEC_FRAMES_PER_PKT; f++) {
-		jockey3_encode_frame_silence(urb_buf + f * 24);
+		jockey3_encode_frame(urb_buf + f * 24, runtime->dma_area + chip->dma_off);
 		chip->dma_off += alsa_frame_size;
 		if (chip->dma_off >= pcm_buffer_size)
 			chip->dma_off -= pcm_buffer_size;
@@ -83,7 +113,7 @@ static void jockey3_process_out_packet(struct jockey3_chip *chip, uint8_t *urb_b
 
 	if (chip->period_off >= runtime->period_size * alsa_frame_size) {
 		chip->period_off %= runtime->period_size * alsa_frame_size;
-		snd_pcm_period_elapsed(chip->playback_substream);
+		snd_pcm_period_elapsed(substream);
 	}
 }
 
@@ -362,7 +392,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->rmidi->info_flags = SNDRV_RAWMIDI_INFO_INPUT | SNDRV_RAWMIDI_INFO_OUTPUT | SNDRV_RAWMIDI_INFO_DUPLEX;
 
 	strscpy(card->driver, "snd-reloop-jockey3", sizeof(card->driver));
-	strscpy(card->shortname, "Jockey 3 Remix", sizeof(card->shortname));
+	strscpy(card->shortname, "Jockey 3", sizeof(card->shortname));
 
 	usb_driver_claim_interface(&jockey3_driver, intf1, chip);
 
@@ -408,6 +438,6 @@ static struct usb_driver jockey3_driver = {
 module_usb_driver(jockey3_driver);
 
 MODULE_AUTHOR("Frank van de Pol");
-MODULE_DESCRIPTION("Reloop Jockey 3 Remix ALSA Driver (PCM Silence + MIDI)");
+MODULE_DESCRIPTION("Reloop Jockey 3 ALSA Driver (PCM Silence + MIDI)");
 MODULE_LICENSE("GPL");
 MODULE_SOFTDEP("pre: snd-pcm snd-rawmidi");
