@@ -8,6 +8,7 @@
 #include <sound/initval.h>
 #include <sound/rawmidi.h>
 #include <sound/pcm.h>
+#include <linux/mutex.h>
 
 #define RELOOP_VENDOR_ID          0x200c
 #define RELOOP_JOCKEY3_REMIX_PID  0x1037
@@ -45,6 +46,8 @@ struct jockey3_chip {
 	struct usb_interface *intf1;
 	unsigned char *xfer_buf;
 	unsigned int current_rate;
+	struct mutex rate_mutex;
+	int active_streams;
 
 	struct urb *midi_in_urb;
 	unsigned char *midi_in_buf;
@@ -367,12 +370,22 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 		runtime->hw.channels_max = 6;
 		chip->capture_substream = substream;
 	}
+
+	mutex_lock(&chip->rate_mutex);
+	chip->active_streams++;
+	mutex_unlock(&chip->rate_mutex);
+
 	return 0;
 }
 
 static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+
+	mutex_lock(&chip->rate_mutex);
+	chip->active_streams--;
+	mutex_unlock(&chip->rate_mutex);
+
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 		chip->playback_substream = NULL;
 	else
@@ -426,10 +439,18 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 	unsigned int rate = params_rate(hw_params);
-	int ret;
+	int ret = 0;
+
+	mutex_lock(&chip->rate_mutex);
 
 	if (chip->current_rate == rate)
-		return 0;
+		goto out;
+
+	if (chip->active_streams > 1) {
+		dev_err(&chip->intf0->dev, "Cannot change rate while other stream is active\n");
+		ret = -EBUSY;
+		goto out;
+	}
 
 	jockey3_stop_urbs(chip);
 
@@ -439,6 +460,8 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 
 	jockey3_start_urbs(chip);
 
+out:
+	mutex_unlock(&chip->rate_mutex);
 	return ret;
 }
 
@@ -560,6 +583,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback_lock);
 	spin_lock_init(&chip->capture_lock);
+	mutex_init(&chip->rate_mutex);
 
 	chip->xfer_buf = kmalloc(64, GFP_KERNEL);
 	chip->midi_in_buf = kmalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
