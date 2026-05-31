@@ -1,7 +1,7 @@
 # Makefile for out-of-tree ALSA driver for Reloop Jockey 3 devices
 
 obj-m += snd-reloop-jockey3.o
-snd-reloop-jockey3-objs := jockey3.o
+snd-reloop-jockey3-objs := jockey3.o ploytec_codec.o
 
 # If you have multiple source files:
 # myalsa-objs := myalsa-main.o myalsa-pcm.o myalsa-controls.o
@@ -12,13 +12,13 @@ snd-reloop-jockey3-objs := jockey3.o
 KDIR ?= /usr/src/linux-source-6.12
 
 all:
-	make -C $(KDIR) M=$(PWD) modules
+	make -C $(KDIR) M="$(PWD)" modules
 
 clean:
-	make -C $(KDIR) M=$(PWD) clean
+	make -C $(KDIR) M="$(PWD)" clean
 
 #install:
-#	make -C $(KDIR) M=$(PWD) modules_install INSTALL_MOD_PATH=/tmp/mod-install  # for testing
+#	make -C $(KDIR) M="$(PWD)" modules_install INSTALL_MOD_PATH=/tmp/mod-install  # for testing
 
 
 
