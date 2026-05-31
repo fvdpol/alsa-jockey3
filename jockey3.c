@@ -34,6 +34,7 @@ module_param(debug, int, 0644);
 #define j3_dbg(dev, fmt, ...) do { } while (0)
 #endif
 
+
 struct jockey3_chip {
 	struct snd_card *card;
 	struct usb_device *dev;
@@ -41,6 +42,7 @@ struct jockey3_chip {
 	struct usb_interface *intf1;
 	unsigned char *xfer_buf;
 	unsigned int current_rate;
+	unsigned int midi_out_acc;
 	struct mutex rate_mutex;
 	int active_streams;
 
@@ -164,7 +166,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	struct jockey3_chip *chip = urb->context;
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
 	unsigned long flags;
-	int ret;
+	int i, ret;
 
 	if (urb->status) {
 		if (urb->status == -ENOENT || urb->status == -ECONNRESET || 
@@ -177,19 +179,37 @@ static void jockey3_playback_callback(struct urb *urb)
 			jockey3_process_out_packet(chip, buf);
 		} else {
 			memset(buf, 0, PLOYTEC_PKT_SIZE);
-			buf[481] = 0xFF;
 		}
 
 		spin_lock(&chip->midi_lock);
-		if (chip->midi_out_substream) {
-			u8 byte;
-			if (snd_rawmidi_transmit(chip->midi_out_substream, &byte, 1) == 1)
-				buf[480] = byte;
-			else
+		
+		/* 
+		 * Rate limit MIDI to ~3125 bytes/sec (standard MIDI baud rate).
+		 * The Ploytec firmware has a small MIDI buffer; sending at the 
+		 * PCM packet rate (~4410-4800 pkts/sec) causes buffer overflows 
+		 * and message truncation in the device.
+		 */
+		chip->midi_out_acc += 3125;
+		if (chip->midi_out_acc >= (chip->current_rate / 10)) {
+			chip->midi_out_acc -= (chip->current_rate / 10);
+			if (chip->midi_out_substream) {
+				u8 byte;
+				if (snd_rawmidi_transmit(chip->midi_out_substream, &byte, 1) == 1)
+					buf[480] = byte;
+				else
+					buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
+			} else {
 				buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
+			}
 		} else {
 			buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
 		}
+
+		/* Ploytec Sync byte and gap padding */
+		buf[481] = 0xFF;
+		for (i = 482; i < PLOYTEC_PKT_SIZE; i++)
+			buf[i] = PLOYTEC_MIDI_IDLE_BYTE;
+
 		spin_unlock(&chip->midi_lock);
 		spin_unlock_irqrestore(&chip->playback_lock, flags);
 	}
@@ -526,7 +546,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	struct usb_interface *intf1;
 	struct snd_card *card;
 	struct jockey3_chip *chip;
-	int ret, i;
+	int ret, i, j;
 
 	if (intf->cur_altsetting->desc.bInterfaceNumber != 0)
 		return -ENODEV;
@@ -551,6 +571,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->dev = dev;
 	chip->intf0 = intf;
 	chip->intf1 = intf1;
+	chip->midi_out_acc = 0;
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback_lock);
 	spin_lock_init(&chip->capture_lock);
@@ -563,8 +584,12 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		chip->playback_bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
 		chip->playback_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
-		chip->playback_bufs[i][480] = PLOYTEC_MIDI_IDLE_BYTE;
+		
+		/* Initial pattern: all MIDI positions are idle, sync byte at 481 */
+		for (j = 480; j < PLOYTEC_PKT_SIZE; j++)
+			chip->playback_bufs[i][j] = PLOYTEC_MIDI_IDLE_BYTE;
 		chip->playback_bufs[i][481] = 0xFF;
+
 		usb_fill_bulk_urb(chip->playback_urbs[i], dev, usb_sndbulkpipe(dev, PLOYTEC_EP_PCM_OUT),
 				  chip->playback_bufs[i], PLOYTEC_PKT_SIZE, jockey3_playback_callback, chip);
 
