@@ -24,9 +24,6 @@ Unlike most modern DJ controllers, the Reloop Jockey 3 does not use a class-comp
 - Rate switching
 
 **Pending / In Progress**
-- Robust error and disconnect handling
-- Rate switching corner cases
-- Code cleanup and architecture improvements
 - Long-term stability testing
 - Confirmation of other Reloop Jockey 3 hardware
 - Kernel tree integration (eventual goal)
