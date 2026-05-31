@@ -22,14 +22,17 @@ static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
 static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
 static int debug = 1;
 
+
+#define CARD_NAME "Reloop Jockey 3"
+
 module_param_array(index, int, NULL, 0444);
-MODULE_PARM_DESC(index, "Index value for Reloop Jockey 3 soundcard.");
+MODULE_PARM_DESC(index, "Index value for " CARD_NAME " soundcard.");
 module_param_array(id, charp, NULL, 0444);
-MODULE_PARM_DESC(id, "ID string for Reloop Jockey 3 soundcard.");
+MODULE_PARM_DESC(id, "ID string for " CARD_NAME " soundcard.");
 module_param_array(enable, bool, NULL, 0444);
-MODULE_PARM_DESC(enable, "Enable Reloop Jockey 3 soundcard.");
+MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 module_param(debug, int, 0644);
-MODULE_PARM_DESC(debug, "Enable debug messages.");
+MODULE_PARM_DESC(debug, "Enable debug messages for " CARD_NAME " soundcard.");
 
 #define J3_DEBUG
 #ifdef J3_DEBUG
@@ -606,22 +609,22 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	usb_fill_bulk_urb(chip->midi_in_urb, dev, usb_rcvbulkpipe(dev, PLOYTEC_EP_MIDI_IN),
 			  chip->midi_in_buf, PLOYTEC_PKT_SIZE, jockey3_midi_in_callback, chip);
 
-	snd_pcm_new(card, "Reloop Jockey 3 Audio", 0, 1, 1, &chip->pcm);
-	strscpy(chip->pcm->name, "Reloop Jockey 3 Audio", sizeof(chip->pcm->name));
+	snd_pcm_new(card, CARD_NAME " Audio", 0, 1, 1, &chip->pcm);
+	strscpy(chip->pcm->name, CARD_NAME " Audio", sizeof(chip->pcm->name));
 	chip->pcm->private_data = chip;
 	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_PLAYBACK, &jockey3_pcm_ops);
 	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_CAPTURE, &jockey3_pcm_ops);
 	snd_pcm_set_managed_buffer_all(chip->pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
 
-	snd_rawmidi_new(card, "Reloop Jockey 3 MIDI", 0, 1, 1, &chip->rmidi);
+	snd_rawmidi_new(card, CARD_NAME " MIDI", 0, 1, 1, &chip->rmidi);
 	chip->rmidi->private_data = chip;
-	strscpy(chip->rmidi->name, "Reloop Jockey 3 MIDI", sizeof(chip->rmidi->name));
+	strscpy(chip->rmidi->name, CARD_NAME " MIDI", sizeof(chip->rmidi->name));
 	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_INPUT, &jockey3_midi_in_ops);
 	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_OUTPUT, &jockey3_midi_out_ops);
 	chip->rmidi->info_flags = SNDRV_RAWMIDI_INFO_INPUT | SNDRV_RAWMIDI_INFO_OUTPUT | SNDRV_RAWMIDI_INFO_DUPLEX;
 
 	strscpy(card->driver, "snd-reloop-jockey3", sizeof(card->driver));
-	strscpy(card->shortname, "Reloop Jockey 3", sizeof(card->shortname));
+	strscpy(card->shortname, CARD_NAME, sizeof(card->shortname));
 	sprintf(card->longname, "%s at USB %s", card->shortname, dev_name(&dev->dev));
 
 	if (card->id[0] == '\0')
@@ -692,6 +695,6 @@ static struct usb_driver jockey3_driver = {
 module_usb_driver(jockey3_driver);
 
 MODULE_AUTHOR("Frank van de Pol");
-MODULE_DESCRIPTION("Reloop Jockey 3 ALSA Driver");
+MODULE_DESCRIPTION(CARD_NAME " ALSA Driver");
 MODULE_LICENSE("GPL");
 MODULE_SOFTDEP("pre: snd-pcm snd-rawmidi");
