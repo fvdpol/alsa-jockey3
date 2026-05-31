@@ -1,33 +1,84 @@
-# Linux ALSA Reloop Jockey 3 Driver
+# ALSA Driver for Reloop Jockey 3
 
-This is a work-in-progress to develop a Linux ALSA driver for the (discontinued) Reloop Jockey 3 DJ Controller.
+[![License](https://img.shields.io/github/license/fvdpol/alsa-jockey3)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/fvdpol/alsa-jockey3)](https://github.com/fvdpol/alsa-jockey3/stargazers)
 
-Unlike most newer devices this devices does not offer a class compliant USB interface for audio and midi data, but uses a proprietary protocol. 
-Vendor drivers are required to operate this device, which were only shipped for Windows and MacOS. Since the device is now discontinued it does not receive driver updates anymore.
+**Linux ALSA driver for the Reloop Jockey 3 DJ controller** 
+
+Unlike most modern DJ controllers, the Reloop Jockey 3 does not use a class-compliant USB audio/MIDI interface. It relies on a proprietary USB protocol developed by **Ploytec GmbH**. This driver aims to provide native Linux support via ALSA.
+
+## Features
+
+- **MIDI**: Full bidirectional support (in/out) of the control surface
+- **Audio**:
+  - Playback: 4 channels
+  - Capture: 6 channels
+- **Sample Rates**: Dynamic switching between 44.1 kHz, 48 kHz, 88.2 kHz, and 96 kHz
+- **Low-level USB protocol** reverse-engineered via OpenVizsla + Windows/macOS driver analysis
 
 ## Current Status
 
-- Functional MIDI Receive and Transmit
-- Functional Audio playback 4 channels; 
-- Functional Audio capture 6 channels
-- Supports dynamic rate switching, supporting 44.1 kHz, 48 kHz, 88.2 kHz and 96 kHz
+**Working**
+- Audio playback and capture
+- MIDI I/O
+- Rate switching
 
-### Pending
-
-- Handling rate switching corner cases
-- Error/disconnet handling 
-- Improvements in code quality
+**Pending / In Progress**
+- Robust error and disconnect handling
+- Rate switching corner cases
+- Code cleanup and architecture improvements
 - Long-term stability testing
-- Integration in Linux kernel tree
+- Confirmation of other Reloop Jockey 3 hardware
+- Kernel tree integration (eventual goal)
 
-## Supported Hardware
+## Supported Devices
 
-| Device | Status | 
-|--------|--------|
-| Reloop Jockey 3 Master Edition |  should work, untested | 
-| Reloop Jockey 3 Remix | Tested | 
+| Device                        | Status              | Notes                     |
+|-------------------------------|---------------------|---------------------------|
+| Reloop Jockey 3 Remix         | ✅ Tested & Working | Primary development target |
+| Reloop Jockey 3 Master Edition| ⚠️ Untested         | Should work — feedback welcome |
+
+> **Note**: I do not personally own a Master Edition. Testing reports from users with this model would be very helpful.
+
+## Installation
+
+### Prerequisites
+
+- Linux kernel headers (`linux-headers-$(uname -r)`)
+- `build-essential`, `git`
+- ALSA utils (`alsa-utils`)
+
+### Build & Install
+
+```bash
+git clone https://github.com/fvdpol/alsa-jockey3.git
+cd alsa-jockey3
+make
+sudo make install
+```
+
+TODO add suggestions on usage (audio, midi)
 
 
-theoretically this driver should the Reloop Jockey 3 Master Edition controller, but I do not have access to this hardware to validate. Please share feedback if you are able to test.
+# Technical Background
+The driver was developed by analyzing USB traffic between the controller and official drivers (Windows/macOS) using an OpenVizsla USB protocol analyzer. Additional insights were drawn from the [Ozzy project](https://github.com/mischa85/Ozzy).
 
 
+# Contributing
+
+Contributions are very welcome! This is a complex reverse-engineered driver.
+Areas especially appreciated:
+
+- Testing on Master Edition
+- Stability / error handling improvements
+- Code review & refactoring
+- Documentation
+
+# License
+
+This project is licensed under the GPLv3. See [LICENSE](LICENSE.md) for details.
+
+
+# Related Projects
+
+[Ozzy](https://github.com/mischa85/Ozzy) — Another Ploytec-based device driver, supporting on Allen & Heath devices
