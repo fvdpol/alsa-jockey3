@@ -23,9 +23,13 @@ static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
 static int debug = 1;
 
 module_param_array(index, int, NULL, 0444);
+MODULE_PARM_DESC(index, "Index value for Reloop Jockey 3 soundcard.");
 module_param_array(id, charp, NULL, 0444);
+MODULE_PARM_DESC(id, "ID string for Reloop Jockey 3 soundcard.");
 module_param_array(enable, bool, NULL, 0444);
+MODULE_PARM_DESC(enable, "Enable Reloop Jockey 3 soundcard.");
 module_param(debug, int, 0644);
+MODULE_PARM_DESC(debug, "Enable debug messages.");
 
 #define J3_DEBUG
 #ifdef J3_DEBUG
@@ -618,7 +622,11 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 
 	strscpy(card->driver, "snd-reloop-jockey3", sizeof(card->driver));
 	strscpy(card->shortname, "Reloop Jockey 3", sizeof(card->shortname));
+	sprintf(card->longname, "%s at USB %s", card->shortname, dev_name(&dev->dev));
 
+	if (card->id[0] == '\0')
+		snd_card_set_id(card, "RJ3");
+		
 	usb_driver_claim_interface(&jockey3_driver, intf1, chip);
 
 	snd_card_register(card);
