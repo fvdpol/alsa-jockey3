@@ -3,13 +3,13 @@
 [![License](https://img.shields.io/github/license/fvdpol/alsa-jockey3)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/fvdpol/alsa-jockey3)](https://github.com/fvdpol/alsa-jockey3/stargazers)
 
-**Linux ALSA driver for the discontinued Reloop Jockey 3 DJ controller** (both Master Edition and Remix models).
+**Linux ALSA driver for the Reloop Jockey 3 DJ controller** 
 
-Unlike most modern DJ controllers, the Jockey 3 does not use a class-compliant USB audio/MIDI interface. It relies on a proprietary USB protocol developed by **Ploytec GmbH**. This driver aims to provide native Linux support via ALSA.
+Unlike most modern DJ controllers, the Reloop Jockey 3 does not use a class-compliant USB audio/MIDI interface. It relies on a proprietary USB protocol developed by **Ploytec GmbH**. This driver aims to provide native Linux support via ALSA.
 
 ## Features
 
-- **MIDI**: Full bidirectional support (in/out)
+- **MIDI**: Full bidirectional support (in/out) of the control surface
 - **Audio**:
   - Playback: 4 channels
   - Capture: 6 channels
@@ -28,7 +28,7 @@ Unlike most modern DJ controllers, the Jockey 3 does not use a class-compliant U
 - Rate switching corner cases
 - Code cleanup and architecture improvements
 - Long-term stability testing
-- Confirmation of other Jockey 3 hardware
+- Confirmation of other Reloop Jockey 3 hardware
 - Kernel tree integration (eventual goal)
 
 ## Supported Devices
@@ -61,11 +61,11 @@ TODO add suggestions on usage (audio, midi)
 
 
 # Technical Background
-The driver was developed by analyzing USB traffic between the controller and official drivers (Windows/macOS) using an OpenVizsla USB protocol analyzer. Additional insights were drawn from the Ozzy project.
-Contributing
+The driver was developed by analyzing USB traffic between the controller and official drivers (Windows/macOS) using an OpenVizsla USB protocol analyzer. Additional insights were drawn from the [Ozzy project](https://github.com/mischa85/Ozzy).
 
 
 # Contributing
+
 Contributions are very welcome! This is a complex reverse-engineered driver.
 Areas especially appreciated:
 
@@ -75,7 +75,8 @@ Areas especially appreciated:
 - Documentation
 
 # License
-This project is licensed under the GPLv2 (or later). See LICENSE for details.
+
+This project is licensed under the GPLv3. See [LICENSE](LICENSE.md) for details.
 
 
 # Related Projects
