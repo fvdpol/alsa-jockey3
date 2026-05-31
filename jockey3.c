@@ -67,7 +67,6 @@ struct jockey3_chip {
 	unsigned int capture_dma_off;
 	unsigned int capture_period_off;
 	bool capture_running;
-	int capture_callback_count;
 };
 
 static void jockey3_process_out_packet(struct jockey3_chip *chip, uint8_t *urb_buf)
@@ -147,10 +146,6 @@ static void jockey3_capture_callback(struct urb *urb)
 			return;
 		dev_err(&chip->intf0->dev, "Capture URB error: %d\n", urb->status);
 	} else {
-		if (chip->capture_callback_count < 10) {
-			j3_dbg(&chip->intf0->dev, "Capture callback %d, len %d\n", 
-			       chip->capture_callback_count++, urb->actual_length);
-		}
 		spin_lock_irqsave(&chip->capture_lock, flags);
 		if (chip->capture_running && chip->capture_substream) {
 			jockey3_process_in_packet(chip, urb->transfer_buffer);
@@ -340,7 +335,6 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	} else {
 		chip->capture_dma_off = 0;
 		chip->capture_period_off = 0;
-		chip->capture_callback_count = 0;
 	}
 	return 0;
 }
@@ -422,18 +416,17 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	}
 
 	jockey3_stop_urbs(chip);
+	msleep(50);
 
 	ret = jockey3_set_rate(chip, rate);
 	if (ret == 0) {
 		chip->current_rate = rate;
-		j3_dbg(&chip->intf0->dev, "Rate changed to %u successfully\n", rate);
-		j3_dbg(&chip->intf0->dev, "Re-initiating handshake after rate change\n");
-		jockey3_handshake_step(chip);
+		j3_dbg(&chip->intf0->dev, "Rate changed to %u successfully, resetting device\n", rate);
+		usb_reset_device(chip->dev);
 	} else {
 		dev_err(&chip->intf0->dev, "Rate change to %u failed: %d\n", rate, ret);
+		jockey3_start_urbs(chip);
 	}
-
-	jockey3_start_urbs(chip);
 
 out:
 	mutex_unlock(&chip->rate_mutex);
@@ -616,10 +609,30 @@ static void jockey3_disconnect(struct usb_interface *intf)
 	usb_set_intfdata(intf, NULL);
 }
 
+static int jockey3_pre_reset(struct usb_interface *intf)
+{
+	struct jockey3_chip *chip = usb_get_intfdata(intf);
+	if (chip && intf == chip->intf0)
+		jockey3_stop_urbs(chip);
+	return 0;
+}
+
+static int jockey3_post_reset(struct usb_interface *intf)
+{
+	struct jockey3_chip *chip = usb_get_intfdata(intf);
+	if (chip && intf == chip->intf0) {
+		jockey3_handshake_step(chip);
+		jockey3_start_urbs(chip);
+	}
+	return 0;
+}
+
 static struct usb_driver jockey3_driver = {
 	.name = "snd-reloop-jockey3",
 	.probe = jockey3_probe,
 	.disconnect = jockey3_disconnect,
+	.pre_reset = jockey3_pre_reset,
+	.post_reset = jockey3_post_reset,
 	.id_table = jockey3_ids
 };
 
