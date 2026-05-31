@@ -142,7 +142,8 @@ static void jockey3_capture_callback(struct urb *urb)
 	int ret;
 
 	if (urb->status) {
-		if (urb->status == -ENOENT || urb->status == -ECONNRESET || urb->status == -ESHUTDOWN)
+		if (urb->status == -ENOENT || urb->status == -ECONNRESET || 
+		    urb->status == -ESHUTDOWN || urb->status == -EPROTO)
 			return;
 		dev_err(&chip->intf0->dev, "Capture URB error: %d\n", urb->status);
 	} else {
@@ -154,7 +155,7 @@ static void jockey3_capture_callback(struct urb *urb)
 	}
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
-	if (ret < 0)
+	if (ret < 0 && ret != -ENODEV && ret != -EPERM)
 		dev_err(&chip->intf0->dev, "Failed to resubmit capture URB: %d\n", ret);
 }
 
@@ -163,32 +164,39 @@ static void jockey3_playback_callback(struct urb *urb)
 	struct jockey3_chip *chip = urb->context;
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
 	unsigned long flags;
+	int ret;
 
-	if (urb->status)
-		return;
-
-	spin_lock_irqsave(&chip->playback_lock, flags);
-	if (chip->stream_running && chip->playback_substream) {
-		jockey3_process_out_packet(chip, buf);
+	if (urb->status) {
+		if (urb->status == -ENOENT || urb->status == -ECONNRESET || 
+		    urb->status == -ESHUTDOWN || urb->status == -EPROTO)
+			return;
+		dev_err(&chip->intf0->dev, "Playback URB error: %d\n", urb->status);
 	} else {
-		memset(buf, 0, PLOYTEC_PKT_SIZE);
-		buf[481] = 0xFF;
-	}
+		spin_lock_irqsave(&chip->playback_lock, flags);
+		if (chip->stream_running && chip->playback_substream) {
+			jockey3_process_out_packet(chip, buf);
+		} else {
+			memset(buf, 0, PLOYTEC_PKT_SIZE);
+			buf[481] = 0xFF;
+		}
 
-	spin_lock(&chip->midi_lock);
-	if (chip->midi_out_substream) {
-		u8 byte;
-		if (snd_rawmidi_transmit(chip->midi_out_substream, &byte, 1) == 1)
-			buf[480] = byte;
-		else
+		spin_lock(&chip->midi_lock);
+		if (chip->midi_out_substream) {
+			u8 byte;
+			if (snd_rawmidi_transmit(chip->midi_out_substream, &byte, 1) == 1)
+				buf[480] = byte;
+			else
+				buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
+		} else {
 			buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
-	} else {
-		buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
+		}
+		spin_unlock(&chip->midi_lock);
+		spin_unlock_irqrestore(&chip->playback_lock, flags);
 	}
-	spin_unlock(&chip->midi_lock);
-	spin_unlock_irqrestore(&chip->playback_lock, flags);
 
-	usb_submit_urb(urb, GFP_ATOMIC);
+	ret = usb_submit_urb(urb, GFP_ATOMIC);
+	if (ret < 0 && ret != -ENODEV && ret != -EPERM)
+		dev_err(&chip->intf0->dev, "Failed to resubmit playback URB: %d\n", ret);
 }
 
 static void jockey3_midi_in_callback(struct urb *urb)
@@ -196,23 +204,29 @@ static void jockey3_midi_in_callback(struct urb *urb)
 	struct jockey3_chip *chip = urb->context;
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
 	unsigned long flags;
-	int i;
+	int i, ret;
 
-	if (urb->status)
-		return;
-
-	spin_lock_irqsave(&chip->midi_lock, flags);
-	if (chip->midi_in_substream) {
-		for (i = 0; i < urb->actual_length; i++) {
-			if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
-				j3_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n", buf[i]);
-				snd_rawmidi_receive(chip->midi_in_substream, &buf[i], 1);
+	if (urb->status) {
+		if (urb->status == -ENOENT || urb->status == -ECONNRESET || 
+		    urb->status == -ESHUTDOWN || urb->status == -EPROTO)
+			return;
+		dev_err(&chip->intf0->dev, "MIDI IN URB error: %d\n", urb->status);
+	} else {
+		spin_lock_irqsave(&chip->midi_lock, flags);
+		if (chip->midi_in_substream) {
+			for (i = 0; i < urb->actual_length; i++) {
+				if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
+					j3_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n", buf[i]);
+					snd_rawmidi_receive(chip->midi_in_substream, &buf[i], 1);
+				}
 			}
 		}
+		spin_unlock_irqrestore(&chip->midi_lock, flags);
 	}
-	spin_unlock_irqrestore(&chip->midi_lock, flags);
 
-	usb_submit_urb(urb, GFP_ATOMIC);
+	ret = usb_submit_urb(urb, GFP_ATOMIC);
+	if (ret < 0 && ret != -ENODEV && ret != -EPERM)
+		dev_err(&chip->intf0->dev, "Failed to resubmit MIDI IN URB: %d\n", ret);
 }
 
 static void jockey3_stop_urbs(struct jockey3_chip *chip)
