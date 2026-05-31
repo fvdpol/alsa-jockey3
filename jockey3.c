@@ -422,6 +422,12 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	if (ret == 0) {
 		chip->current_rate = rate;
 		j3_dbg(&chip->intf0->dev, "Rate changed to %u successfully, resetting device\n", rate);
+		/* 
+		 * Mandatory: Ploytec chipsets require a full USB reset to re-synchronize 
+		 * the internal engine after a sample rate change. Without this, the 
+		 * Capture EP (0x86) may stop transmitting data, leading to EIO.
+		 * pre_reset/post_reset callbacks handle the URB lifecycle.
+		 */
 		usb_reset_device(chip->dev);
 	} else {
 		dev_err(&chip->intf0->dev, "Rate change to %u failed: %d\n", rate, ret);
