@@ -15,6 +15,11 @@
 #define RELOOP_JOCKEY3_REMIX_PID  0x1037
 #define RELOOP_JOCKEY3_MASTER_PID 0x1009
 
+enum {
+	JOCKEY3_REMIX,
+	JOCKEY3_MASTER
+};
+
 #define JOCKEY3_N_URBS              8
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
@@ -539,8 +544,8 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 }
 
 static const struct usb_device_id jockey3_ids[] = {
-	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_REMIX_PID) },
-	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_MASTER_PID) },
+	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_REMIX_PID), .driver_info = JOCKEY3_REMIX },
+	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_MASTER_PID), .driver_info = JOCKEY3_MASTER },
 	{ }
 };
 MODULE_DEVICE_TABLE(usb, jockey3_ids);
@@ -625,7 +630,13 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 
 	strscpy(card->driver, "snd-reloop-jockey3", sizeof(card->driver));
 	strscpy(card->shortname, CARD_NAME, sizeof(card->shortname));
-	sprintf(card->longname, "%s at USB %s", card->shortname, dev_name(&dev->dev));
+
+	if (usb_id->driver_info == JOCKEY3_REMIX)
+		snprintf(card->longname, sizeof(card->longname),
+			 "%s Remix at USB %s", CARD_NAME, dev_name(&dev->dev));
+	else
+		snprintf(card->longname, sizeof(card->longname),
+			 "%s Master Edition at USB %s", CARD_NAME, dev_name(&dev->dev));
 
 	if (card->id[0] == '\0')
 		snd_card_set_id(card, "RJ3");
