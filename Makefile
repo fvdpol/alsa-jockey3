@@ -3,10 +3,6 @@
 obj-m += snd-reloop-jockey3.o
 snd-reloop-jockey3-objs := jockey3.o ploytec_codec.o
 
-# If you have multiple source files:
-# myalsa-objs := myalsa-main.o myalsa-pcm.o myalsa-controls.o
-
-
 # Build against the kernel on the target machine
 #KDIR ?= /lib/modules/$(shell uname -r)/build
 KDIR ?= /usr/src/linux-source-6.12
