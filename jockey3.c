@@ -1,4 +1,9 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ *   ALSA driver for Reloop Jockey 3 devices
+ *
+ *   Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
+ */
 
 #include <linux/module.h>
 #include <linux/usb.h>
@@ -11,22 +16,18 @@
 #include <linux/mutex.h>
 #include "ploytec_codec.h"
 
-#define RELOOP_VENDOR_ID          0x200c
-#define RELOOP_JOCKEY3_ME_PID     0x1009
-#define RELOOP_JOCKEY3_REMIX_PID  0x1037
+#define RELOOP_VENDOR_ID         0x200c
+#define RELOOP_JOCKEY3_ME_PID    0x1009
+#define RELOOP_JOCKEY3_REMIX_PID 0x1037
 
-enum {
-	JOCKEY3_ME,
-	JOCKEY3_REMIX
-};
+enum { JOCKEY3_ME, JOCKEY3_REMIX };
 
-#define JOCKEY3_N_URBS              8
+#define JOCKEY3_N_URBS 8
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
 static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
 static int debug = 1;
-
 
 #define CARD_NAME "Reloop Jockey 3"
 
@@ -41,11 +42,16 @@ MODULE_PARM_DESC(debug, "Enable debug messages for " CARD_NAME " soundcard.");
 
 #define J3_DEBUG
 #ifdef J3_DEBUG
-#define j3_dbg(dev, fmt, ...) do { if (debug) dev_info(dev, fmt, ##__VA_ARGS__); } while (0)
+#define j3_dbg(dev, fmt, ...) \
+	do { \
+		if (debug) \
+			dev_info(dev, fmt, ##__VA_ARGS__); \
+	} while (0)
 #else
-#define j3_dbg(dev, fmt, ...) do { } while (0)
+#define j3_dbg(dev, fmt, ...) \
+	do { \
+	} while (0)
 #endif
-
 
 struct jockey3_chip {
 	struct snd_card *card;
@@ -55,7 +61,7 @@ struct jockey3_chip {
 	unsigned char *xfer_buf;
 	unsigned int current_rate;
 	unsigned int midi_out_acc;
-	struct mutex rate_mutex;
+	struct mutex rate_mutex; // serializes sample rate changes and active stream tracking
 	int active_streams;
 
 	struct urb *midi_in_urb;
@@ -63,13 +69,13 @@ struct jockey3_chip {
 	struct snd_rawmidi *rmidi;
 	struct snd_rawmidi_substream *midi_in_substream;
 	struct snd_rawmidi_substream *midi_out_substream;
-	spinlock_t midi_lock;
+	spinlock_t midi_lock; // protects MIDI substreams in completion handlers and rate-limiting
 
 	struct snd_pcm *pcm;
 	struct snd_pcm_substream *playback_substream;
 	struct urb *playback_urbs[JOCKEY3_N_URBS];
 	unsigned char *playback_bufs[JOCKEY3_N_URBS];
-	spinlock_t playback_lock;
+	spinlock_t playback_lock; // protects playback stream state and buffer offsets
 	unsigned int dma_off;
 	unsigned int period_off;
 	bool stream_running;
@@ -77,13 +83,13 @@ struct jockey3_chip {
 	struct snd_pcm_substream *capture_substream;
 	struct urb *capture_urbs[JOCKEY3_N_URBS];
 	unsigned char *capture_bufs[JOCKEY3_N_URBS];
-	spinlock_t capture_lock;
+	spinlock_t capture_lock; // protects capture stream state and buffer offsets
 	unsigned int capture_dma_off;
 	unsigned int capture_period_off;
 	bool capture_running;
 };
 
-static void jockey3_process_out_packet(struct jockey3_chip *chip, uint8_t *urb_buf)
+static void jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 {
 	struct snd_pcm_substream *substream = chip->playback_substream;
 	struct snd_pcm_runtime *runtime;
@@ -116,7 +122,7 @@ static void jockey3_process_out_packet(struct jockey3_chip *chip, uint8_t *urb_b
 	}
 }
 
-static void jockey3_process_in_packet(struct jockey3_chip *chip, const uint8_t *urb_buf)
+static void jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_buf)
 {
 	struct snd_pcm_substream *substream = chip->capture_substream;
 	struct snd_pcm_runtime *runtime;
@@ -156,15 +162,15 @@ static void jockey3_capture_callback(struct urb *urb)
 	int ret;
 
 	if (urb->status) {
-		if (urb->status == -ENOENT || urb->status == -ECONNRESET || 
+		if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
 		    urb->status == -ESHUTDOWN || urb->status == -EPROTO)
 			return;
-		dev_err(&chip->intf0->dev, "Capture URB error: %d\n", urb->status);
+		dev_err(&chip->intf0->dev, "Capture URB error: %d\n",
+			urb->status);
 	} else {
 		spin_lock_irqsave(&chip->capture_lock, flags);
-		if (chip->capture_running && chip->capture_substream) {
+		if (chip->capture_running && chip->capture_substream)
 			jockey3_process_in_packet(chip, urb->transfer_buffer);
-		}
 		spin_unlock_irqrestore(&chip->capture_lock, flags);
 	}
 
@@ -181,24 +187,23 @@ static void jockey3_playback_callback(struct urb *urb)
 	int i, ret;
 
 	if (urb->status) {
-		if (urb->status == -ENOENT || urb->status == -ECONNRESET || 
+		if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
 		    urb->status == -ESHUTDOWN || urb->status == -EPROTO)
 			return;
 		dev_err(&chip->intf0->dev, "Playback URB error: %d\n", urb->status);
 	} else {
 		spin_lock_irqsave(&chip->playback_lock, flags);
-		if (chip->stream_running && chip->playback_substream) {
+		if (chip->stream_running && chip->playback_substream)
 			jockey3_process_out_packet(chip, buf);
-		} else {
+		else
 			memset(buf, 0, PLOYTEC_PKT_SIZE);
-		}
 
 		spin_lock(&chip->midi_lock);
-		
-		/* 
+
+		/*
 		 * Rate limit MIDI to ~3125 bytes/sec (standard MIDI baud rate).
-		 * The Ploytec firmware has a small MIDI buffer; sending at the 
-		 * PCM packet rate (~4410-4800 pkts/sec) causes buffer overflows 
+		 * The Ploytec firmware has a small MIDI buffer; sending at the
+		 * PCM packet rate (~4410-4800 pkts/sec) causes buffer overflows
 		 * and message truncation in the device.
 		 */
 		chip->midi_out_acc += 3125;
@@ -206,6 +211,7 @@ static void jockey3_playback_callback(struct urb *urb)
 			chip->midi_out_acc -= (chip->current_rate / 10);
 			if (chip->midi_out_substream) {
 				u8 byte;
+
 				if (snd_rawmidi_transmit(chip->midi_out_substream, &byte, 1) == 1)
 					buf[480] = byte;
 				else
@@ -239,7 +245,7 @@ static void jockey3_midi_in_callback(struct urb *urb)
 	int i, ret;
 
 	if (urb->status) {
-		if (urb->status == -ENOENT || urb->status == -ECONNRESET || 
+		if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
 		    urb->status == -ESHUTDOWN || urb->status == -EPROTO)
 			return;
 		dev_err(&chip->intf0->dev, "MIDI IN URB error: %d\n", urb->status);
@@ -264,6 +270,7 @@ static void jockey3_midi_in_callback(struct urb *urb)
 static void jockey3_stop_urbs(struct jockey3_chip *chip)
 {
 	int i;
+
 	j3_dbg(&chip->intf0->dev, "Stopping all URBs\n");
 	usb_kill_urb(chip->midi_in_urb);
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
@@ -275,14 +282,17 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 static void jockey3_start_urbs(struct jockey3_chip *chip)
 {
 	int i, ret;
+
 	j3_dbg(&chip->intf0->dev, "Starting all URBs\n");
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		ret = usb_submit_urb(chip->playback_urbs[i], GFP_KERNEL);
 		if (ret < 0)
-			dev_err(&chip->intf0->dev, "Failed to submit playback URB %d: %d\n", i, ret);
+			dev_err(&chip->intf0->dev, "Failed to submit playback URB %d: %d\n",
+				i, ret);
 		ret = usb_submit_urb(chip->capture_urbs[i], GFP_KERNEL);
 		if (ret < 0)
-			dev_err(&chip->intf0->dev, "Failed to submit capture URB %d: %d\n", i, ret);
+			dev_err(&chip->intf0->dev, "Failed to submit capture URB %d: %d\n",
+				i, ret);
 	}
 	ret = usb_submit_urb(chip->midi_in_urb, GFP_KERNEL);
 	if (ret < 0)
@@ -298,14 +308,16 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 	chip->xfer_buf[2] = (rate >> 16) & 0xFF;
 
 	j3_dbg(&chip->intf0->dev, "Setting rate to %u Hz\n", rate);
-	ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0), 0x01, 0x22, 0x0100, 0x0086, chip->xfer_buf, 3, 2000);
+	ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0), 0x01,
+			      0x22, 0x0100, 0x0086, chip->xfer_buf, 3, 2000);
 	if (ret < 0) {
 		dev_err(&chip->intf0->dev, "Failed to set rate on EP 0x86: %d\n", ret);
 		return ret;
 	}
 	j3_dbg(&chip->intf0->dev, "Rate set on EP 0x86 OK\n");
 	msleep(50);
-	ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0), 0x01, 0x22, 0x0100, 0x0005, chip->xfer_buf, 3, 2000);
+	ret = usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0), 0x01,
+			      0x22, 0x0100, 0x0005, chip->xfer_buf, 3, 2000);
 	if (ret < 0) {
 		dev_err(&chip->intf0->dev, "Failed to set rate on EP 0x05: %d\n", ret);
 		return ret;
@@ -322,11 +334,17 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 
 	j3_dbg(&chip->intf0->dev, "PCM open stream %d\n", substream->stream);
 
-	runtime->hw.info = SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
-			   SNDRV_PCM_INFO_BLOCK_TRANSFER | SNDRV_PCM_INFO_MMAP_VALID;
+	runtime->hw.info =
+		SNDRV_PCM_INFO_MMAP |
+		SNDRV_PCM_INFO_INTERLEAVED |
+		SNDRV_PCM_INFO_BLOCK_TRANSFER |
+		SNDRV_PCM_INFO_MMAP_VALID;
 	runtime->hw.formats = SNDRV_PCM_FMTBIT_S24_3LE;
-	runtime->hw.rates = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 |
-			    SNDRV_PCM_RATE_88200 | SNDRV_PCM_RATE_96000;
+	runtime->hw.rates =
+		SNDRV_PCM_RATE_44100 |
+		SNDRV_PCM_RATE_48000 |
+		SNDRV_PCM_RATE_88200 |
+		SNDRV_PCM_RATE_96000;
 	runtime->hw.rate_min = 44100;
 	runtime->hw.rate_max = 96000;
 	runtime->hw.buffer_bytes_max = 1024 * 1024;
@@ -374,6 +392,7 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+
 	j3_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		chip->dma_off = 0;
@@ -408,6 +427,7 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 		return bytes_to_frames(substream->runtime, chip->dma_off);
 	else
@@ -416,13 +436,15 @@ static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream
 
 static int jockey3_handshake_step(struct jockey3_chip *chip)
 {
-	uint8_t status;
+	u8 status;
 	int ret;
 
-	usb_control_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0), 0x56, 0xC0, 0, 0, chip->xfer_buf, 15, 2000);
+	usb_control_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0),
+			0x56, 0xC0, 0, 0, chip->xfer_buf, 15, 2000);
 	msleep(20);
 
-	ret = usb_control_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0), 0x49, 0xC0, 0, 0, chip->xfer_buf, 1, 2000);
+	ret = usb_control_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0),
+			      0x49, 0xC0, 0, 0, chip->xfer_buf, 1, 2000);
 	if (ret < 0)
 		return ret;
 	status = chip->xfer_buf[0];
@@ -434,7 +456,8 @@ static int jockey3_handshake_step(struct jockey3_chip *chip)
 	msleep(20);
 
 	if (!(status & 0x20))
-		usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0), 0x49, 0x40, (uint16_t)(int16_t)(int8_t)(status | 0x20), 0, NULL, 0, 2000);
+		usb_control_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0), 0x49,
+				0x40, (uint16_t)(int16_t)(int8_t)(status | 0x20), 0, NULL, 0, 2000);
 
 	return 0;
 }
@@ -446,7 +469,8 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	unsigned int rate = params_rate(hw_params);
 	int ret = 0;
 
-	j3_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n", rate, chip->active_streams);
+	j3_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n",
+	       rate, chip->active_streams);
 
 	mutex_lock(&chip->rate_mutex);
 
@@ -467,10 +491,11 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	ret = jockey3_set_rate(chip, rate);
 	if (ret == 0) {
 		chip->current_rate = rate;
-		j3_dbg(&chip->intf0->dev, "Rate changed to %u successfully, resetting device\n", rate);
-		/* 
-		 * Mandatory: Ploytec chipsets require a full USB reset to re-synchronize 
-		 * the internal engine after a sample rate change. Without this, the 
+		j3_dbg(&chip->intf0->dev, "Rate changed to %u successfully, resetting device\n",
+		       rate);
+		/*
+		 * Mandatory: Ploytec chipsets require a full USB reset to re-synchronize
+		 * the internal engine after a sample rate change. Without this, the
 		 * Capture EP (0x86) may stop transmitting data, leading to EIO.
 		 * pre_reset/post_reset callbacks handle the URB lifecycle.
 		 */
@@ -494,23 +519,41 @@ static const struct snd_pcm_ops jockey3_pcm_ops = {
 	.pointer = jockey3_pcm_pointer,
 };
 
-static int jockey3_midi_in_open(struct snd_rawmidi_substream *substream) { return 0; }
-static int jockey3_midi_in_close(struct snd_rawmidi_substream *substream) { return 0; }
+static int jockey3_midi_in_open(struct snd_rawmidi_substream *substream)
+{
+	return 0;
+}
+
+static int jockey3_midi_in_close(struct snd_rawmidi_substream *substream)
+{
+	return 0;
+}
+
 static void jockey3_midi_in_trigger(struct snd_rawmidi_substream *substream, int up)
 {
 	struct jockey3_chip *chip = substream->rmidi->private_data;
 	unsigned long flags;
+
 	spin_lock_irqsave(&chip->midi_lock, flags);
 	chip->midi_in_substream = up ? substream : NULL;
 	spin_unlock_irqrestore(&chip->midi_lock, flags);
 }
 
-static int jockey3_midi_out_open(struct snd_rawmidi_substream *substream) { return 0; }
-static int jockey3_midi_out_close(struct snd_rawmidi_substream *substream) { return 0; }
+static int jockey3_midi_out_open(struct snd_rawmidi_substream *substream)
+{
+	return 0;
+}
+
+static int jockey3_midi_out_close(struct snd_rawmidi_substream *substream)
+{
+	return 0;
+}
+
 static void jockey3_midi_out_trigger(struct snd_rawmidi_substream *substream, int up)
 {
 	struct jockey3_chip *chip = substream->rmidi->private_data;
 	unsigned long flags;
+
 	spin_lock_irqsave(&chip->midi_lock, flags);
 	chip->midi_out_substream = up ? substream : NULL;
 	spin_unlock_irqrestore(&chip->midi_lock, flags);
@@ -543,10 +586,10 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 	return 0;
 }
 
-static const struct usb_device_id jockey3_ids[] = {	
+static const struct usb_device_id jockey3_ids[] = {
 	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_ME_PID), .driver_info = JOCKEY3_ME },
 	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_REMIX_PID), .driver_info = JOCKEY3_REMIX },
-	{ }
+	{}
 };
 MODULE_DEVICE_TABLE(usb, jockey3_ids);
 
@@ -574,7 +617,8 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	if (i >= SNDRV_CARDS)
 		return -ENODEV;
 
-	ret = snd_card_new(&intf->dev, index[i], id[i], THIS_MODULE, sizeof(struct jockey3_chip), &card);
+	ret = snd_card_new(&intf->dev, index[i], id[i], THIS_MODULE,
+			   sizeof(struct jockey3_chip), &card);
 	if (ret < 0)
 		return ret;
 
@@ -596,23 +640,29 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		chip->playback_bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
 		chip->playback_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
-		
+
 		/* Initial pattern: all MIDI positions are idle, sync byte at 481 */
 		for (j = 480; j < PLOYTEC_PKT_SIZE; j++)
 			chip->playback_bufs[i][j] = PLOYTEC_MIDI_IDLE_BYTE;
 		chip->playback_bufs[i][481] = 0xFF;
 
-		usb_fill_bulk_urb(chip->playback_urbs[i], dev, usb_sndbulkpipe(dev, PLOYTEC_EP_PCM_OUT),
-				  chip->playback_bufs[i], PLOYTEC_PKT_SIZE, jockey3_playback_callback, chip);
+		usb_fill_bulk_urb(chip->playback_urbs[i], dev,
+				  usb_sndbulkpipe(dev, PLOYTEC_EP_PCM_OUT),
+				  chip->playback_bufs[i], PLOYTEC_PKT_SIZE,
+				  jockey3_playback_callback, chip);
 
 		chip->capture_bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
 		chip->capture_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
-		usb_fill_bulk_urb(chip->capture_urbs[i], dev, usb_rcvbulkpipe(dev, PLOYTEC_EP_PCM_IN),
-				  chip->capture_bufs[i], PLOYTEC_PKT_SIZE, jockey3_capture_callback, chip);
+		usb_fill_bulk_urb(chip->capture_urbs[i], dev,
+				  usb_rcvbulkpipe(dev, PLOYTEC_EP_PCM_IN),
+				  chip->capture_bufs[i], PLOYTEC_PKT_SIZE,
+				  jockey3_capture_callback, chip);
 	}
 
-	usb_fill_bulk_urb(chip->midi_in_urb, dev, usb_rcvbulkpipe(dev, PLOYTEC_EP_MIDI_IN),
-			  chip->midi_in_buf, PLOYTEC_PKT_SIZE, jockey3_midi_in_callback, chip);
+	usb_fill_bulk_urb(chip->midi_in_urb, dev,
+			  usb_rcvbulkpipe(dev, PLOYTEC_EP_MIDI_IN),
+			  chip->midi_in_buf, PLOYTEC_PKT_SIZE,
+			  jockey3_midi_in_callback, chip);
 
 	snd_pcm_new(card, CARD_NAME " Audio", 0, 1, 1, &chip->pcm);
 	strscpy(chip->pcm->name, CARD_NAME " Audio", sizeof(chip->pcm->name));
@@ -626,29 +676,30 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	strscpy(chip->rmidi->name, CARD_NAME " MIDI", sizeof(chip->rmidi->name));
 	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_INPUT, &jockey3_midi_in_ops);
 	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_OUTPUT, &jockey3_midi_out_ops);
-	chip->rmidi->info_flags = SNDRV_RAWMIDI_INFO_INPUT | SNDRV_RAWMIDI_INFO_OUTPUT | SNDRV_RAWMIDI_INFO_DUPLEX;
+	chip->rmidi->info_flags = SNDRV_RAWMIDI_INFO_INPUT |
+				  SNDRV_RAWMIDI_INFO_OUTPUT |
+				  SNDRV_RAWMIDI_INFO_DUPLEX;
 
 	strscpy(card->driver, "snd-reloop-jockey3", sizeof(card->driver));
 	strscpy(card->shortname, CARD_NAME, sizeof(card->shortname));
 
-	
 	switch (usb_id->driver_info) {
-		case JOCKEY3_ME:
-			snprintf(card->longname, sizeof(card->longname),
-				 "%s Master Edition at USB %s", CARD_NAME, dev_name(&dev->dev));
-			break;	
-		case JOCKEY3_REMIX:
-			snprintf(card->longname, sizeof(card->longname),
-			 	"%s Remix at USB %s", CARD_NAME, dev_name(&dev->dev));
-			break;
-		default:
-			snprintf(card->longname, sizeof(card->longname),
-				 "%s at USB %s", CARD_NAME, dev_name(&dev->dev));	
+	case JOCKEY3_ME:
+		snprintf(card->longname, sizeof(card->longname),
+			 "%s Master Edition at USB %s", CARD_NAME, dev_name(&dev->dev));
+		break;
+	case JOCKEY3_REMIX:
+		snprintf(card->longname, sizeof(card->longname),
+			 "%s Remix at USB %s", CARD_NAME, dev_name(&dev->dev));
+		break;
+	default:
+		snprintf(card->longname, sizeof(card->longname),
+			 "%s at USB %s", CARD_NAME, dev_name(&dev->dev));
 	}
 
 	if (card->id[0] == '\0')
 		snd_card_set_id(card, "RJ3");
-		
+
 	usb_driver_claim_interface(&jockey3_driver, intf1, chip);
 
 	snd_card_register(card);
@@ -687,6 +738,7 @@ static void jockey3_disconnect(struct usb_interface *intf)
 static int jockey3_pre_reset(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
+
 	if (chip && intf == chip->intf0)
 		jockey3_stop_urbs(chip);
 	return 0;
@@ -695,6 +747,7 @@ static int jockey3_pre_reset(struct usb_interface *intf)
 static int jockey3_post_reset(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
+
 	if (chip && intf == chip->intf0) {
 		jockey3_handshake_step(chip);
 		jockey3_start_urbs(chip);
