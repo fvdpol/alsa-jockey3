@@ -248,8 +248,10 @@ static void jockey3_midi_in_callback(struct urb *urb)
 			if (chip->midi_in_substream) {
 				for (i = 0; i < urb->actual_length; i++) {
 					if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
-						j3_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n", buf[i]);
-						snd_rawmidi_receive(chip->midi_in_substream, &buf[i], 1);
+						j3_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n",
+						       buf[i]);
+						snd_rawmidi_receive(chip->midi_in_substream,
+								    &buf[i], 1);
 					}
 				}
 			}
@@ -444,13 +446,14 @@ static int jockey3_handshake_step(struct jockey3_chip *chip)
 	}
 	msleep(20);
 
-	ret = usb_control_msg_recv(chip->dev, 0, 0x56, 0xC0, 0, 0, chip->xfer_buf, 15, 2000, GFP_KERNEL);
-	if (ret < 0) {
+	ret = usb_control_msg_recv(chip->dev, 0, 0x56, 0xC0, 0, 0, chip->xfer_buf, 15, 2000,
+				   GFP_KERNEL);
+	if (ret < 0)
 		j3_dbg(&chip->intf0->dev, "Handshake step 1 (0x56) failed: %d (ignoring)\n", ret);
-	}
 	msleep(20);
 
-	ret = usb_control_msg_recv(chip->dev, 0, 0x49, 0xC0, 0, 0, chip->xfer_buf, 1, 2000, GFP_KERNEL);
+	ret = usb_control_msg_recv(chip->dev, 0, 0x49, 0xC0, 0, 0, chip->xfer_buf, 1, 2000,
+				   GFP_KERNEL);
 	if (ret < 0) {
 		dev_err(&chip->intf0->dev, "Handshake step 2 (0x49 R) failed: %d\n", ret);
 		return ret;
@@ -606,6 +609,7 @@ static struct usb_driver jockey3_driver;
 static void jockey3_release_intf1(void *data)
 {
 	struct usb_interface *intf1 = data;
+
 	usb_driver_release_interface(&jockey3_driver, intf1);
 }
 
