@@ -14,6 +14,7 @@
 #include <sound/rawmidi.h>
 #include <sound/pcm.h>
 #include <linux/mutex.h>
+#include <linux/cleanup.h>
 #include "ploytec_codec.h"
 
 #define RELOOP_VENDOR_ID         0x200c
@@ -157,7 +158,6 @@ static void jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_b
 static void jockey3_capture_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
-	unsigned long flags;
 	int ret;
 
 	if (urb->status) {
@@ -167,10 +167,10 @@ static void jockey3_capture_callback(struct urb *urb)
 		dev_err(&chip->intf0->dev, "Capture URB error: %d\n",
 			urb->status);
 	} else {
-		spin_lock_irqsave(&chip->capture_lock, flags);
-		if (chip->capture_running && chip->capture_substream)
-			jockey3_process_in_packet(chip, urb->transfer_buffer);
-		spin_unlock_irqrestore(&chip->capture_lock, flags);
+		scoped_guard(spinlock_irqsave, &chip->capture_lock) {
+			if (chip->capture_running && chip->capture_substream)
+				jockey3_process_in_packet(chip, urb->transfer_buffer);
+		}
 	}
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
@@ -182,7 +182,6 @@ static void jockey3_playback_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
-	unsigned long flags;
 	int i, ret;
 
 	if (urb->status) {
@@ -191,13 +190,13 @@ static void jockey3_playback_callback(struct urb *urb)
 			return;
 		dev_err(&chip->intf0->dev, "Playback URB error: %d\n", urb->status);
 	} else {
-		spin_lock_irqsave(&chip->playback_lock, flags);
+		guard(spinlock_irqsave)(&chip->playback_lock);
 		if (chip->stream_running && chip->playback_substream)
 			jockey3_process_out_packet(chip, buf);
 		else
 			memset(buf, 0, PLOYTEC_PKT_SIZE);
 
-		spin_lock(&chip->midi_lock);
+		guard(spinlock)(&chip->midi_lock);
 
 		/*
 		 * Rate limit MIDI to ~3125 bytes/sec (standard MIDI baud rate).
@@ -226,9 +225,6 @@ static void jockey3_playback_callback(struct urb *urb)
 		buf[481] = 0xFF;
 		for (i = 482; i < PLOYTEC_PKT_SIZE; i++)
 			buf[i] = PLOYTEC_MIDI_IDLE_BYTE;
-
-		spin_unlock(&chip->midi_lock);
-		spin_unlock_irqrestore(&chip->playback_lock, flags);
 	}
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
@@ -240,7 +236,6 @@ static void jockey3_midi_in_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
-	unsigned long flags;
 	int i, ret;
 
 	if (urb->status) {
@@ -249,16 +244,16 @@ static void jockey3_midi_in_callback(struct urb *urb)
 			return;
 		dev_err(&chip->intf0->dev, "MIDI IN URB error: %d\n", urb->status);
 	} else {
-		spin_lock_irqsave(&chip->midi_lock, flags);
-		if (chip->midi_in_substream) {
-			for (i = 0; i < urb->actual_length; i++) {
-				if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
-					j3_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n", buf[i]);
-					snd_rawmidi_receive(chip->midi_in_substream, &buf[i], 1);
+		scoped_guard(spinlock_irqsave, &chip->midi_lock) {
+			if (chip->midi_in_substream) {
+				for (i = 0; i < urb->actual_length; i++) {
+					if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
+						j3_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n", buf[i]);
+						snd_rawmidi_receive(chip->midi_in_substream, &buf[i], 1);
+					}
 				}
 			}
 		}
-		spin_unlock_irqrestore(&chip->midi_lock, flags);
 	}
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
@@ -531,11 +526,9 @@ static int jockey3_midi_in_close(struct snd_rawmidi_substream *substream)
 static void jockey3_midi_in_trigger(struct snd_rawmidi_substream *substream, int up)
 {
 	struct jockey3_chip *chip = substream->rmidi->private_data;
-	unsigned long flags;
 
-	spin_lock_irqsave(&chip->midi_lock, flags);
+	guard(spinlock_irqsave)(&chip->midi_lock);
 	chip->midi_in_substream = up ? substream : NULL;
-	spin_unlock_irqrestore(&chip->midi_lock, flags);
 }
 
 static int jockey3_midi_out_open(struct snd_rawmidi_substream *substream)
@@ -551,11 +544,9 @@ static int jockey3_midi_out_close(struct snd_rawmidi_substream *substream)
 static void jockey3_midi_out_trigger(struct snd_rawmidi_substream *substream, int up)
 {
 	struct jockey3_chip *chip = substream->rmidi->private_data;
-	unsigned long flags;
 
-	spin_lock_irqsave(&chip->midi_lock, flags);
+	guard(spinlock_irqsave)(&chip->midi_lock);
 	chip->midi_out_substream = up ? substream : NULL;
-	spin_unlock_irqrestore(&chip->midi_lock, flags);
 }
 
 static const struct snd_rawmidi_ops jockey3_midi_in_ops = {
