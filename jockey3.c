@@ -357,10 +357,9 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 		chip->capture_substream = substream;
 	}
 
-	mutex_lock(&chip->rate_mutex);
+	guard(mutex)(&chip->rate_mutex);
 	chip->active_streams++;
 	j3_dbg(&chip->intf0->dev, "active_streams incremented to %d\n", chip->active_streams);
-	mutex_unlock(&chip->rate_mutex);
 
 	return 0;
 }
@@ -371,10 +370,9 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 
 	j3_dbg(&chip->intf0->dev, "PCM close stream %d\n", substream->stream);
 
-	mutex_lock(&chip->rate_mutex);
+	guard(mutex)(&chip->rate_mutex);
 	chip->active_streams--;
 	j3_dbg(&chip->intf0->dev, "active_streams decremented to %d\n", chip->active_streams);
-	mutex_unlock(&chip->rate_mutex);
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 		chip->playback_substream = NULL;
