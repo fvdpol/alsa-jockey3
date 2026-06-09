@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 config SND_USB_JOCKEY3
 	tristate "Reloop Jockey 3 support"
+	default m
 	depends on SND_USB && USB
 	select SND_PCM
 	select SND_RAWMIDI
