@@ -27,7 +27,7 @@ enum { JOCKEY3_ME, JOCKEY3_REMIX };
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
 static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
-static int debug = 1;
+static int debug;
 
 #define CARD_NAME "Reloop Jockey 3"
 
@@ -49,8 +49,7 @@ MODULE_PARM_DESC(debug, "Enable debug messages for " CARD_NAME " soundcard.");
 	} while (0)
 #else
 #define j3_dbg(dev, fmt, ...) \
-	do { \
-	} while (0)
+	do { } while (0)
 #endif
 
 struct jockey3_chip {
@@ -601,6 +600,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	struct usb_interface *intf1;
 	struct snd_card *card;
 	struct jockey3_chip *chip;
+	char *jockey3_type;
 	int ret, i, j;
 
 	if (intf->cur_altsetting->desc.bInterfaceNumber != 0)
@@ -685,17 +685,16 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 
 	switch (usb_id->driver_info) {
 	case JOCKEY3_ME:
-		snprintf(card->longname, sizeof(card->longname),
-			 "%s Master Edition at USB %s", CARD_NAME, dev_name(&dev->dev));
+		jockey3_type = "Master Edition";
 		break;
 	case JOCKEY3_REMIX:
-		snprintf(card->longname, sizeof(card->longname),
-			 "%s Remix at USB %s", CARD_NAME, dev_name(&dev->dev));
+		jockey3_type = "Remix";
 		break;
 	default:
-		snprintf(card->longname, sizeof(card->longname),
-			 "%s at USB %s", CARD_NAME, dev_name(&dev->dev));
+		jockey3_type = "Unknown";
 	}
+	snprintf(card->longname, sizeof(card->longname),
+		 "%s %s at USB %s", CARD_NAME, jockey3_type, dev_name(&dev->dev));
 
 	if (card->id[0] == '\0')
 		snd_card_set_id(card, "RJ3");
