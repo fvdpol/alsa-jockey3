@@ -653,6 +653,11 @@ static void jockey3_free_urb_action(void *data)
 	usb_free_urb(data);
 }
 
+static void jockey3_kfree_action(void *data)
+{
+	kfree(data);
+}
+
 static void jockey3_stop_urbs_action(void *data)
 {
 	jockey3_stop_urbs(data);
@@ -697,13 +702,19 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	spin_lock_init(&chip->capture_lock);
 	mutex_init(&chip->rate_mutex);
 
-	chip->xfer_buf = devm_kmalloc(&intf->dev, 64, GFP_KERNEL);
+	chip->xfer_buf = kmalloc(64, GFP_KERNEL);
 	if (!chip->xfer_buf)
 		return -ENOMEM;
+	ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action, chip->xfer_buf);
+	if (ret)
+		return ret;
 
-	chip->midi_in_buf = devm_kmalloc(&intf->dev, PLOYTEC_PKT_SIZE, GFP_KERNEL);
+	chip->midi_in_buf = kmalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
 	if (!chip->midi_in_buf)
 		return -ENOMEM;
+	ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action, chip->midi_in_buf);
+	if (ret)
+		return ret;
 
 	chip->midi_in_urb = usb_alloc_urb(0, GFP_KERNEL);
 	if (!chip->midi_in_urb)
@@ -713,9 +724,13 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 		return ret;
 
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
-		chip->playback_bufs[i] = devm_kzalloc(&intf->dev, PLOYTEC_PKT_SIZE, GFP_KERNEL);
+		chip->playback_bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
 		if (!chip->playback_bufs[i])
 			return -ENOMEM;
+		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
+					       chip->playback_bufs[i]);
+		if (ret)
+			return ret;
 
 		chip->playback_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
 		if (!chip->playback_urbs[i])
@@ -735,9 +750,13 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 				  chip->playback_bufs[i], PLOYTEC_PKT_SIZE,
 				  jockey3_playback_callback, chip);
 
-		chip->capture_bufs[i] = devm_kzalloc(&intf->dev, PLOYTEC_PKT_SIZE, GFP_KERNEL);
+		chip->capture_bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
 		if (!chip->capture_bufs[i])
 			return -ENOMEM;
+		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
+					       chip->capture_bufs[i]);
+		if (ret)
+			return ret;
 
 		chip->capture_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
 		if (!chip->capture_urbs[i])
