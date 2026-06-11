@@ -830,12 +830,12 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	if (ret)
 		return ret;
 
-	ret = snd_card_register(card);
+	usb_set_intfdata(intf, chip);
+	ret = jockey3_handshake(chip);
 	if (ret < 0)
 		return ret;
 
-	usb_set_intfdata(intf, chip);
-	ret = jockey3_handshake(chip);
+	ret = snd_card_register(card);
 	if (ret < 0)
 		return ret;
 
