@@ -202,6 +202,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	struct jockey3_chip *chip = urb->context;
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
 	struct snd_pcm_substream *substream = NULL;
+	struct snd_rawmidi_substream *midi_substream = NULL;
 	bool period_elapsed = false;
 	int i, ret;
 
@@ -241,19 +242,19 @@ static void jockey3_playback_callback(struct urb *urb)
 		chip->midi_out_acc += 3125;
 		if (chip->midi_out_acc >= (chip->current_rate / 10)) {
 			chip->midi_out_acc -= (chip->current_rate / 10);
-			if (chip->midi_out_substream) {
-				u8 byte;
-
-				if (snd_rawmidi_transmit(chip->midi_out_substream, &byte, 1) == 1)
-					buf[480] = byte;
-				else
-					buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
-			} else {
-				buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
-			}
-		} else {
-			buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
+			midi_substream = chip->midi_out_substream;
 		}
+	}
+
+	if (midi_substream) {
+		u8 byte;
+
+		if (snd_rawmidi_transmit(midi_substream, &byte, 1) == 1)
+			buf[480] = byte;
+		else
+			buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
+	} else {
+		buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
 	}
 
 	/* Ploytec Sync byte and gap padding */
