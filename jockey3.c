@@ -63,6 +63,7 @@ struct jockey3_chip {
 	unsigned int midi_out_acc;
 	struct mutex rate_mutex; // serializes sample rate changes and active stream tracking
 	int active_streams;
+	bool disconnected;
 
 	struct urb *midi_in_urb;
 	unsigned char *midi_in_buf;
@@ -168,16 +169,23 @@ static void jockey3_capture_callback(struct urb *urb)
 
 	if (urb->status) {
 		if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
-		    urb->status == -ESHUTDOWN || urb->status == -EPROTO)
+		    urb->status == -ESHUTDOWN)
 			return;
-		dev_err(&chip->intf0->dev, "Capture URB error: %d\n",
+
+		/* Fatal error: stop resubmitting to prevent interrupt storm */
+		dev_err(&chip->intf0->dev, "Capture URB fatal error: %d\n",
 			urb->status);
-	} else {
-		scoped_guard(spinlock_irqsave, &chip->capture_lock) {
-			if (chip->capture_running && chip->capture_substream) {
-				period_elapsed = jockey3_process_in_packet(chip, urb->transfer_buffer);
-				substream = chip->capture_substream;
-			}
+		chip->disconnected = true;
+		return;
+	}
+
+	if (unlikely(chip->disconnected))
+		return;
+
+	scoped_guard(spinlock_irqsave, &chip->capture_lock) {
+		if (chip->capture_running && chip->capture_substream) {
+			period_elapsed = jockey3_process_in_packet(chip, urb->transfer_buffer);
+			substream = chip->capture_substream;
 		}
 	}
 
@@ -199,24 +207,31 @@ static void jockey3_playback_callback(struct urb *urb)
 
 	if (urb->status) {
 		if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
-		    urb->status == -ESHUTDOWN || urb->status == -EPROTO)
+		    urb->status == -ESHUTDOWN)
 			return;
-		dev_err(&chip->intf0->dev, "Playback URB error: %d\n", urb->status);
-	} else {
-		scoped_guard(spinlock_irqsave, &chip->playback_lock) {
-			if (chip->stream_running && chip->playback_substream) {
-				period_elapsed = jockey3_process_out_packet(chip, buf);
-				substream = chip->playback_substream;
-			} else {
-				memset(buf, 0, PLOYTEC_PKT_SIZE);
-			}
+
+		/* Fatal error: stop resubmitting to prevent interrupt storm */
+		dev_err(&chip->intf0->dev, "Playback URB fatal error: %d\n", urb->status);
+		chip->disconnected = true;
+		return;
+	}
+
+	if (unlikely(chip->disconnected))
+		return;
+
+	scoped_guard(spinlock_irqsave, &chip->playback_lock) {
+		if (chip->stream_running && chip->playback_substream) {
+			period_elapsed = jockey3_process_out_packet(chip, buf);
+			substream = chip->playback_substream;
+		} else {
+			memset(buf, 0, PLOYTEC_PKT_SIZE);
 		}
+	}
 
-		if (period_elapsed && substream)
-			snd_pcm_period_elapsed(substream);
+	if (period_elapsed && substream)
+		snd_pcm_period_elapsed(substream);
 
-		guard(spinlock)(&chip->midi_lock);
-
+	scoped_guard(spinlock, &chip->midi_lock) {
 		/*
 		 * Rate limit MIDI to ~3125 bytes/sec (standard MIDI baud rate).
 		 * The Ploytec firmware has a small MIDI buffer; sending at the
@@ -239,12 +254,12 @@ static void jockey3_playback_callback(struct urb *urb)
 		} else {
 			buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
 		}
-
-		/* Ploytec Sync byte and gap padding */
-		buf[481] = 0xFF;
-		for (i = 482; i < PLOYTEC_PKT_SIZE; i++)
-			buf[i] = PLOYTEC_MIDI_IDLE_BYTE;
 	}
+
+	/* Ploytec Sync byte and gap padding */
+	buf[481] = 0xFF;
+	for (i = 482; i < PLOYTEC_PKT_SIZE; i++)
+		buf[i] = PLOYTEC_MIDI_IDLE_BYTE;
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0 && ret != -ENODEV && ret != -EPERM)
@@ -259,19 +274,26 @@ static void jockey3_midi_in_callback(struct urb *urb)
 
 	if (urb->status) {
 		if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
-		    urb->status == -ESHUTDOWN || urb->status == -EPROTO)
+		    urb->status == -ESHUTDOWN)
 			return;
-		dev_err(&chip->intf0->dev, "MIDI IN URB error: %d\n", urb->status);
-	} else {
-		scoped_guard(spinlock_irqsave, &chip->midi_lock) {
-			if (chip->midi_in_substream) {
-				for (i = 0; i < urb->actual_length; i++) {
-					if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
-						j3_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n",
-						       buf[i]);
-						snd_rawmidi_receive(chip->midi_in_substream,
-								    &buf[i], 1);
-					}
+
+		/* Fatal error: stop resubmitting to prevent interrupt storm */
+		dev_err(&chip->intf0->dev, "MIDI IN URB fatal error: %d\n", urb->status);
+		chip->disconnected = true;
+		return;
+	}
+
+	if (unlikely(chip->disconnected))
+		return;
+
+	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
+		if (chip->midi_in_substream) {
+			for (i = 0; i < urb->actual_length; i++) {
+				if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
+					j3_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n",
+					       buf[i]);
+					snd_rawmidi_receive(chip->midi_in_substream,
+							    &buf[i], 1);
 				}
 			}
 		}
@@ -298,6 +320,9 @@ static void jockey3_start_urbs(struct jockey3_chip *chip)
 {
 	int i, ret;
 
+	if (chip->disconnected)
+		return;
+
 	j3_dbg(&chip->intf0->dev, "Starting all URBs\n");
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		ret = usb_submit_urb(chip->playback_urbs[i], GFP_KERNEL);
@@ -317,6 +342,9 @@ static void jockey3_start_urbs(struct jockey3_chip *chip)
 static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 {
 	int ret;
+
+	if (chip->disconnected)
+		return -ENODEV;
 
 	chip->xfer_buf[0] = rate & 0xFF;
 	chip->xfer_buf[1] = (rate >> 8) & 0xFF;
@@ -348,6 +376,9 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 
 	j3_dbg(&chip->intf0->dev, "PCM open stream %d\n", substream->stream);
+
+	if (chip->disconnected)
+		return -ENODEV;
 
 	runtime->hw.info =
 		SNDRV_PCM_INFO_MMAP |
@@ -412,6 +443,10 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 
 	j3_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
+
+	if (chip->disconnected)
+		return -ENODEV;
+
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		guard(spinlock_irqsave)(&chip->playback_lock);
 		chip->dma_off = 0;
@@ -429,6 +464,10 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 
 	j3_dbg(&chip->intf0->dev, "PCM trigger stream %d, cmd %d\n", substream->stream, cmd);
+
+	if (chip->disconnected)
+		return -ENODEV;
+
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		guard(spinlock_irqsave)(&chip->playback_lock);
 		if (cmd == SNDRV_PCM_TRIGGER_START)
@@ -467,6 +506,9 @@ static int jockey3_handshake_step(struct jockey3_chip *chip)
 {
 	u8 status;
 	int ret;
+
+	if (chip->disconnected)
+		return -ENODEV;
 
 	ret = usb_set_interface(chip->dev, 0, 1);
 	if (ret < 0) {
@@ -519,6 +561,9 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	j3_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n",
 	       rate, chip->active_streams);
 
+	if (chip->disconnected)
+		return -ENODEV;
+
 	guard(mutex)(&chip->rate_mutex);
 
 	if (chip->current_rate == rate) {
@@ -565,6 +610,10 @@ static const struct snd_pcm_ops jockey3_pcm_ops = {
 
 static int jockey3_midi_in_open(struct snd_rawmidi_substream *substream)
 {
+	struct jockey3_chip *chip = substream->rmidi->private_data;
+
+	if (chip->disconnected)
+		return -ENODEV;
 	return 0;
 }
 
@@ -583,6 +632,10 @@ static void jockey3_midi_in_trigger(struct snd_rawmidi_substream *substream, int
 
 static int jockey3_midi_out_open(struct snd_rawmidi_substream *substream)
 {
+	struct jockey3_chip *chip = substream->rmidi->private_data;
+
+	if (chip->disconnected)
+		return -ENODEV;
 	return 0;
 }
 
@@ -697,6 +750,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->intf0 = intf;
 	chip->intf1 = intf1;
 	chip->midi_out_acc = 0;
+	chip->disconnected = false;
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback_lock);
 	spin_lock_init(&chip->capture_lock);
@@ -850,6 +904,7 @@ static void jockey3_disconnect(struct usb_interface *intf)
 	if (chip && intf == chip->intf0) {
 		chip->stream_running = false;
 		chip->capture_running = false;
+		chip->disconnected = true;
 		/*
 		 * Card cleanup, URB stopping/freeing, and interface release
 		 * are all handled automatically by devres.
