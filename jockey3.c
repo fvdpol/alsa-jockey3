@@ -564,39 +564,41 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	if (chip->disconnected)
 		return -ENODEV;
 
-	guard(mutex)(&chip->rate_mutex);
+	scoped_guard(mutex, &chip->rate_mutex) {
+		if (chip->current_rate == rate) {
+			j3_dbg(&chip->intf0->dev, "Rate already set to %u, skipping change\n", rate);
+			return 0;
+		}
 
-	if (chip->current_rate == rate) {
-		j3_dbg(&chip->intf0->dev, "Rate already set to %u, skipping change\n", rate);
-		return 0;
-	}
+		if (chip->active_streams > 1) {
+			dev_err(&chip->intf0->dev, "Cannot change rate while other stream is active\n");
+			return -EBUSY;
+		}
 
-	if (chip->active_streams > 1) {
-		dev_err(&chip->intf0->dev, "Cannot change rate while other stream is active\n");
-		return -EBUSY;
-	}
+		jockey3_stop_urbs(chip);
+		msleep(50);
 
-	jockey3_stop_urbs(chip);
-	msleep(50);
-
-	ret = jockey3_set_rate(chip, rate);
-	if (ret == 0) {
+		ret = jockey3_set_rate(chip, rate);
+		if (ret != 0) {
+			dev_err(&chip->intf0->dev, "Rate change to %u failed: %d\n", rate, ret);
+			jockey3_start_urbs(chip);
+			return ret;
+		}
 		chip->current_rate = rate;
-		j3_dbg(&chip->intf0->dev, "Rate changed to %u successfully, resetting device\n",
-		       rate);
-		/*
-		 * Mandatory: Ploytec chipsets require a full USB reset to re-synchronize
-		 * the internal engine after a sample rate change. Without this, the
-		 * Capture EP (0x86) may stop transmitting data, leading to EIO.
-		 * pre_reset/post_reset callbacks handle the URB lifecycle.
-		 */
-		usb_reset_device(chip->dev);
-	} else {
-		dev_err(&chip->intf0->dev, "Rate change to %u failed: %d\n", rate, ret);
-		jockey3_start_urbs(chip);
 	}
 
-	return ret;
+	j3_dbg(&chip->intf0->dev, "Rate changed to %u successfully, resetting device\n",
+	       rate);
+	/*
+	 * Mandatory: Ploytec chipsets require a full USB reset to re-synchronize
+	 * the internal engine after a sample rate change. Without this, the
+	 * Capture EP (0x86) may stop transmitting data, leading to EIO.
+	 * pre_reset/post_reset callbacks handle the URB lifecycle.
+	 * We call this outside the rate_mutex to allow pre/post_reset to acquire it.
+	 */
+	usb_reset_device(chip->dev);
+
+	return 0;
 }
 
 static const struct snd_pcm_ops jockey3_pcm_ops = {
@@ -917,8 +919,10 @@ static int jockey3_pre_reset(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
-	if (chip && intf == chip->intf0)
+	if (chip && intf == chip->intf0) {
+		mutex_lock(&chip->rate_mutex);
 		jockey3_stop_urbs(chip);
+	}
 	return 0;
 }
 
@@ -929,6 +933,7 @@ static int jockey3_post_reset(struct usb_interface *intf)
 	if (chip && intf == chip->intf0) {
 		jockey3_handshake_step(chip);
 		jockey3_start_urbs(chip);
+		mutex_unlock(&chip->rate_mutex);
 	}
 	return 0;
 }
