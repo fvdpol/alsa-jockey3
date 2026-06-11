@@ -89,7 +89,7 @@ struct jockey3_chip {
 	bool capture_running;
 };
 
-static void jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
+static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 {
 	struct snd_pcm_substream *substream = chip->playback_substream;
 	struct snd_pcm_runtime *runtime;
@@ -98,11 +98,11 @@ static void jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 	int f;
 
 	if (unlikely(!substream || !substream->runtime))
-		return;
+		return false;
 
 	runtime = substream->runtime;
 	if (unlikely(!runtime->dma_area))
-		return;
+		return false;
 
 	pcm_buffer_size = snd_pcm_lib_buffer_bytes(substream);
 	alsa_frame_size = runtime->channels * 3;
@@ -118,11 +118,13 @@ static void jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 
 	if (chip->period_off >= runtime->period_size * alsa_frame_size) {
 		chip->period_off %= runtime->period_size * alsa_frame_size;
-		snd_pcm_period_elapsed(substream);
+		return true;
 	}
+
+	return false;
 }
 
-static void jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_buf)
+static bool jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_buf)
 {
 	struct snd_pcm_substream *substream = chip->capture_substream;
 	struct snd_pcm_runtime *runtime;
@@ -131,11 +133,11 @@ static void jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_b
 	int f;
 
 	if (unlikely(!substream || !substream->runtime))
-		return;
+		return false;
 
 	runtime = substream->runtime;
 	if (unlikely(!runtime->dma_area))
-		return;
+		return false;
 
 	pcm_buffer_size = snd_pcm_lib_buffer_bytes(substream);
 	alsa_frame_size = runtime->channels * 3; // 6 * 3 = 18 bytes
@@ -151,13 +153,17 @@ static void jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_b
 
 	if (chip->capture_period_off >= runtime->period_size * alsa_frame_size) {
 		chip->capture_period_off %= runtime->period_size * alsa_frame_size;
-		snd_pcm_period_elapsed(substream);
+		return true;
 	}
+
+	return false;
 }
 
 static void jockey3_capture_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
+	struct snd_pcm_substream *substream = NULL;
+	bool period_elapsed = false;
 	int ret;
 
 	if (urb->status) {
@@ -168,10 +174,15 @@ static void jockey3_capture_callback(struct urb *urb)
 			urb->status);
 	} else {
 		scoped_guard(spinlock_irqsave, &chip->capture_lock) {
-			if (chip->capture_running && chip->capture_substream)
-				jockey3_process_in_packet(chip, urb->transfer_buffer);
+			if (chip->capture_running && chip->capture_substream) {
+				period_elapsed = jockey3_process_in_packet(chip, urb->transfer_buffer);
+				substream = chip->capture_substream;
+			}
 		}
 	}
+
+	if (period_elapsed && substream)
+		snd_pcm_period_elapsed(substream);
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0 && ret != -ENODEV && ret != -EPERM)
@@ -182,6 +193,8 @@ static void jockey3_playback_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
+	struct snd_pcm_substream *substream = NULL;
+	bool period_elapsed = false;
 	int i, ret;
 
 	if (urb->status) {
@@ -190,11 +203,17 @@ static void jockey3_playback_callback(struct urb *urb)
 			return;
 		dev_err(&chip->intf0->dev, "Playback URB error: %d\n", urb->status);
 	} else {
-		guard(spinlock_irqsave)(&chip->playback_lock);
-		if (chip->stream_running && chip->playback_substream)
-			jockey3_process_out_packet(chip, buf);
-		else
-			memset(buf, 0, PLOYTEC_PKT_SIZE);
+		scoped_guard(spinlock_irqsave, &chip->playback_lock) {
+			if (chip->stream_running && chip->playback_substream) {
+				period_elapsed = jockey3_process_out_packet(chip, buf);
+				substream = chip->playback_substream;
+			} else {
+				memset(buf, 0, PLOYTEC_PKT_SIZE);
+			}
+		}
+
+		if (period_elapsed && substream)
+			snd_pcm_period_elapsed(substream);
 
 		guard(spinlock)(&chip->midi_lock);
 
@@ -376,10 +395,15 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	chip->active_streams--;
 	j3_dbg(&chip->intf0->dev, "active_streams decremented to %d\n", chip->active_streams);
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		guard(spinlock_irqsave)(&chip->playback_lock);
 		chip->playback_substream = NULL;
-	else
+		chip->stream_running = false;
+	} else {
+		guard(spinlock_irqsave)(&chip->capture_lock);
 		chip->capture_substream = NULL;
+		chip->capture_running = false;
+	}
 	return 0;
 }
 
@@ -389,9 +413,11 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 
 	j3_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		guard(spinlock_irqsave)(&chip->playback_lock);
 		chip->dma_off = 0;
 		chip->period_off = 0;
 	} else {
+		guard(spinlock_irqsave)(&chip->capture_lock);
 		chip->capture_dma_off = 0;
 		chip->capture_period_off = 0;
 	}
@@ -404,11 +430,13 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	j3_dbg(&chip->intf0->dev, "PCM trigger stream %d, cmd %d\n", substream->stream, cmd);
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		guard(spinlock_irqsave)(&chip->playback_lock);
 		if (cmd == SNDRV_PCM_TRIGGER_START)
 			chip->stream_running = true;
 		else if (cmd == SNDRV_PCM_TRIGGER_STOP)
 			chip->stream_running = false;
 	} else {
+		guard(spinlock_irqsave)(&chip->capture_lock);
 		if (cmd == SNDRV_PCM_TRIGGER_START)
 			chip->capture_running = true;
 		else if (cmd == SNDRV_PCM_TRIGGER_STOP)
@@ -421,11 +449,18 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+	unsigned int dma_off;
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		return bytes_to_frames(substream->runtime, chip->dma_off);
-	else
-		return bytes_to_frames(substream->runtime, chip->capture_dma_off);
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		scoped_guard(spinlock_irqsave, &chip->playback_lock) {
+			dma_off = chip->dma_off;
+		}
+	} else {
+		scoped_guard(spinlock_irqsave, &chip->capture_lock) {
+			dma_off = chip->capture_dma_off;
+		}
+	}
+	return bytes_to_frames(substream->runtime, dma_off);
 }
 
 static int jockey3_handshake_step(struct jockey3_chip *chip)
