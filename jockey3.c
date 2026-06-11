@@ -32,7 +32,6 @@ enum { JOCKEY3_ME, JOCKEY3_REMIX };
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
 static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
-static int debug;
 
 #define CARD_NAME "Reloop Jockey 3"
 
@@ -42,20 +41,6 @@ module_param_array(id, charp, NULL, 0444);
 MODULE_PARM_DESC(id, "ID string for " CARD_NAME " soundcard.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
-module_param(debug, int, 0644);
-MODULE_PARM_DESC(debug, "Enable debug messages for " CARD_NAME " soundcard.");
-
-#define J3_DEBUG
-#ifdef J3_DEBUG
-#define j3_dbg(dev, fmt, ...) \
-	do { \
-		if (debug) \
-			dev_info(dev, fmt, ##__VA_ARGS__); \
-	} while (0)
-#else
-#define j3_dbg(dev, fmt, ...) \
-	do { } while (0)
-#endif
 
 struct jockey3_chip {
 	struct snd_card *card;
@@ -295,8 +280,8 @@ static void jockey3_midi_in_callback(struct urb *urb)
 		if (chip->midi_in_substream) {
 			for (i = 0; i < urb->actual_length; i++) {
 				if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
-					j3_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n",
-					       buf[i]);
+					dev_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n",
+						buf[i]);
 					snd_rawmidi_receive(chip->midi_in_substream,
 							    &buf[i], 1);
 				}
@@ -313,7 +298,7 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 {
 	int i;
 
-	j3_dbg(&chip->intf0->dev, "Stopping all URBs\n");
+	dev_dbg(&chip->intf0->dev, "Stopping all URBs\n");
 	usb_kill_urb(chip->midi_in_urb);
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		usb_kill_urb(chip->playback_urbs[i]);
@@ -328,7 +313,7 @@ static void jockey3_start_urbs(struct jockey3_chip *chip)
 	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
 		return;
 
-	j3_dbg(&chip->intf0->dev, "Starting all URBs\n");
+	dev_dbg(&chip->intf0->dev, "Starting all URBs\n");
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		ret = usb_submit_urb(chip->playback_urbs[i], GFP_KERNEL);
 		if (ret < 0)
@@ -355,14 +340,14 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 	chip->xfer_buf[1] = (rate >> 8) & 0xFF;
 	chip->xfer_buf[2] = (rate >> 16) & 0xFF;
 
-	j3_dbg(&chip->intf0->dev, "Setting rate to %u Hz\n", rate);
+	dev_dbg(&chip->intf0->dev, "Setting rate to %u Hz\n", rate);
 	ret = usb_control_msg_send(chip->dev, 0, 0x01, 0x22, 0x0100, 0x0086,
 				   chip->xfer_buf, 3, 2000, GFP_KERNEL);
 	if (ret < 0) {
 		dev_err(&chip->intf0->dev, "Failed to set rate on EP 0x86: %d\n", ret);
 		return ret;
 	}
-	j3_dbg(&chip->intf0->dev, "Rate set on EP 0x86 OK\n");
+	dev_dbg(&chip->intf0->dev, "Rate set on EP 0x86 OK\n");
 	msleep(50);
 	ret = usb_control_msg_send(chip->dev, 0, 0x01, 0x22, 0x0100, 0x0005,
 				   chip->xfer_buf, 3, 2000, GFP_KERNEL);
@@ -370,7 +355,7 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 		dev_err(&chip->intf0->dev, "Failed to set rate on EP 0x05: %d\n", ret);
 		return ret;
 	}
-	j3_dbg(&chip->intf0->dev, "Rate set on EP 0x05 OK\n");
+	dev_dbg(&chip->intf0->dev, "Rate set on EP 0x05 OK\n");
 	msleep(50);
 	return 0;
 }
@@ -381,7 +366,7 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	int ret;
 
-	j3_dbg(&chip->intf0->dev, "PCM open stream %d\n", substream->stream);
+	dev_dbg(&chip->intf0->dev, "PCM open stream %d\n", substream->stream);
 
 	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
 		return -ENODEV;
@@ -425,8 +410,8 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 				return ret;
 		}
 		chip->active_streams++;
-		j3_dbg(&chip->intf0->dev, "active_streams incremented to %d\n",
-		       chip->active_streams);
+		dev_dbg(&chip->intf0->dev, "active_streams incremented to %d\n",
+			chip->active_streams);
 	}
 
 	return 0;
@@ -436,11 +421,11 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 
-	j3_dbg(&chip->intf0->dev, "PCM close stream %d\n", substream->stream);
+	dev_dbg(&chip->intf0->dev, "PCM close stream %d\n", substream->stream);
 
 	guard(mutex)(&chip->rate_mutex);
 	chip->active_streams--;
-	j3_dbg(&chip->intf0->dev, "active_streams decremented to %d\n", chip->active_streams);
+	dev_dbg(&chip->intf0->dev, "active_streams decremented to %d\n", chip->active_streams);
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		guard(spinlock_irqsave)(&chip->playback_lock);
@@ -458,7 +443,7 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 
-	j3_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
+	dev_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
 
 	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
 		return -ENODEV;
@@ -479,7 +464,7 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 
-	j3_dbg(&chip->intf0->dev, "PCM trigger stream %d, cmd %d\n", substream->stream, cmd);
+	dev_dbg(&chip->intf0->dev, "PCM trigger stream %d, cmd %d\n", substream->stream, cmd);
 
 	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
 		return -ENODEV;
@@ -542,7 +527,7 @@ static int jockey3_handshake_step(struct jockey3_chip *chip)
 	ret = usb_control_msg_recv(chip->dev, 0, 0x56, 0xC0, 0, 0, chip->xfer_buf, 15, 2000,
 				   GFP_KERNEL);
 	if (ret < 0)
-		j3_dbg(&chip->intf0->dev, "Handshake step 1 (0x56) failed: %d (ignoring)\n", ret);
+		dev_dbg(&chip->intf0->dev, "Handshake step 1 (0x56) failed: %d (ignoring)\n", ret);
 	msleep(20);
 
 	ret = usb_control_msg_recv(chip->dev, 0, 0x49, 0xC0, 0, 0, chip->xfer_buf, 1, 2000,
@@ -574,15 +559,15 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	unsigned int rate = params_rate(hw_params);
 	int ret = 0;
 
-	j3_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n",
-	       rate, chip->active_streams);
+	dev_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n",
+		rate, chip->active_streams);
 
 	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
 		return -ENODEV;
 
 	scoped_guard(mutex, &chip->rate_mutex) {
 		if (chip->current_rate == rate) {
-			j3_dbg(&chip->intf0->dev, "Rate already set to %u, skipping change\n", rate);
+			dev_dbg(&chip->intf0->dev, "Rate already set to %u, skipping change\n", rate);
 			return 0;
 		}
 
@@ -608,8 +593,8 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 		chip->current_rate = rate;
 	}
 
-	j3_dbg(&chip->intf0->dev, "Rate changed to %u successfully, resetting device\n",
-	       rate);
+	dev_dbg(&chip->intf0->dev, "Rate changed to %u successfully, resetting device\n",
+		rate);
 	/*
 	 * Mandatory: Ploytec chipsets require a full USB reset to re-synchronize
 	 * the internal engine after a sample rate change. Without this, the
@@ -701,7 +686,7 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 		return ret;
 	msleep(20);
 
-	j3_dbg(&chip->intf0->dev, "Handshake complete.\n");
+	dev_dbg(&chip->intf0->dev, "Handshake complete.\n");
 
 	jockey3_start_urbs(chip);
 
