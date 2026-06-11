@@ -375,6 +375,7 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
+	int ret;
 
 	j3_dbg(&chip->intf0->dev, "PCM open stream %d\n", substream->stream);
 
@@ -410,9 +411,19 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 		chip->capture_substream = substream;
 	}
 
-	guard(mutex)(&chip->rate_mutex);
-	chip->active_streams++;
-	j3_dbg(&chip->intf0->dev, "active_streams incremented to %d\n", chip->active_streams);
+	scoped_guard(mutex, &chip->rate_mutex) {
+		if (chip->active_streams > 0) {
+			/* Force the new stream to match the existing hardware rate */
+			ret = snd_pcm_hw_constraint_single(runtime,
+							   SNDRV_PCM_HW_PARAM_RATE,
+							   chip->current_rate);
+			if (ret < 0)
+				return ret;
+		}
+		chip->active_streams++;
+		j3_dbg(&chip->intf0->dev, "active_streams incremented to %d\n",
+		       chip->active_streams);
+	}
 
 	return 0;
 }
@@ -571,6 +582,11 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 			return 0;
 		}
 
+		/*
+		 * If multiple streams are active, the ALSA core should have
+		 * enforced the constraint from jockey3_pcm_open. We still
+		 * sanity check here to be safe.
+		 */
 		if (chip->active_streams > 1) {
 			dev_err(&chip->intf0->dev, "Cannot change rate while other stream is active\n");
 			return -EBUSY;
