@@ -567,7 +567,8 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 
 	scoped_guard(mutex, &chip->rate_mutex) {
 		if (chip->current_rate == rate) {
-			dev_dbg(&chip->intf0->dev, "Rate already set to %u, skipping change\n", rate);
+			dev_dbg(&chip->intf0->dev, "Rate already set to %u, skipping change\n",
+				rate);
 			return 0;
 		}
 
