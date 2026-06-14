@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *   ALSA driver for Reloop Jockey 3 devices
+ *   Ploytec USB Protocol Handling
  *
  *   Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
  */
 
-#ifndef PLOYTEC_CODEC_H
-#define PLOYTEC_CODEC_H
+#ifndef PLOYTEC_PROTO_H
+#define PLOYTEC_PROTO_H
 
 #include <linux/types.h>
 #include <linux/usb.h>
@@ -49,4 +50,4 @@ void ploytec_prepare_out_packet(u8 *buf);
 int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf);
 int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate);
 
-#endif /* PLOYTEC_CODEC_H */
+#endif /* PLOYTEC_PROTO_H */

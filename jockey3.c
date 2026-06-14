@@ -16,7 +16,7 @@
 #include <sound/pcm.h>
 #include <linux/mutex.h>
 #include <linux/cleanup.h>
-#include "ploytec_codec.h"
+#include "ploytec_proto.h"
 
 #define RELOOP_VENDOR_ID         0x200c
 #define RELOOP_JOCKEY3_ME_PID    0x1009
