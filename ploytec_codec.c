@@ -5,6 +5,7 @@
  *   Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
  */
 
+#include <linux/delay.h>
 #include "ploytec_codec.h"
 
 /**
@@ -113,4 +114,102 @@ void ploytec_decode_s24_3le(u8 *dest, const u8 *src)
 		dest[0x10] |= (((src[0x28 + i] & 0x04) >> 2) << (7 - i));
 		dest[0x11] |= (((src[0x20 + i] & 0x04) >> 2) << (7 - i));
 	}
+}
+
+/**
+ * ploytec_prepare_out_packet - Prepare a playback packet with default sync/MIDI padding
+ * @buf: 512-byte destination buffer
+ *
+ * Sets the initial pattern: all MIDI positions are idle (0xFD), sync byte is 
+ * set to 0xFF at offset 481.
+ */
+void ploytec_prepare_out_packet(u8 *buf)
+{
+	int i;
+
+	memset(buf, 0, PLOYTEC_PKT_SIZE);
+	for (i = PLOYTEC_MIDI_OUT_OFFSET; i < PLOYTEC_PKT_SIZE; i++)
+		buf[i] = PLOYTEC_MIDI_IDLE_BYTE;
+	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
+}
+
+/**
+ * ploytec_handshake_step - Perform the Ploytec handshake sequence
+ * @dev: USB device
+ * @xfer_buf: Temporary transfer buffer
+ */
+int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf)
+{
+	u8 *buf = xfer_buf;
+	u8 status;
+	int ret;
+
+	ret = usb_set_interface(dev, 0, 1);
+	if (ret < 0)
+		return ret;
+	msleep(20);
+
+	ret = usb_set_interface(dev, 1, 1);
+	if (ret < 0)
+		return ret;
+	msleep(20);
+
+	/* Read Firmware (Request 0x56) */
+	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_FIRMWARE, 0xC0, 0, 0,
+				   buf, 15, 2000, GFP_KERNEL);
+	/* Note: Firmware read often fails on some Ploytec devices but isn't fatal */
+	msleep(20);
+
+	/* Read Status (Request 0x49) */
+	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_STATUS, 0xC0, 0, 0,
+				   buf, 1, 2000, GFP_KERNEL);
+	if (ret < 0)
+		return ret;
+
+	status = buf[0];
+	msleep(20);
+
+	/* Enable device if READY bit is not set */
+	if (!(status & PLOYTEC_STATUS_READY)) {
+		ret = usb_control_msg_send(dev, 0, PLOYTEC_REQ_STATUS, 0x40,
+					   (uint16_t)(int16_t)(int8_t)(status | PLOYTEC_STATUS_READY),
+					   0, NULL, 0, 2000, GFP_KERNEL);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
+}
+
+/**
+ * ploytec_set_rate - Set hardware sample rate
+ * @dev: USB device
+ * @xfer_buf: Temporary transfer buffer
+ * @rate: Sample rate in Hz
+ */
+int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
+{
+	u8 *buf = xfer_buf;
+	int ret;
+
+	buf[0] = rate & 0xFF;
+	buf[1] = (rate >> 8) & 0xFF;
+	buf[2] = (rate >> 16) & 0xFF;
+
+	/* Set rate on Capture EP 0x86 */
+	ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_VAL,
+				   0x0100, 0x0086, buf, 3, 2000, GFP_KERNEL);
+	if (ret < 0)
+		return ret;
+
+	msleep(50);
+
+	/* Set rate on Playback EP 0x05 */
+	ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_VAL,
+				   0x0100, 0x0005, buf, 3, 2000, GFP_KERNEL);
+	if (ret < 0)
+		return ret;
+
+	msleep(50);
+	return 0;
 }

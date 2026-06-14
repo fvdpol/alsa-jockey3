@@ -214,7 +214,7 @@ static void jockey3_playback_callback(struct urb *urb)
 			period_elapsed = jockey3_process_out_packet(chip, buf);
 			substream = chip->playback_substream;
 		} else {
-			memset(buf, 0, PLOYTEC_PKT_SIZE);
+			ploytec_prepare_out_packet(buf);
 		}
 	}
 
@@ -239,16 +239,16 @@ static void jockey3_playback_callback(struct urb *urb)
 		u8 byte;
 
 		if (snd_rawmidi_transmit(midi_substream, &byte, 1) == 1)
-			buf[480] = byte;
+			buf[PLOYTEC_MIDI_OUT_OFFSET] = byte;
 		else
-			buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
+			buf[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
 	} else {
-		buf[480] = PLOYTEC_MIDI_IDLE_BYTE;
+		buf[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
 	}
 
 	/* Ploytec Sync byte and gap padding */
-	buf[481] = 0xFF;
-	for (i = 482; i < PLOYTEC_PKT_SIZE; i++)
+	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
+	for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
 		buf[i] = PLOYTEC_MIDI_IDLE_BYTE;
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
@@ -336,27 +336,13 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
 		return -ENODEV;
 
-	chip->xfer_buf[0] = rate & 0xFF;
-	chip->xfer_buf[1] = (rate >> 8) & 0xFF;
-	chip->xfer_buf[2] = (rate >> 16) & 0xFF;
-
 	dev_dbg(&chip->intf0->dev, "Setting rate to %u Hz\n", rate);
-	ret = usb_control_msg_send(chip->dev, 0, 0x01, 0x22, 0x0100, 0x0086,
-				   chip->xfer_buf, 3, 2000, GFP_KERNEL);
+	ret = ploytec_set_rate(chip->dev, chip->xfer_buf, rate);
 	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to set rate on EP 0x86: %d\n", ret);
+		dev_err(&chip->intf0->dev, "Failed to set rate: %d\n", ret);
 		return ret;
 	}
-	dev_dbg(&chip->intf0->dev, "Rate set on EP 0x86 OK\n");
-	msleep(50);
-	ret = usb_control_msg_send(chip->dev, 0, 0x01, 0x22, 0x0100, 0x0005,
-				   chip->xfer_buf, 3, 2000, GFP_KERNEL);
-	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to set rate on EP 0x05: %d\n", ret);
-		return ret;
-	}
-	dev_dbg(&chip->intf0->dev, "Rate set on EP 0x05 OK\n");
-	msleep(50);
+	dev_dbg(&chip->intf0->dev, "Rate set OK\n");
 	return 0;
 }
 
@@ -505,48 +491,15 @@ static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream
 
 static int jockey3_handshake_step(struct jockey3_chip *chip)
 {
-	u8 status;
 	int ret;
 
 	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
 		return -ENODEV;
 
-	ret = usb_set_interface(chip->dev, 0, 1);
+	ret = ploytec_handshake_step(chip->dev, chip->xfer_buf);
 	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to set altsetting 1 on interface 0: %d\n", ret);
+		dev_err(&chip->intf0->dev, "Ploytec handshake failed: %d\n", ret);
 		return ret;
-	}
-	msleep(20);
-	ret = usb_set_interface(chip->dev, 1, 1);
-	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to set altsetting 1 on interface 1: %d\n", ret);
-		return ret;
-	}
-	msleep(20);
-
-	ret = usb_control_msg_recv(chip->dev, 0, 0x56, 0xC0, 0, 0, chip->xfer_buf, 15, 2000,
-				   GFP_KERNEL);
-	if (ret < 0)
-		dev_dbg(&chip->intf0->dev, "Handshake step 1 (0x56) failed: %d (ignoring)\n", ret);
-	msleep(20);
-
-	ret = usb_control_msg_recv(chip->dev, 0, 0x49, 0xC0, 0, 0, chip->xfer_buf, 1, 2000,
-				   GFP_KERNEL);
-	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Handshake step 2 (0x49 R) failed: %d\n", ret);
-		return ret;
-	}
-	status = chip->xfer_buf[0];
-	msleep(20);
-
-	if (!(status & 0x20)) {
-		ret = usb_control_msg_send(chip->dev, 0, 0x49, 0x40,
-					   (uint16_t)(int16_t)(int8_t)(status | 0x20), 0,
-					   NULL, 0, 2000, GFP_KERNEL);
-		if (ret < 0) {
-			dev_err(&chip->intf0->dev, "Handshake step 3 (0x49 W) failed: %d\n", ret);
-			return ret;
-		}
 	}
 
 	return 0;
@@ -732,7 +685,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	struct snd_card *card;
 	struct jockey3_chip *chip;
 	char *jockey3_type;
-	int ret, i, j;
+	int ret, i;
 	static int dev_idx;
 
 	if (intf->cur_altsetting->desc.bInterfaceNumber != 0)
@@ -803,10 +756,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 		if (ret)
 			return ret;
 
-		/* Initial pattern: all MIDI positions are idle, sync byte at 481 */
-		for (j = 480; j < PLOYTEC_PKT_SIZE; j++)
-			chip->playback_bufs[i][j] = PLOYTEC_MIDI_IDLE_BYTE;
-		chip->playback_bufs[i][481] = 0xFF;
+		ploytec_prepare_out_packet(chip->playback_bufs[i]);
 
 		usb_fill_bulk_urb(chip->playback_urbs[i], dev,
 				  usb_sndbulkpipe(dev, PLOYTEC_EP_PCM_OUT),
