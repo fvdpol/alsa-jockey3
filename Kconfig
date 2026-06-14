@@ -16,4 +16,4 @@ config SND_USB_JOCKEY3
             * Reloop Jockey 3 Remix
 
 	  To compile this driver as a module, choose M here: the module
-	  will be called snd-usb-jockey3.
+	  will be called snd-reloop-jockey3.
