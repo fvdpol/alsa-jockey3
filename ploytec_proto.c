@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   ALSA driver for Reloop Jockey 3 devices
+ *   Ploytec USB Protocol Handling
  *
  *   Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
  */
 
 #include <linux/delay.h>
-#include "ploytec_codec.h"
+#include "ploytec_proto.h"
 
 /**
  * ploytec_encode_s24_3le - Encode 4-channel S24_3LE to 48-byte Ploytec frame

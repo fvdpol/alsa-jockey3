@@ -1,7 +1,7 @@
 # Makefile for out-of-tree ALSA driver for Reloop Jockey 3 devices
 
 obj-m += snd-reloop-jockey3.o
-snd-reloop-jockey3-objs := jockey3.o ploytec_codec.o
+snd-reloop-jockey3-objs := jockey3.o ploytec_proto.o
 
 # Build against the kernel on the target machine
 #KDIR ?= /lib/modules/$(shell uname -r)/build
