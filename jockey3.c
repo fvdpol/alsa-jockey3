@@ -756,6 +756,72 @@ static void jockey3_stop_urbs_action(void *data)
 	jockey3_stop_urbs(data);
 }
 
+static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
+{
+	struct usb_device *dev = chip->dev;
+	struct usb_interface *intf = chip->intf0;
+	int i, ret;
+
+	for (i = 0; i < JOCKEY3_N_URBS; i++) {
+		chip->playback_bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
+		if (!chip->playback_bufs[i])
+			return -ENOMEM;
+		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
+					       chip->playback_bufs[i]);
+		if (ret)
+			return ret;
+
+		chip->playback_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
+		if (!chip->playback_urbs[i])
+			return -ENOMEM;
+		ret = devm_add_action_or_reset(&intf->dev, jockey3_free_urb_action,
+					       chip->playback_urbs[i]);
+		if (ret)
+			return ret;
+
+		ploytec_prepare_out_packet(chip->playback_bufs[i]);
+
+		usb_fill_bulk_urb(chip->playback_urbs[i], dev,
+				  usb_sndbulkpipe(dev, PLOYTEC_EP_PCM_OUT),
+				  chip->playback_bufs[i], PLOYTEC_PKT_SIZE,
+				  jockey3_playback_callback, chip);
+	}
+
+	return 0;
+}
+
+static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
+{
+	struct usb_device *dev = chip->dev;
+	struct usb_interface *intf = chip->intf0;
+	int i, ret;
+
+	for (i = 0; i < JOCKEY3_N_URBS; i++) {
+		chip->capture_bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
+		if (!chip->capture_bufs[i])
+			return -ENOMEM;
+		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
+					       chip->capture_bufs[i]);
+		if (ret)
+			return ret;
+
+		chip->capture_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
+		if (!chip->capture_urbs[i])
+			return -ENOMEM;
+		ret = devm_add_action_or_reset(&intf->dev, jockey3_free_urb_action,
+					       chip->capture_urbs[i]);
+		if (ret)
+			return ret;
+
+		usb_fill_bulk_urb(chip->capture_urbs[i], dev,
+				  usb_rcvbulkpipe(dev, PLOYTEC_EP_PCM_IN),
+				  chip->capture_bufs[i], PLOYTEC_PKT_SIZE,
+				  jockey3_capture_callback, chip);
+	}
+
+	return 0;
+}
+
 static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id *usb_id)
 {
 	struct usb_device *dev = interface_to_usbdev(intf);
@@ -763,7 +829,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	struct snd_card *card;
 	struct jockey3_chip *chip;
 	char *jockey3_type;
-	int ret, i;
+	int ret;
 	static int dev_idx;
 
 	if (intf->cur_altsetting->desc.bInterfaceNumber != 0)
@@ -820,51 +886,13 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	if (ret)
 		return ret;
 
-	for (i = 0; i < JOCKEY3_N_URBS; i++) {
-		chip->playback_bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
-		if (!chip->playback_bufs[i])
-			return -ENOMEM;
-		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
-					       chip->playback_bufs[i]);
-		if (ret)
-			return ret;
+	ret = jockey3_init_playback_urbs(chip);
+	if (ret < 0)
+		return ret;
 
-		chip->playback_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
-		if (!chip->playback_urbs[i])
-			return -ENOMEM;
-		ret = devm_add_action_or_reset(&intf->dev, jockey3_free_urb_action,
-					       chip->playback_urbs[i]);
-		if (ret)
-			return ret;
-
-		ploytec_prepare_out_packet(chip->playback_bufs[i]);
-
-		usb_fill_bulk_urb(chip->playback_urbs[i], dev,
-				  usb_sndbulkpipe(dev, PLOYTEC_EP_PCM_OUT),
-				  chip->playback_bufs[i], PLOYTEC_PKT_SIZE,
-				  jockey3_playback_callback, chip);
-
-		chip->capture_bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
-		if (!chip->capture_bufs[i])
-			return -ENOMEM;
-		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
-					       chip->capture_bufs[i]);
-		if (ret)
-			return ret;
-
-		chip->capture_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
-		if (!chip->capture_urbs[i])
-			return -ENOMEM;
-		ret = devm_add_action_or_reset(&intf->dev, jockey3_free_urb_action,
-					       chip->capture_urbs[i]);
-		if (ret)
-			return ret;
-
-		usb_fill_bulk_urb(chip->capture_urbs[i], dev,
-				  usb_rcvbulkpipe(dev, PLOYTEC_EP_PCM_IN),
-				  chip->capture_bufs[i], PLOYTEC_PKT_SIZE,
-				  jockey3_capture_callback, chip);
-	}
+	ret = jockey3_init_capture_urbs(chip);
+	if (ret < 0)
+		return ret;
 
 	usb_fill_bulk_urb(chip->midi_in_urb, dev,
 			  usb_rcvbulkpipe(dev, PLOYTEC_EP_MIDI_IN),
