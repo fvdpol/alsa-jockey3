@@ -228,12 +228,10 @@ static void jockey3_playback_callback(struct urb *urb)
 
 	scoped_guard(spinlock, &chip->midi_lock) {
 		/*
-		 * Rate limit MIDI to ~500 bytes/sec.
-		 * The Ploytec firmware has a small MIDI buffer; sending at higher
-		 * rates (e.g. standard 3125 bps) causes buffer overflows and
-		 * message truncation in the device.
+		 * Rate limit MIDI to ~3125 bytes/sec. Sending at higher rates causes buffer
+		 * overflows and message truncation in the device.
 		 */
-		chip->midi_out_acc += 500;
+		chip->midi_out_acc += 3125;
 		if (chip->midi_out_acc >= (chip->current_rate / 10)) {
 			chip->midi_out_acc -= (chip->current_rate / 10);
 			midi_substream = chip->midi_out_substream;
