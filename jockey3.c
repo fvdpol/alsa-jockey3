@@ -67,6 +67,7 @@ struct jockey3_chip {
 
 	struct snd_pcm *pcm;
 	struct snd_pcm_substream *playback_substream;
+	struct usb_anchor playback_anchor;
 	struct urb *playback_urbs[JOCKEY3_N_URBS];
 	unsigned char *playback_bufs[JOCKEY3_N_URBS];
 	spinlock_t playback_lock; // protects playback stream state and buffer offsets
@@ -75,6 +76,7 @@ struct jockey3_chip {
 	bool stream_running;
 
 	struct snd_pcm_substream *capture_substream;
+	struct usb_anchor capture_anchor;
 	struct urb *capture_urbs[JOCKEY3_N_URBS];
 	unsigned char *capture_bufs[JOCKEY3_N_URBS];
 	spinlock_t capture_lock; // protects capture stream state and buffer offsets
@@ -185,9 +187,13 @@ static void jockey3_capture_callback(struct urb *urb)
 	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
 
+	usb_anchor_urb(urb, &chip->capture_anchor);
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
-	if (ret < 0 && ret != -ENODEV && ret != -EPERM)
-		dev_err(&chip->intf0->dev, "Failed to resubmit capture URB: %d\n", ret);
+	if (ret < 0) {
+		usb_unanchor_urb(urb);
+		if (ret != -ENODEV && ret != -EPERM)
+			dev_err(&chip->intf0->dev, "Failed to resubmit capture URB: %d\n", ret);
+	}
 }
 
 static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
@@ -309,9 +315,13 @@ static void jockey3_playback_callback(struct urb *urb)
 	for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
 		buf[i] = 0x00;
 
+	usb_anchor_urb(urb, &chip->playback_anchor);
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
-	if (ret < 0 && ret != -ENODEV && ret != -EPERM)
-		dev_err(&chip->intf0->dev, "Failed to resubmit playback URB: %d\n", ret);
+	if (ret < 0) {
+		usb_unanchor_urb(urb);
+		if (ret != -ENODEV && ret != -EPERM)
+			dev_err(&chip->intf0->dev, "Failed to resubmit playback URB: %d\n", ret);
+	}
 }
 
 static void jockey3_midi_in_callback(struct urb *urb)
@@ -354,14 +364,10 @@ static void jockey3_midi_in_callback(struct urb *urb)
 
 static void jockey3_stop_urbs(struct jockey3_chip *chip)
 {
-	int i;
-
 	dev_dbg(&chip->intf0->dev, "Stopping all URBs\n");
 	usb_kill_urb(chip->midi_in_urb);
-	for (i = 0; i < JOCKEY3_N_URBS; i++) {
-		usb_kill_urb(chip->playback_urbs[i]);
-		usb_kill_urb(chip->capture_urbs[i]);
-	}
+	usb_kill_anchored_urbs(&chip->playback_anchor);
+	usb_kill_anchored_urbs(&chip->capture_anchor);
 }
 
 static void jockey3_start_urbs(struct jockey3_chip *chip)
@@ -373,14 +379,21 @@ static void jockey3_start_urbs(struct jockey3_chip *chip)
 
 	dev_dbg(&chip->intf0->dev, "Starting all URBs\n");
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
+		usb_anchor_urb(chip->playback_urbs[i], &chip->playback_anchor);
 		ret = usb_submit_urb(chip->playback_urbs[i], GFP_KERNEL);
-		if (ret < 0)
+		if (ret < 0) {
+			usb_unanchor_urb(chip->playback_urbs[i]);
 			dev_err(&chip->intf0->dev, "Failed to submit playback URB %d: %d\n",
 				i, ret);
+		}
+
+		usb_anchor_urb(chip->capture_urbs[i], &chip->capture_anchor);
 		ret = usb_submit_urb(chip->capture_urbs[i], GFP_KERNEL);
-		if (ret < 0)
+		if (ret < 0) {
+			usb_unanchor_urb(chip->capture_urbs[i]);
 			dev_err(&chip->intf0->dev, "Failed to submit capture URB %d: %d\n",
 				i, ret);
+		}
 	}
 	ret = usb_submit_urb(chip->midi_in_urb, GFP_KERNEL);
 	if (ret < 0)
@@ -782,6 +795,9 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	spin_lock_init(&chip->playback_lock);
 	spin_lock_init(&chip->capture_lock);
 	mutex_init(&chip->rate_mutex);
+
+	init_usb_anchor(&chip->playback_anchor);
+	init_usb_anchor(&chip->capture_anchor);
 
 	chip->xfer_buf = kmalloc(64, GFP_KERNEL);
 	if (!chip->xfer_buf)
