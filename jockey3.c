@@ -221,7 +221,7 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 
 	/*
 	 * Running Status Expansion:
-	 * The Ploytec chipset's internal MIDI parser does not
+	 * The Ploytec firmware's internal MIDI parser does not
 	 * support Running Status (omitting the status byte when
 	 * it hasn't changed). It expects every message to be
 	 * complete (e.g., [Status, Data, Data]).
@@ -608,9 +608,16 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	dev_dbg(&chip->intf0->dev, "Rate changed to %u successfully, resetting device\n",
 		rate);
 	/*
-	 * Mandatory: Ploytec chipsets require a full USB reset to re-synchronize
-	 * the internal engine after a sample rate change. Without this, the
-	 * Capture EP (0x86) may stop transmitting data, leading to EIO.
+	 * Ploytec firmware re-synchronization:
+	 * Ploytec firmware require a full USB reset to re-synchronize the internal
+	 * engine after a sample rate change. Without this, the Capture EP (0x86)
+	 * often stalls or stops transmitting data, leading to EIO errors in ALSA.
+	 *
+	 * TODO: This behavior is currently kept as-is to match observed traces.
+	 * There is an opportunity to improve or replace this once we have a
+	 * better understanding of the Ploytec firmware interaction through
+	 * further protocol analysis or reverse engineering.
+	 *
 	 * pre_reset/post_reset callbacks handle the URB lifecycle.
 	 * We call this outside the rate_mutex to allow pre/post_reset to acquire it.
 	 */

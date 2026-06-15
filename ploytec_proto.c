@@ -13,6 +13,19 @@
  * ploytec_encode_s24_3le - Encode 4-channel S24_3LE to 48-byte Ploytec frame
  * @dest: 48-byte destination buffer
  * @src: 12-byte source buffer (4 channels * 3 bytes)
+ *
+ * Ploytec Bit-Plane Interleaving (Playback):
+ * The firmware uses a non-standard "bit-plane" format where bits from different
+ * channels are interleaved into the same byte.
+ * - Each 48-byte frame contains 8 samples for 2 pairs of channels.
+ * - Bytes 0-23: ALSA Channels 1 & 3
+ * - Bytes 24-47: ALSA Channels 2 & 4
+ * - Within each 24-byte block, bits are grouped by significance:
+ *   - [0-7]: Most significant bits
+ *   - [8-15]: Middle bits
+ *   - [16-23]: Least significant bits
+ * - bit 0 of each byte corresponds to the first channel in the pair.
+ * - bit 1 of each byte corresponds to the second channel in the pair.
  */
 void ploytec_encode_s24_3le(u8 *dest, const u8 *src)
 {
@@ -51,6 +64,12 @@ void ploytec_encode_s24_3le(u8 *dest, const u8 *src)
  * ploytec_decode_s24_3le - Decode 64-byte Ploytec frame to 6-channel S24_3LE
  * @dest: 18-byte destination buffer (6 channels * 3 bytes)
  * @src: 64-byte source buffer
+ *
+ * Ploytec Bit-Plane Interleaving (Capture):
+ * Similar to encoding, the capture path interleaves 3 pairs of channels
+ * into bit-planes (bit 0, 1, and 2 of each byte).
+ * - Bytes 0x00-0x17: Pair 1 (bits 0,1,2)
+ * - Bytes 0x20-0x37: Pair 2 (bits 0,1,2)
  */
 void ploytec_decode_s24_3le(u8 *dest, const u8 *src)
 {
@@ -152,10 +171,18 @@ int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf)
 		return ret;
 	msleep(20);
 
-	/* Read Firmware (Request 0x56) */
+	/*
+	 * Read Firmware (Request 0x56):
+	 * This request often fails on the Reloop Jockey3 devices but appears
+	 * to be a necessary "poke" that advances the internal state machine.
+	 *
+	 * TODO: This behavior is currently kept as-is to match observed traces.
+	 * There is an opportunity to improve or replace this once we have a
+	 * better understanding of the Ploytec firmware interaction through
+	 * further protocol analysis or reverse engineering.
+	 */
 	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_FIRMWARE, 0xC0, 0, 0,
 				   buf, 15, 2000, GFP_KERNEL);
-	/* Note: Firmware read often fails on some Ploytec devices but isn't fatal */
 	msleep(20);
 
 	/* Read Status (Request 0x49) */
@@ -170,7 +197,7 @@ int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf)
 	/* Enable device if READY bit is not set */
 	if (!(status & PLOYTEC_STATUS_READY)) {
 		ret = usb_control_msg_send(dev, 0, PLOYTEC_REQ_STATUS, 0x40,
-					   (uint16_t)(int16_t)(int8_t)(status | PLOYTEC_STATUS_READY),
+					   (uint16_t)((status | PLOYTEC_STATUS_READY) & 0xFF),
 					   0, NULL, 0, 2000, GFP_KERNEL);
 		if (ret < 0)
 			return ret;
