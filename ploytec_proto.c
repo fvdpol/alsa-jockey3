@@ -121,16 +121,13 @@ void ploytec_decode_s24_3le(u8 *dest, const u8 *src)
  * ploytec_prepare_out_packet - Prepare a playback packet with default sync/MIDI padding
  * @buf: 512-byte destination buffer
  *
- * Sets the initial pattern: all MIDI positions are idle (0xFD), sync byte is 
- * set to 0xFF at offset 481.
+ * Sets the initial pattern: MIDI slot (480) is idle (0xFD), sync byte is 
+ * set to 0xFF at offset 481, and the padding gap (482-511) is zero-filled.
  */
 void ploytec_prepare_out_packet(u8 *buf)
 {
-	int i;
-
 	memset(buf, 0, PLOYTEC_PKT_SIZE);
-	for (i = PLOYTEC_MIDI_OUT_OFFSET; i < PLOYTEC_PKT_SIZE; i++)
-		buf[i] = PLOYTEC_MIDI_IDLE_BYTE;
+	buf[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
 	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
 }
 

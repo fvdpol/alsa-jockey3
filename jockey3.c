@@ -60,6 +60,10 @@ struct jockey3_chip {
 	struct snd_rawmidi_substream *midi_in_substream;
 	struct snd_rawmidi_substream *midi_out_substream;
 	spinlock_t midi_lock; // protects MIDI substreams in completion handlers and rate-limiting
+	u8 midi_last_status;
+	int midi_expected_data;
+	u8 midi_queued_byte;
+	bool midi_has_queued_byte;
 
 	struct snd_pcm *pcm;
 	struct snd_pcm_substream *playback_substream;
@@ -193,6 +197,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	struct snd_pcm_substream *substream = NULL;
 	struct snd_rawmidi_substream *midi_substream = NULL;
 	bool period_elapsed = false;
+	bool can_send_midi = false;
 	int i, ret;
 
 	if (urb->status) {
@@ -223,33 +228,83 @@ static void jockey3_playback_callback(struct urb *urb)
 
 	scoped_guard(spinlock, &chip->midi_lock) {
 		/*
-		 * Rate limit MIDI to ~3125 bytes/sec (standard MIDI baud rate).
-		 * The Ploytec firmware has a small MIDI buffer; sending at the
-		 * PCM packet rate (~4410-4800 pkts/sec) causes buffer overflows
-		 * and message truncation in the device.
+		 * Rate limit MIDI to ~500 bytes/sec.
+		 * The Ploytec firmware has a small MIDI buffer; sending at higher
+		 * rates (e.g. standard 3125 bps) causes buffer overflows and
+		 * message truncation in the device.
 		 */
-		chip->midi_out_acc += 3125;
+		chip->midi_out_acc += 500;
 		if (chip->midi_out_acc >= (chip->current_rate / 10)) {
 			chip->midi_out_acc -= (chip->current_rate / 10);
 			midi_substream = chip->midi_out_substream;
+			can_send_midi = true;
 		}
-	}
 
-	if (midi_substream) {
-		u8 byte;
+		if (can_send_midi) {
+			u8 byte = PLOYTEC_MIDI_IDLE_BYTE;
 
-		if (snd_rawmidi_transmit(midi_substream, &byte, 1) == 1)
+			if (chip->midi_has_queued_byte) {
+				byte = chip->midi_queued_byte;
+				chip->midi_has_queued_byte = false;
+				dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
+			} else if (midi_substream) {
+				u8 b;
+
+				if (snd_rawmidi_transmit(midi_substream, &b, 1) == 1) {
+					/*
+					 * Running Status Expansion:
+					 * The Ploytec chipset's internal MIDI parser does not support
+					 * Running Status (omitting the status byte when it hasn't changed).
+					 * It expects every message to be complete (e.g., [Status, Data, Data]).
+					 * ALSA's byte stream often uses Running Status to save bandwidth.
+					 * Here we track the message state and re-inject the last status
+					 * byte if a data byte is received when a message was already complete.
+					 */
+					if (b >= 0x80) { // Status byte
+						if (b < 0xf8) { // Not a real-time message
+							chip->midi_last_status = b;
+							/* Determine expected data bytes based on MIDI opcode */
+							if ((b & 0xf0) == 0xc0 || (b & 0xf0) == 0xd0)
+								chip->midi_expected_data = 1; // PC, Channel Pressure
+							else if (b < 0xf0)
+								chip->midi_expected_data = 2; // Note On/Off, CC, etc.
+							else
+								chip->midi_expected_data = 0; // System messages (expansion not applicable)
+						}
+						byte = b;
+						dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
+					} else { // Data byte
+						if (chip->midi_expected_data > 0) {
+							byte = b;
+							chip->midi_expected_data--;
+							dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
+						} else if (chip->midi_last_status >= 0x80) {
+							/* Message is complete but we got a data byte -> expand Running Status */
+							byte = chip->midi_last_status;
+							chip->midi_queued_byte = b;
+							chip->midi_has_queued_byte = true;
+							
+							/* Set expectation for the remainder of the expanded message */
+							if ((byte & 0xf0) == 0xc0 || (byte & 0xf0) == 0xd0)
+								chip->midi_expected_data = 0; // 1 total, 1 already queued
+							else
+								chip->midi_expected_data = 1; // 2 total, 1 already queued
+
+							dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x (Running Status)\n", byte);
+						}
+					}
+				}
+			}
 			buf[PLOYTEC_MIDI_OUT_OFFSET] = byte;
-		else
+		} else {
 			buf[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
-	} else {
-		buf[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
+		}
 	}
 
 	/* Ploytec Sync byte and gap padding */
 	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
 	for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
-		buf[i] = PLOYTEC_MIDI_IDLE_BYTE;
+		buf[i] = 0x00;
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0 && ret != -ENODEV && ret != -EPERM)
