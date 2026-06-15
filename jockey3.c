@@ -300,7 +300,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
 
-	scoped_guard(spinlock, &chip->midi_lock) {
+	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
 		buf[PLOYTEC_MIDI_OUT_OFFSET] = jockey3_get_next_midi_out_byte(chip);
 	}
 
