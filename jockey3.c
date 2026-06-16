@@ -43,29 +43,32 @@ module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 
 struct jockey3_chip {
+	/* Core ALSA and USB handles (Mostly read-only after probe) */
 	struct snd_card *card;
 	struct usb_device *dev;
 	struct usb_interface *intf0;
 	struct usb_interface *intf1;
-	unsigned char *xfer_buf;
-	unsigned int current_rate;
-	unsigned int midi_out_acc;
-	struct mutex rate_mutex; // serializes sample rate changes and active stream tracking
-	int active_streams;
-	unsigned long flags;
-
-	struct urb *midi_in_urb;
-	unsigned char *midi_in_buf;
+	struct snd_pcm *pcm;
 	struct snd_rawmidi *rmidi;
+	unsigned char *xfer_buf;
+	struct mutex rate_mutex; // serializes sample rate changes and active stream tracking
+	unsigned long flags;
+	unsigned int current_rate;
+	int active_streams;
+
+	/* MIDI Path */
 	struct snd_rawmidi_substream *midi_in_substream;
 	struct snd_rawmidi_substream *midi_out_substream;
+	struct urb *midi_in_urb;
+	unsigned char *midi_in_buf;
 	spinlock_t midi_lock; // protects MIDI substreams in completion handlers and rate-limiting
-	u8 midi_last_status;
+	unsigned int midi_out_acc;
 	int midi_expected_data;
+	u8 midi_last_status;
 	u8 midi_queued_byte;
 	bool midi_has_queued_byte;
 
-	struct snd_pcm *pcm;
+	/* Playback Path */
 	struct snd_pcm_substream *playback_substream;
 	struct usb_anchor playback_anchor;
 	struct urb *playback_urbs[JOCKEY3_N_URBS];
@@ -75,6 +78,7 @@ struct jockey3_chip {
 	unsigned int period_off;
 	bool stream_running;
 
+	/* Capture Path */
 	struct snd_pcm_substream *capture_substream;
 	struct usb_anchor capture_anchor;
 	struct urb *capture_urbs[JOCKEY3_N_URBS];
