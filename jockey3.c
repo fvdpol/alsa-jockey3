@@ -202,26 +202,35 @@ static void jockey3_capture_callback(struct urb *urb)
 
 static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 {
-	struct snd_rawmidi_substream *substream = chip->midi_out_substream;
+	struct snd_rawmidi_substream *substream;
 	u8 byte = PLOYTEC_MIDI_IDLE_BYTE;
 	u8 b;
+	unsigned long flags;
+
+	spin_lock_irqsave(&chip->midi_lock, flags);
 
 	/*
 	 * Rate limit MIDI to ~3125 bytes/sec. Sending at higher rates causes buffer
 	 * overflows and message truncation in the device.
 	 */
 	chip->midi_out_acc += 3125;
-	if (chip->midi_out_acc < (chip->current_rate / 10))
+	if (chip->midi_out_acc < (chip->current_rate / 10)) {
+		spin_unlock_irqrestore(&chip->midi_lock, flags);
 		return PLOYTEC_MIDI_IDLE_BYTE;
+	}
 
 	chip->midi_out_acc -= (chip->current_rate / 10);
 
 	if (chip->midi_has_queued_byte) {
 		byte = chip->midi_queued_byte;
 		chip->midi_has_queued_byte = false;
+		spin_unlock_irqrestore(&chip->midi_lock, flags);
 		dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
 		return byte;
 	}
+
+	substream = chip->midi_out_substream;
+	spin_unlock_irqrestore(&chip->midi_lock, flags);
 
 	if (!substream)
 		return PLOYTEC_MIDI_IDLE_BYTE;
@@ -229,27 +238,29 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 	if (snd_rawmidi_transmit(substream, &b, 1) != 1)
 		return PLOYTEC_MIDI_IDLE_BYTE;
 
+	spin_lock_irqsave(&chip->midi_lock, flags);
+
 	/*
-	 * Running Status Expansion:
-	 * The Ploytec firmware's internal MIDI parser does not
-	 * support Running Status (omitting the status byte when
-	 * it hasn't changed). It expects every message to be
-	 * complete (e.g., [Status, Data, Data]).
-	 * Here we track the message state and re-inject the last
-	 * status byte if a data byte is received when a message
-	 * was already complete.
+	 * Running Status Expansion and Protocol correction:
+	 * The Ploytec firmware's internal MIDI parser does not support Running Status.
+	 * According to the MIDI spec, only Channel Voice messages (0x80-0xEF)
+	 * participate in running status.
 	 */
 	if (b >= 0x80) { // Status byte
-		if (b < 0xf8) { // Not a real-time message
+		if (b < 0xf0) { // Channel Voice Message (0x80-0xEF)
 			chip->midi_last_status = b;
 			/* Determine expected data bytes based on MIDI opcode */
 			if ((b & 0xf0) == 0xc0 || (b & 0xf0) == 0xd0)
 				chip->midi_expected_data = 1; // PC, Channel Pressure
-			else if (b < 0xf0)
-				chip->midi_expected_data = 2; // Note On/Off, CC, etc.
 			else
-				chip->midi_expected_data = 0; // System messages
+				chip->midi_expected_data = 2; // Note On/Off, CC, etc.
+		} else if (b < 0xf8) { // System Common Message (0xf0-0xf7)
+			/* System Common messages clear Running Status */
+			chip->midi_last_status = 0;
+			chip->midi_expected_data = 0;
 		}
+		/* Real-time messages (0xf8-0xff) do not affect state */
+
 		byte = b;
 		dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
 	} else { // Data byte
@@ -270,9 +281,14 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 				chip->midi_expected_data = 1; // 2 total, 1 already queued
 
 			dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x (Running Status)\n", byte);
+		} else {
+			/* No running status expansion active, just send the data byte (e.g. SysEx) */
+			byte = b;
+			dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x (Raw)\n", byte);
 		}
 	}
 
+	spin_unlock_irqrestore(&chip->midi_lock, flags);
 	return byte;
 }
 
@@ -310,9 +326,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
 
-	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
-		buf[PLOYTEC_MIDI_OUT_OFFSET] = jockey3_get_next_midi_out_byte(chip);
-	}
+	buf[PLOYTEC_MIDI_OUT_OFFSET] = jockey3_get_next_midi_out_byte(chip);
 
 	/* Ploytec Sync byte and gap padding */
 	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
