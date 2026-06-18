@@ -247,8 +247,6 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 	/*
 	 * Running Status Expansion and Protocol correction:
 	 * The Ploytec firmware's internal MIDI parser does not support Running Status.
-	 * According to the MIDI spec, only Channel Voice messages (0x80-0xEF)
-	 * participate in running status.
 	 */
 	if (b >= 0x80) { // Status byte
 		if (b < 0xf0) { // Channel Voice Message (0x80-0xEF)
@@ -286,7 +284,7 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 
 			dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x (Running Status)\n", byte);
 		} else {
-			/* No running status expansion active, just send the data byte (e.g. SysEx) */
+			/* No running status expansion active, just send the data byte */
 			byte = b;
 			dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x (Raw)\n", byte);
 		}
@@ -1070,9 +1068,24 @@ static int jockey3_pre_reset(struct usb_interface *intf)
 static int jockey3_post_reset(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
+	u32 hw_rate = 0;
 
 	if (chip && intf == chip->intf0) {
 		jockey3_handshake_step(chip);
+
+		/* Verify if the sample rate persisted through the reset */
+		if (ploytec_get_rate(chip->dev, chip->xfer_buf, &hw_rate) == 0) {
+			if (hw_rate != chip->current_rate) {
+				dev_warn(&chip->intf0->dev,
+					 "Rate mismatch after reset! HW: %u, Expected: %u. Re-applying...\n",
+					 hw_rate, chip->current_rate);
+				jockey3_set_rate(chip, chip->current_rate);
+			} else {
+				dev_dbg(&chip->intf0->dev, "Rate %u Hz persisted through reset\n",
+					hw_rate);
+			}
+		}
+
 		jockey3_start_urbs(chip);
 		mutex_unlock(&chip->rate_mutex);
 	}
