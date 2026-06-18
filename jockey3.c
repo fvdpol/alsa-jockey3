@@ -854,9 +854,7 @@ static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
 	return 0;
 }
 
-static void jockey3_validate_endpoints(struct usb_interface *intf,
-				       bool *has_pcm_out, bool *has_pcm_in,
-				       bool *has_midi_in)
+static bool jockey3_has_bulk_endpoint(struct usb_interface *intf, u8 addr, bool out)
 {
 	int i, j;
 
@@ -866,17 +864,18 @@ static void jockey3_validate_endpoints(struct usb_interface *intf,
 		for (j = 0; j < alts->desc.bNumEndpoints; j++) {
 			struct usb_endpoint_descriptor *epd = &alts->endpoint[j].desc;
 
-			if (usb_endpoint_is_bulk_out(epd) &&
-			    epd->bEndpointAddress == PLOYTEC_EP_PCM_OUT)
-				*has_pcm_out = true;
-			if (usb_endpoint_is_bulk_in(epd) &&
-			    epd->bEndpointAddress == PLOYTEC_EP_PCM_IN)
-				*has_pcm_in = true;
-			if (usb_endpoint_is_bulk_in(epd) &&
-			    epd->bEndpointAddress == PLOYTEC_EP_MIDI_IN)
-				*has_midi_in = true;
+			if (out) {
+				if (usb_endpoint_is_bulk_out(epd) &&
+				    epd->bEndpointAddress == addr)
+					return true;
+			} else {
+				if (usb_endpoint_is_bulk_in(epd) &&
+				    epd->bEndpointAddress == addr)
+					return true;
+			}
 		}
 	}
+	return false;
 }
 
 static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id *usb_id)
@@ -886,7 +885,6 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	struct snd_card *card;
 	struct jockey3_chip *chip;
 	char *jockey3_type;
-	bool has_pcm_out = false, has_pcm_in = false, has_midi_in = false;
 	int ret;
 	static int dev_idx;
 
@@ -898,18 +896,20 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 		return -ENODEV;
 
 	/*
-	 * Validate required endpoints are present in any of the alternate settings
-	 * across both interfaces. Interface 0 usually starts in AltSetting 0
-	 * (zero bandwidth) and we later switch to AltSetting 1 for operation.
+	 * Validate required endpoints are present on their respective interfaces.
+	 * Interface 0: PCM OUT (0x05) and MIDI IN (0x83)
+	 * Interface 1: PCM IN (0x86)
 	 */
-	jockey3_validate_endpoints(intf, &has_pcm_out, &has_pcm_in, &has_midi_in);
-	jockey3_validate_endpoints(intf1, &has_pcm_out, &has_pcm_in, &has_midi_in);
+	if (!jockey3_has_bulk_endpoint(intf, PLOYTEC_EP_PCM_OUT, true) ||
+	    !jockey3_has_bulk_endpoint(intf, PLOYTEC_EP_MIDI_IN, false)) {
+		dev_err(&intf->dev, "Required bulk endpoints not found on Interface 0 (OUT: 0x%02x, IN: 0x%02x)\n",
+			PLOYTEC_EP_PCM_OUT, PLOYTEC_EP_MIDI_IN);
+		return -ENODEV;
+	}
 
-	if (!has_pcm_out || !has_pcm_in || !has_midi_in) {
-		dev_err(&intf->dev, "Required bulk endpoints not found (OUT: %s, PCM IN: %s, MIDI IN: %s)\n",
-			has_pcm_out ? "YES" : "NO",
-			has_pcm_in ? "YES" : "NO",
-			has_midi_in ? "YES" : "NO");
+	if (!jockey3_has_bulk_endpoint(intf1, PLOYTEC_EP_PCM_IN, false)) {
+		dev_err(&intf->dev, "Required bulk IN endpoint not found on Interface 1 (IN: 0x%02x)\n",
+			PLOYTEC_EP_PCM_IN);
 		return -ENODEV;
 	}
 
