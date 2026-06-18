@@ -35,6 +35,7 @@
 /* Protocol Commands */
 #define PLOYTEC_REQ_FIRMWARE 0x56
 #define PLOYTEC_REQ_STATUS   0x49
+#define PLOYTEC_REQ_GET_RATE 0x81
 #define PLOYTEC_SET_RATE     0x01
 #define PLOYTEC_SET_RATE_VAL 0x22
 
@@ -48,6 +49,7 @@ void ploytec_decode_s24_3le(u8 *dest, const u8 *src);
 /* Protocol Helpers */
 void ploytec_prepare_out_packet(u8 *buf);
 int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf);
+int ploytec_get_rate(struct usb_device *dev, void *xfer_buf, u32 *rate);
 int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate);
 
 #endif /* PLOYTEC_PROTO_H */

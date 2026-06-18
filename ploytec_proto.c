@@ -207,6 +207,27 @@ int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf)
 }
 
 /**
+ * ploytec_get_rate - Read hardware sample rate
+ * @dev: USB device
+ * @xfer_buf: Temporary transfer buffer
+ * @rate: Pointer to store the rate
+ */
+int ploytec_get_rate(struct usb_device *dev, void *xfer_buf, u32 *rate)
+{
+	u8 *buf = xfer_buf;
+	int ret;
+
+	/* Read rate from Playback EP 0x05 */
+	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_GET_RATE, 0xA2,
+				   0x0100, 0x0005, buf, 3, 2000, GFP_KERNEL);
+	if (ret < 0)
+		return ret;
+
+	*rate = (u32)buf[0] | ((u32)buf[1] << 8) | ((u32)buf[2] << 16);
+	return 0;
+}
+
+/**
  * ploytec_set_rate - Set hardware sample rate
  * @dev: USB device
  * @xfer_buf: Temporary transfer buffer
@@ -215,7 +236,12 @@ int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf)
 int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
 {
 	u8 *buf = xfer_buf;
+	u32 current_hw_rate = 0;
 	int ret;
+
+	ploytec_get_rate(dev, xfer_buf, &current_hw_rate);
+	pr_debug("ploytec: Setting rate %u Hz (current hw rate: %u Hz)\n",
+		 rate, current_hw_rate);
 
 	buf[0] = rate & 0xFF;
 	buf[1] = (rate >> 8) & 0xFF;
@@ -224,17 +250,30 @@ int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
 	/* Set rate on Capture EP 0x86 */
 	ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_VAL,
 				   0x0100, 0x0086, buf, 3, 2000, GFP_KERNEL);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_err("ploytec: Failed to set rate on EP 0x86: %d\n", ret);
 		return ret;
+	}
 
 	msleep(50);
 
 	/* Set rate on Playback EP 0x05 */
 	ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_VAL,
 				   0x0100, 0x0005, buf, 3, 2000, GFP_KERNEL);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_err("ploytec: Failed to set rate on EP 0x05: %d\n", ret);
 		return ret;
+	}
 
 	msleep(50);
+
+	if (ploytec_get_rate(dev, xfer_buf, &current_hw_rate) == 0) {
+		if (current_hw_rate != rate)
+			pr_warn("ploytec: Rate mismatch! Requested %u Hz, Hardware at %u Hz\n",
+				rate, current_hw_rate);
+		else
+			pr_debug("ploytec: Rate verified as %u Hz\n", current_hw_rate);
+	}
+
 	return 0;
 }
