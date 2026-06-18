@@ -28,6 +28,7 @@ enum { JOCKEY3_ME, JOCKEY3_REMIX };
 
 /* Chip flags */
 #define JOCKEY3_FLAG_DISCONNECTED 0
+#define JOCKEY3_FLAG_STOPPING     1
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
@@ -191,6 +192,9 @@ static void jockey3_capture_callback(struct urb *urb)
 	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
 
+	if (test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags))
+		return;
+
 	usb_anchor_urb(urb, &chip->capture_anchor);
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0) {
@@ -333,6 +337,9 @@ static void jockey3_playback_callback(struct urb *urb)
 	for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
 		buf[i] = 0x00;
 
+	if (test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags))
+		return;
+
 	usb_anchor_urb(urb, &chip->playback_anchor);
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0) {
@@ -377,6 +384,9 @@ static void jockey3_midi_in_callback(struct urb *urb)
 		}
 	}
 
+	if (test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags))
+		return;
+
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0 && ret != -ENODEV && ret != -EPERM)
 		dev_err(&chip->intf0->dev, "Failed to resubmit MIDI IN URB: %d\n", ret);
@@ -385,6 +395,7 @@ static void jockey3_midi_in_callback(struct urb *urb)
 static void jockey3_stop_urbs(struct jockey3_chip *chip)
 {
 	dev_dbg(&chip->intf0->dev, "Stopping all URBs\n");
+	set_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
 	usb_kill_urb(chip->midi_in_urb);
 	usb_kill_anchored_urbs(&chip->playback_anchor);
 	usb_kill_anchored_urbs(&chip->capture_anchor);
@@ -398,6 +409,7 @@ static void jockey3_start_urbs(struct jockey3_chip *chip)
 		return;
 
 	dev_dbg(&chip->intf0->dev, "Starting all URBs\n");
+	clear_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		usb_anchor_urb(chip->playback_urbs[i], &chip->playback_anchor);
 		ret = usb_submit_urb(chip->playback_urbs[i], GFP_KERNEL);
