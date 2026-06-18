@@ -90,6 +90,16 @@ struct jockey3_chip {
 	bool capture_running;
 };
 
+static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
+{
+    return test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+}
+
+static inline bool jockey3_is_stopping(const struct jockey3_chip *chip)
+{
+    return test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
+}
+
 static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 {
 	struct snd_pcm_substream *substream = chip->playback_substream;
@@ -179,7 +189,7 @@ static void jockey3_capture_callback(struct urb *urb)
 		return;
 	}
 
-	if (unlikely(test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags)))
+	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
 
 	scoped_guard(spinlock_irqsave, &chip->capture_lock) {
@@ -192,7 +202,7 @@ static void jockey3_capture_callback(struct urb *urb)
 	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
 
-	if (test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags))
+	if (jockey3_is_stopping(chip))
 		return;
 
 	usb_anchor_urb(urb, &chip->capture_anchor);
@@ -313,7 +323,7 @@ static void jockey3_playback_callback(struct urb *urb)
 		return;
 	}
 
-	if (unlikely(test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags)))
+	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
 
 	scoped_guard(spinlock_irqsave, &chip->playback_lock) {
@@ -335,7 +345,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
 		buf[i] = 0x00;
 
-	if (test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags))
+	if (jockey3_is_stopping(chip))
 		return;
 
 	usb_anchor_urb(urb, &chip->playback_anchor);
@@ -365,7 +375,7 @@ static void jockey3_midi_in_callback(struct urb *urb)
 		return;
 	}
 
-	if (unlikely(test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags)))
+	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
 
 	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
@@ -382,7 +392,7 @@ static void jockey3_midi_in_callback(struct urb *urb)
 		}
 	}
 
-	if (test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags))
+	if (jockey3_is_stopping(chip))
 		return;
 
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
@@ -403,7 +413,7 @@ static void jockey3_start_urbs(struct jockey3_chip *chip)
 {
 	int i, ret;
 
-	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
+	if (jockey3_is_disconnected(chip))
 		return;
 
 	dev_dbg(&chip->intf0->dev, "Starting all URBs\n");
@@ -434,7 +444,7 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 {
 	int ret;
 
-	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
+	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
 	dev_dbg(&chip->intf0->dev, "Setting rate to %u Hz\n", rate);
@@ -455,7 +465,7 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 
 	dev_dbg(&chip->intf0->dev, "PCM open stream %d\n", substream->stream);
 
-	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
+	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
 	runtime->hw.info =
@@ -532,7 +542,7 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 
 	dev_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
 
-	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
+	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
@@ -553,7 +563,7 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	dev_dbg(&chip->intf0->dev, "PCM trigger stream %d, cmd %d\n", substream->stream, cmd);
 
-	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
+	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
@@ -594,7 +604,7 @@ static int jockey3_handshake_step(struct jockey3_chip *chip)
 {
 	int ret;
 
-	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
+	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
 	ret = ploytec_handshake_step(chip->dev, chip->xfer_buf);
@@ -616,7 +626,7 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	dev_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n",
 		rate, chip->active_streams);
 
-	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
+	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
 	scoped_guard(mutex, &chip->rate_mutex) {
@@ -682,7 +692,7 @@ static int jockey3_midi_in_open(struct snd_rawmidi_substream *substream)
 {
 	struct jockey3_chip *chip = substream->rmidi->private_data;
 
-	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
+	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 	return 0;
 }
@@ -704,7 +714,7 @@ static int jockey3_midi_out_open(struct snd_rawmidi_substream *substream)
 {
 	struct jockey3_chip *chip = substream->rmidi->private_data;
 
-	if (test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags))
+	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 	return 0;
 }
