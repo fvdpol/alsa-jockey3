@@ -854,6 +854,31 @@ static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
 	return 0;
 }
 
+static void jockey3_validate_endpoints(struct usb_interface *intf,
+				       bool *has_pcm_out, bool *has_pcm_in,
+				       bool *has_midi_in)
+{
+	int i, j;
+
+	for (i = 0; i < intf->num_altsetting; i++) {
+		struct usb_host_interface *alts = &intf->altsetting[i];
+
+		for (j = 0; j < alts->desc.bNumEndpoints; j++) {
+			struct usb_endpoint_descriptor *epd = &alts->endpoint[j].desc;
+
+			if (usb_endpoint_is_bulk_out(epd) &&
+			    epd->bEndpointAddress == PLOYTEC_EP_PCM_OUT)
+				*has_pcm_out = true;
+			if (usb_endpoint_is_bulk_in(epd) &&
+			    epd->bEndpointAddress == PLOYTEC_EP_PCM_IN)
+				*has_pcm_in = true;
+			if (usb_endpoint_is_bulk_in(epd) &&
+			    epd->bEndpointAddress == PLOYTEC_EP_MIDI_IN)
+				*has_midi_in = true;
+		}
+	}
+}
+
 static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id *usb_id)
 {
 	struct usb_device *dev = interface_to_usbdev(intf);
@@ -861,6 +886,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	struct snd_card *card;
 	struct jockey3_chip *chip;
 	char *jockey3_type;
+	bool has_pcm_out = false, has_pcm_in = false, has_midi_in = false;
 	int ret;
 	static int dev_idx;
 
@@ -870,6 +896,22 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	intf1 = usb_ifnum_to_if(dev, 1);
 	if (!intf1)
 		return -ENODEV;
+
+	/*
+	 * Validate required endpoints are present in any of the alternate settings
+	 * across both interfaces. Interface 0 usually starts in AltSetting 0
+	 * (zero bandwidth) and we later switch to AltSetting 1 for operation.
+	 */
+	jockey3_validate_endpoints(intf, &has_pcm_out, &has_pcm_in, &has_midi_in);
+	jockey3_validate_endpoints(intf1, &has_pcm_out, &has_pcm_in, &has_midi_in);
+
+	if (!has_pcm_out || !has_pcm_in || !has_midi_in) {
+		dev_err(&intf->dev, "Required bulk endpoints not found (OUT: %s, PCM IN: %s, MIDI IN: %s)\n",
+			has_pcm_out ? "YES" : "NO",
+			has_pcm_in ? "YES" : "NO",
+			has_midi_in ? "YES" : "NO");
+		return -ENODEV;
+	}
 
 	while (dev_idx < SNDRV_CARDS && !enable[dev_idx])
 		dev_idx++;
