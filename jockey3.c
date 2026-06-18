@@ -331,6 +331,7 @@ static void jockey3_playback_callback(struct urb *urb)
 static void jockey3_midi_in_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
+	struct snd_rawmidi_substream *substream;
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
 	int i, ret;
 
@@ -349,14 +350,15 @@ static void jockey3_midi_in_callback(struct urb *urb)
 		return;
 
 	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
-		if (chip->midi_in_substream) {
-			for (i = 0; i < urb->actual_length; i++) {
-				if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
-					dev_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n",
-						buf[i]);
-					snd_rawmidi_receive(chip->midi_in_substream,
-							    &buf[i], 1);
-				}
+		substream = chip->midi_in_substream;
+	}
+
+	if (substream) {
+		for (i = 0; i < urb->actual_length; i++) {
+			if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
+				dev_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n",
+					buf[i]);
+				snd_rawmidi_receive(substream, &buf[i], 1);
 			}
 		}
 	}
@@ -974,6 +976,7 @@ static void jockey3_disconnect(struct usb_interface *intf)
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
 	if (chip && intf == chip->intf0) {
+		snd_card_disconnect(chip->card);
 		chip->stream_running = false;
 		chip->capture_running = false;
 		set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
