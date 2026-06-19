@@ -170,6 +170,23 @@ static bool jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_b
 	return false;
 }
 
+static inline bool jockey3_urb_error_fatal(struct jockey3_chip *chip,
+                                           struct urb *urb,
+                                           const char *type)
+{
+    if (likely(urb->status == 0))
+        return false;
+
+    if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
+        urb->status == -ESHUTDOWN)
+        return true;  /* Silent return, no resubmit */
+
+    /* Fatal error */
+    dev_err(&chip->intf0->dev, "%s URB fatal error: %d\n", type, urb->status);
+    set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+    return true;
+}
+
 static void jockey3_capture_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
@@ -177,17 +194,8 @@ static void jockey3_capture_callback(struct urb *urb)
 	bool period_elapsed = false;
 	int ret;
 
-	if (urb->status) {
-		if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
-		    urb->status == -ESHUTDOWN)
-			return;
-
-		/* Fatal error: stop resubmitting to prevent interrupt storm */
-		dev_err(&chip->intf0->dev, "Capture URB fatal error: %d\n",
-			urb->status);
-		set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+	if (jockey3_urb_error_fatal(chip, urb, "Capture"))
 		return;
-	}
 
 	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
@@ -312,16 +320,8 @@ static void jockey3_playback_callback(struct urb *urb)
 	bool period_elapsed = false;
 	int i, ret;
 
-	if (urb->status) {
-		if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
-		    urb->status == -ESHUTDOWN)
-			return;
-
-		/* Fatal error: stop resubmitting to prevent interrupt storm */
-		dev_err(&chip->intf0->dev, "Playback URB fatal error: %d\n", urb->status);
-		set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+	if (jockey3_urb_error_fatal(chip, urb, "Playback"))
 		return;
-	}
 
 	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
@@ -364,16 +364,8 @@ static void jockey3_midi_in_callback(struct urb *urb)
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
 	int i, ret;
 
-	if (urb->status) {
-		if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
-		    urb->status == -ESHUTDOWN)
-			return;
-
-		/* Fatal error: stop resubmitting to prevent interrupt storm */
-		dev_err(&chip->intf0->dev, "MIDI IN URB fatal error: %d\n", urb->status);
-		set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+	if (jockey3_urb_error_fatal(chip, urb, "MIDI IN"))
 		return;
-	}
 
 	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
