@@ -491,7 +491,7 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 		runtime->hw.channels_max = 6;
 	}
 
-	/* Rate constraints and substream registration under proper locking */
+	/* Rate constraints under proper locking */
 	scoped_guard(mutex, &chip->rate_mutex) {
 		if (chip->active_streams > 0) {
 			/* Force the new stream to match the existing hardware rate */
@@ -502,14 +502,18 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 				return ret;
 		}
 
-		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-			chip->playback_substream = substream;
-		else
-			chip->capture_substream = substream;
-
 		chip->active_streams++;
 		dev_dbg(&chip->intf0->dev, "active_streams incremented to %d\n",
 			chip->active_streams);
+	}
+
+	/* Substream registration under spinlock to ensure memory consistency to the ISR*/
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		guard(spinlock_irqsave)(&chip->playback_lock);
+		chip->playback_substream = substream;
+	} else {
+		guard(spinlock_irqsave)(&chip->capture_lock);
+		chip->capture_substream = substream;
 	}
 
 	return 0;
