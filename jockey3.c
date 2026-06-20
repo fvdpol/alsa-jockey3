@@ -907,13 +907,82 @@ static bool jockey3_has_bulk_endpoint(struct usb_interface *intf, u8 addr, bool 
 	return false;
 }
 
+static int jockey3_validate_endpoints(struct usb_interface *intf0, struct usb_interface *intf1)
+{
+	if (!jockey3_has_bulk_endpoint(intf0, PLOYTEC_EP_PCM_OUT, true) ||
+	    !jockey3_has_bulk_endpoint(intf0, PLOYTEC_EP_MIDI_IN, false)) {
+		dev_err(&intf0->dev, "Required bulk endpoints not found on Interface 0 (OUT: 0x%02x, IN: 0x%02x)\n",
+			PLOYTEC_EP_PCM_OUT, PLOYTEC_EP_MIDI_IN);
+		return -ENODEV;
+	}
+
+	if (!jockey3_has_bulk_endpoint(intf1, PLOYTEC_EP_PCM_IN, false)) {
+		dev_err(&intf0->dev, "Required bulk IN endpoint not found on Interface 1 (IN: 0x%02x)\n",
+			PLOYTEC_EP_PCM_IN);
+		return -ENODEV;
+	}
+	return 0;
+}
+
+static int jockey3_init_pcm(struct jockey3_chip *chip)
+{
+	int ret = snd_pcm_new(chip->card, CARD_NAME " Audio", 0, 1, 1, &chip->pcm);
+
+	if (ret < 0)
+		return ret;
+
+	strscpy(chip->pcm->name, CARD_NAME " Audio", sizeof(chip->pcm->name));
+	chip->pcm->private_data = chip;
+	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_PLAYBACK, &jockey3_pcm_ops);
+	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_CAPTURE, &jockey3_pcm_ops);
+	snd_pcm_set_managed_buffer_all(chip->pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
+	return 0;
+}
+
+static int jockey3_init_midi(struct jockey3_chip *chip)
+{
+	int ret = snd_rawmidi_new(chip->card, CARD_NAME " MIDI", 0, 1, 1, &chip->rmidi);
+
+	if (ret < 0)
+		return ret;
+
+	chip->rmidi->private_data = chip;
+	strscpy(chip->rmidi->name, CARD_NAME " MIDI", sizeof(chip->rmidi->name));
+	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_INPUT, &jockey3_midi_in_ops);
+	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_OUTPUT, &jockey3_midi_out_ops);
+	chip->rmidi->info_flags = SNDRV_RAWMIDI_INFO_INPUT |
+				  SNDRV_RAWMIDI_INFO_OUTPUT |
+				  SNDRV_RAWMIDI_INFO_DUPLEX;
+	return 0;
+}
+
+static void jockey3_setup_card_names(struct jockey3_chip *chip, int driver_info)
+{
+	char *jockey3_type;
+
+	strscpy(chip->card->driver, "snd-reloop-jockey3", sizeof(chip->card->driver));
+	strscpy(chip->card->shortname, CARD_NAME, sizeof(chip->card->shortname));
+
+	switch (driver_info) {
+	case JOCKEY3_ME:
+		jockey3_type = "Master Edition";
+		break;
+	case JOCKEY3_REMIX:
+		jockey3_type = "Remix";
+		break;
+	default:
+		jockey3_type = "Unknown";
+	}
+	snprintf(chip->card->longname, sizeof(chip->card->longname),
+		 "%s %s at USB %s", CARD_NAME, jockey3_type, dev_name(&chip->dev->dev));
+}
+
 static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id *usb_id)
 {
 	struct usb_device *dev = interface_to_usbdev(intf);
 	struct usb_interface *intf1;
 	struct snd_card *card;
 	struct jockey3_chip *chip;
-	char *jockey3_type;
 	int ret;
 	static int dev_idx;
 
@@ -924,23 +993,9 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	if (!intf1)
 		return -ENODEV;
 
-	/*
-	 * Validate required endpoints are present on their respective interfaces.
-	 * Interface 0: PCM OUT (0x05) and MIDI IN (0x83)
-	 * Interface 1: PCM IN (0x86)
-	 */
-	if (!jockey3_has_bulk_endpoint(intf, PLOYTEC_EP_PCM_OUT, true) ||
-	    !jockey3_has_bulk_endpoint(intf, PLOYTEC_EP_MIDI_IN, false)) {
-		dev_err(&intf->dev, "Required bulk endpoints not found on Interface 0 (OUT: 0x%02x, IN: 0x%02x)\n",
-			PLOYTEC_EP_PCM_OUT, PLOYTEC_EP_MIDI_IN);
-		return -ENODEV;
-	}
-
-	if (!jockey3_has_bulk_endpoint(intf1, PLOYTEC_EP_PCM_IN, false)) {
-		dev_err(&intf->dev, "Required bulk IN endpoint not found on Interface 1 (IN: 0x%02x)\n",
-			PLOYTEC_EP_PCM_IN);
-		return -ENODEV;
-	}
+	ret = jockey3_validate_endpoints(intf, intf1);
+	if (ret < 0)
+		return ret;
 
 	while (dev_idx < SNDRV_CARDS && !enable[dev_idx])
 		dev_idx++;
@@ -1007,43 +1062,15 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	if (ret)
 		return ret;
 
-	ret = snd_pcm_new(card, CARD_NAME " Audio", 0, 1, 1, &chip->pcm);
+	ret = jockey3_init_pcm(chip);
 	if (ret < 0)
 		return ret;
 
-	strscpy(chip->pcm->name, CARD_NAME " Audio", sizeof(chip->pcm->name));
-	chip->pcm->private_data = chip;
-	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_PLAYBACK, &jockey3_pcm_ops);
-	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_CAPTURE, &jockey3_pcm_ops);
-	snd_pcm_set_managed_buffer_all(chip->pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
-
-	ret = snd_rawmidi_new(card, CARD_NAME " MIDI", 0, 1, 1, &chip->rmidi);
+	ret = jockey3_init_midi(chip);
 	if (ret < 0)
 		return ret;
 
-	chip->rmidi->private_data = chip;
-	strscpy(chip->rmidi->name, CARD_NAME " MIDI", sizeof(chip->rmidi->name));
-	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_INPUT, &jockey3_midi_in_ops);
-	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_OUTPUT, &jockey3_midi_out_ops);
-	chip->rmidi->info_flags = SNDRV_RAWMIDI_INFO_INPUT |
-				  SNDRV_RAWMIDI_INFO_OUTPUT |
-				  SNDRV_RAWMIDI_INFO_DUPLEX;
-
-	strscpy(card->driver, "snd-reloop-jockey3", sizeof(card->driver));
-	strscpy(card->shortname, CARD_NAME, sizeof(card->shortname));
-
-	switch (usb_id->driver_info) {
-	case JOCKEY3_ME:
-		jockey3_type = "Master Edition";
-		break;
-	case JOCKEY3_REMIX:
-		jockey3_type = "Remix";
-		break;
-	default:
-		jockey3_type = "Unknown";
-	}
-	snprintf(card->longname, sizeof(card->longname),
-		 "%s %s at USB %s", CARD_NAME, jockey3_type, dev_name(&dev->dev));
+	jockey3_setup_card_names(chip, usb_id->driver_info);
 
 	if (card->id[0] == '\0')
 		snd_card_set_id(card, "RJ3");
