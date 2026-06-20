@@ -565,16 +565,32 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		guard(spinlock_irqsave)(&chip->playback_lock);
-		if (cmd == SNDRV_PCM_TRIGGER_START)
+		switch (cmd) {
+		case SNDRV_PCM_TRIGGER_START:
+		case SNDRV_PCM_TRIGGER_RESUME:
 			chip->stream_running = true;
-		else if (cmd == SNDRV_PCM_TRIGGER_STOP)
+			break;
+		case SNDRV_PCM_TRIGGER_STOP:
+		case SNDRV_PCM_TRIGGER_SUSPEND:
 			chip->stream_running = false;
+			break;
+		default:
+			return -EINVAL;
+		}
 	} else {
 		guard(spinlock_irqsave)(&chip->capture_lock);
-		if (cmd == SNDRV_PCM_TRIGGER_START)
+		switch (cmd) {
+		case SNDRV_PCM_TRIGGER_START:
+		case SNDRV_PCM_TRIGGER_RESUME:
 			chip->capture_running = true;
-		else if (cmd == SNDRV_PCM_TRIGGER_STOP)
+			break;
+		case SNDRV_PCM_TRIGGER_STOP:
+		case SNDRV_PCM_TRIGGER_SUSPEND:
 			chip->capture_running = false;
+			break;
+		default:
+			return -EINVAL;
+		}
 	}
 
 	return 0;
@@ -1099,12 +1115,69 @@ static int jockey3_post_reset(struct usb_interface *intf)
 	return 0;
 }
 
+static int jockey3_suspend(struct usb_interface *intf, pm_message_t message)
+{
+	struct jockey3_chip *chip = usb_get_intfdata(intf);
+
+	if (chip && intf == chip->intf0) {
+		dev_dbg(&intf->dev, "USB suspend, stopping URBs\n");
+		jockey3_stop_urbs(chip);
+	}
+	return 0;
+}
+
+static int jockey3_restore_device(struct jockey3_chip *chip, bool reset)
+{
+	int ret;
+
+	guard(mutex)(&chip->rate_mutex);
+
+	if (reset) {
+		ret = jockey3_handshake_step(chip);
+		if (ret < 0)
+			return ret;
+	}
+
+	ret = jockey3_set_rate(chip, chip->current_rate);
+	if (ret < 0)
+		return ret;
+	msleep(20);
+
+	jockey3_start_urbs(chip);
+	return 0;
+}
+
+static int jockey3_resume(struct usb_interface *intf)
+{
+	struct jockey3_chip *chip = usb_get_intfdata(intf);
+
+	if (chip && intf == chip->intf0) {
+		dev_dbg(&intf->dev, "USB resume, restoring device\n");
+		return jockey3_restore_device(chip, false);
+	}
+	return 0;
+}
+
+static int jockey3_reset_resume(struct usb_interface *intf)
+{
+	struct jockey3_chip *chip = usb_get_intfdata(intf);
+
+	if (chip && intf == chip->intf0) {
+		dev_dbg(&intf->dev, "USB reset resume, restoring device\n");
+		return jockey3_restore_device(chip, true);
+	}
+	return 0;
+}
+
 static struct usb_driver jockey3_driver = {
 	.name = "snd-reloop-jockey3",
 	.probe = jockey3_probe,
 	.disconnect = jockey3_disconnect,
 	.pre_reset = jockey3_pre_reset,
 	.post_reset = jockey3_post_reset,
+	.suspend = jockey3_suspend,
+	.resume = jockey3_resume,
+	.reset_resume = jockey3_reset_resume,
 	.id_table = jockey3_ids
 };
 
