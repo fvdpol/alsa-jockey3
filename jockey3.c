@@ -92,12 +92,12 @@ struct jockey3_chip {
 
 static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
 {
-    return test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+	return test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
 }
 
 static inline bool jockey3_is_stopping(const struct jockey3_chip *chip)
 {
-    return test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
+	return test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
 }
 
 static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
@@ -116,7 +116,7 @@ static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 		return false;
 
 	pcm_buffer_size = snd_pcm_lib_buffer_bytes(substream);
-	alsa_frame_size = runtime->channels * 3;
+	alsa_frame_size = runtime->channels * 3;  // 4 * 3 = 12 bytes
 
 	for (f = 0; f < PLOYTEC_PLAYBACK_FRAMES; f++) {
 		ploytec_encode_s24_3le(urb_buf + f * PLOYTEC_PLAYBACK_FRAME_SIZE,
@@ -171,20 +171,19 @@ static bool jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_b
 }
 
 static inline bool jockey3_urb_error_fatal(struct jockey3_chip *chip,
-                                           struct urb *urb,
-                                           const char *type)
+					   struct urb *urb,
+					   const char *type)
 {
-    if (likely(urb->status == 0))
-        return false;
+	if (likely(urb->status == 0))
+		return false;
 
-    if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
-        urb->status == -ESHUTDOWN)
-        return true;  /* Silent return, no resubmit */
+	if (urb->status == -ENOENT || urb->status == -ECONNRESET || urb->status == -ESHUTDOWN)
+		return true;  /* Silent return, no resubmit */
 
-    /* Fatal error */
-    dev_err(&chip->intf0->dev, "%s URB fatal error: %d\n", type, urb->status);
-    set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
-    return true;
+	/* Fatal error */
+	dev_err(&chip->intf0->dev, "%s URB fatal error: %d\n", type, urb->status);
+	set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+	return true;
 }
 
 static void jockey3_capture_callback(struct urb *urb)
@@ -474,7 +473,12 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 	runtime->hw.rate_min = 44100;
 	runtime->hw.rate_max = 96000;
 	runtime->hw.buffer_bytes_max = 1024 * 1024;
-	runtime->hw.period_bytes_min = 64;
+
+	/* The period minimum bytes is limited by packet size of the USB URB frames
+	 * - Playback URB: 10 frames * 4 channels * 3 bytes/sample = 120 bytes
+	 * - Capture URB: 8 frames 6 channels * 3 bytes/sample = 144 bytes
+	 */
+	runtime->hw.period_bytes_min = 144;
 	runtime->hw.period_bytes_max = 512 * 1024;
 	runtime->hw.periods_min = 2;
 	runtime->hw.periods_max = 1024;
@@ -503,7 +507,7 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 		else
 			chip->capture_substream = substream;
 
-		chip->active_streams++;		
+		chip->active_streams++;
 		dev_dbg(&chip->intf0->dev, "active_streams incremented to %d\n",
 			chip->active_streams);
 	}
