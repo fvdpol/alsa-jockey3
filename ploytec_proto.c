@@ -151,7 +151,7 @@ void ploytec_prepare_out_packet(u8 *buf)
 }
 
 /**
- * ploytec_handshake_step - Perform the Ploytec handshake sequence
+ * ploytec_handshake_step - Perform Ploytec handshake sequence as observed in captured USB traces.
  * @dev: USB device
  * @xfer_buf: Temporary transfer buffer
  */
@@ -277,3 +277,56 @@ int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
 
 	return 0;
 }
+
+/**
+ * ploytec_midi_process_byte - Process a MIDI byte for Ploytec protocol
+ * @state: The MIDI state machine instance
+ * @b: The raw MIDI byte
+ * @dev: Pointer to the struct device for logging
+ *
+ * Expands MIDI running status for the Ploytec firmware.
+ */
+u8 ploytec_midi_process_byte(struct ploytec_midi_state *state, u8 b, struct device *dev)
+{
+	u8 byte;
+
+	if (state->has_queued_byte) {
+		byte = state->queued_byte;
+		state->has_queued_byte = false;
+		return byte;
+	}
+
+	if (b >= 0x80) { // Status byte
+		if (b < 0xf0) { // Channel Voice Message (0x80-0xEF)
+			state->last_status = b;
+			/* Determine expected data bytes based on MIDI opcode */
+			if ((b & 0xf0) == 0xc0 || (b & 0xf0) == 0xd0)
+				state->expected_data = 1; // PC, Channel Pressure
+			else
+				state->expected_data = 2; // Note On/Off, CC, etc.
+		} else if (b < 0xf8) { // System Common Message (0xf0-0xf7)
+			/* System Common messages clear Running Status */
+			state->last_status = 0;
+			state->expected_data = 0;
+		}
+		/* Real-time messages (0xf8-0xff) do not affect state */
+		return b;
+	}
+
+	// Data byte
+	if (state->expected_data > 0) {
+		state->expected_data--;
+		return b;
+	} else if (state->last_status >= 0x80) {
+		/* Message is complete but we got a data byte -> expand Running Status */
+		byte = state->last_status;
+		state->queued_byte = b;
+		state->has_queued_byte = true;
+		dev_dbg(dev, "MIDI OUT: Running Status Expansion, queued 0x%02x\n", b);
+		return byte;
+	}
+
+	/* No running status expansion active, just send the data byte */
+	return b;
+}
+

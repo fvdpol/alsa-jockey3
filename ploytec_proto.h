@@ -46,6 +46,16 @@
 void ploytec_encode_s24_3le(u8 *dest, const u8 *src);
 void ploytec_decode_s24_3le(u8 *dest, const u8 *src);
 
+struct ploytec_midi_state {
+	int expected_data;
+	u8 last_status;
+	u8 queued_byte;
+	bool has_queued_byte;
+};
+
+/* MIDI protocol state machine */
+u8 ploytec_midi_process_byte(struct ploytec_midi_state *state, u8 b, struct device *dev);
+
 /* Protocol Helpers */
 void ploytec_prepare_out_packet(u8 *buf);
 int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf);
