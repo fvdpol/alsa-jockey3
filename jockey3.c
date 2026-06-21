@@ -64,10 +64,7 @@ struct jockey3_chip {
 	unsigned char *midi_in_buf;
 	spinlock_t midi_lock; // protects MIDI substreams in completion handlers and rate-limiting
 	unsigned int midi_out_acc;
-	int midi_expected_data;
-	u8 midi_last_status;
-	u8 midi_queued_byte;
-	bool midi_has_queued_byte;
+	struct ploytec_midi_state midi_state;
 
 	/* Playback Path */
 	struct snd_pcm_substream *playback_substream;
@@ -224,7 +221,7 @@ static void jockey3_capture_callback(struct urb *urb)
 static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 {
 	struct snd_rawmidi_substream *substream;
-	u8 byte = PLOYTEC_MIDI_IDLE_BYTE;
+	u8 byte;
 	u8 b;
 	unsigned long flags;
 
@@ -242,14 +239,6 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 
 	chip->midi_out_acc -= (chip->current_rate / 10);
 
-	if (chip->midi_has_queued_byte) {
-		byte = chip->midi_queued_byte;
-		chip->midi_has_queued_byte = false;
-		spin_unlock_irqrestore(&chip->midi_lock, flags);
-		dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
-		return byte;
-	}
-
 	substream = chip->midi_out_substream;
 	spin_unlock_irqrestore(&chip->midi_lock, flags);
 
@@ -260,54 +249,9 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 		return PLOYTEC_MIDI_IDLE_BYTE;
 
 	spin_lock_irqsave(&chip->midi_lock, flags);
-
-	/*
-	 * Running Status Expansion and Protocol correction:
-	 * The Ploytec firmware's internal MIDI parser does not support Running Status.
-	 */
-	if (b >= 0x80) { // Status byte
-		if (b < 0xf0) { // Channel Voice Message (0x80-0xEF)
-			chip->midi_last_status = b;
-			/* Determine expected data bytes based on MIDI opcode */
-			if ((b & 0xf0) == 0xc0 || (b & 0xf0) == 0xd0)
-				chip->midi_expected_data = 1; // PC, Channel Pressure
-			else
-				chip->midi_expected_data = 2; // Note On/Off, CC, etc.
-		} else if (b < 0xf8) { // System Common Message (0xf0-0xf7)
-			/* System Common messages clear Running Status */
-			chip->midi_last_status = 0;
-			chip->midi_expected_data = 0;
-		}
-		/* Real-time messages (0xf8-0xff) do not affect state */
-
-		byte = b;
-		dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
-	} else { // Data byte
-		if (chip->midi_expected_data > 0) {
-			byte = b;
-			chip->midi_expected_data--;
-			dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
-		} else if (chip->midi_last_status >= 0x80) {
-			/* Message is complete but we got a data byte -> expand Running Status */
-			byte = chip->midi_last_status;
-			chip->midi_queued_byte = b;
-			chip->midi_has_queued_byte = true;
-
-			/* Set expectation for the remainder of the expanded message */
-			if ((byte & 0xf0) == 0xc0 || (byte & 0xf0) == 0xd0)
-				chip->midi_expected_data = 0; // 1 total, 1 already queued
-			else
-				chip->midi_expected_data = 1; // 2 total, 1 already queued
-
-			dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x (Running Status)\n", byte);
-		} else {
-			/* No running status expansion active, just send the data byte */
-			byte = b;
-			dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x (Raw)\n", byte);
-		}
-	}
-
+	byte = ploytec_midi_process_byte(&chip->midi_state, b, &chip->intf0->dev);
 	spin_unlock_irqrestore(&chip->midi_lock, flags);
+
 	return byte;
 }
 
@@ -1028,6 +972,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	spin_lock_init(&chip->playback_lock);
 	spin_lock_init(&chip->capture_lock);
 	mutex_init(&chip->rate_mutex);
+	memset(&chip->midi_state, 0, sizeof(chip->midi_state));
 
 	init_usb_anchor(&chip->playback_anchor);
 	init_usb_anchor(&chip->capture_anchor);
