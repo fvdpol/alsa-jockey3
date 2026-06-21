@@ -562,6 +562,42 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	return 0;
 }
 
+static int jockey3_pcm_trigger_playback(struct jockey3_chip *chip, int cmd)
+{
+	guard(spinlock_irqsave)(&chip->playback_lock);
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+		chip->stream_running = true;
+		break;
+	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
+		chip->stream_running = false;
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static int jockey3_pcm_trigger_capture(struct jockey3_chip *chip, int cmd)
+{
+	guard(spinlock_irqsave)(&chip->capture_lock);
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+		chip->capture_running = true;
+		break;
+	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
+		chip->capture_running = false;
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
 static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
@@ -571,37 +607,10 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		guard(spinlock_irqsave)(&chip->playback_lock);
-		switch (cmd) {
-		case SNDRV_PCM_TRIGGER_START:
-		case SNDRV_PCM_TRIGGER_RESUME:
-			chip->stream_running = true;
-			break;
-		case SNDRV_PCM_TRIGGER_STOP:
-		case SNDRV_PCM_TRIGGER_SUSPEND:
-			chip->stream_running = false;
-			break;
-		default:
-			return -EINVAL;
-		}
-	} else {
-		guard(spinlock_irqsave)(&chip->capture_lock);
-		switch (cmd) {
-		case SNDRV_PCM_TRIGGER_START:
-		case SNDRV_PCM_TRIGGER_RESUME:
-			chip->capture_running = true;
-			break;
-		case SNDRV_PCM_TRIGGER_STOP:
-		case SNDRV_PCM_TRIGGER_SUSPEND:
-			chip->capture_running = false;
-			break;
-		default:
-			return -EINVAL;
-		}
-	}
-
-	return 0;
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		return jockey3_pcm_trigger_playback(chip, cmd);
+	else
+		return jockey3_pcm_trigger_capture(chip, cmd);
 }
 
 static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream)
