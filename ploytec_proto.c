@@ -284,21 +284,17 @@ int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
  * @b: The raw MIDI byte
  * @dev: Pointer to the struct device for logging
  *
- * Expands MIDI running status for the Ploytec firmware.
+ * The Ploytec firmware does not handle MIDI Running Status. To avoid data issues processing
+ * valid MIDI streams with Running Status, we implement a simple state machine to expand the
+ * Running Status messages into full MIDI messages before sending them to the device.
  */
 u8 ploytec_midi_process_byte(struct ploytec_midi_state *state, u8 b, struct device *dev)
 {
 	u8 byte;
 
-	if (state->has_queued_byte) {
-		byte = state->queued_byte;
-		state->has_queued_byte = false;
-		return byte;
-	}
-
 	if (b >= 0x80) { // Status byte
 		if (b < 0xf0) { // Channel Voice Message (0x80-0xEF)
-			state->last_status = b;
+			state->running_status = b;
 			/* Determine expected data bytes based on MIDI opcode */
 			if ((b & 0xf0) == 0xc0 || (b & 0xf0) == 0xd0)
 				state->expected_data = 1; // PC, Channel Pressure
@@ -306,23 +302,25 @@ u8 ploytec_midi_process_byte(struct ploytec_midi_state *state, u8 b, struct devi
 				state->expected_data = 2; // Note On/Off, CC, etc.
 		} else if (b < 0xf8) { // System Common Message (0xf0-0xf7)
 			/* System Common messages clear Running Status */
-			state->last_status = 0;
+			state->running_status = 0;
 			state->expected_data = 0;
 		}
 		/* Real-time messages (0xf8-0xff) do not affect state */
+
+		state->data_count = state->expected_data; // initialise expected data byte count
 		return b;
 	}
 
-	// Data byte
-	if (state->expected_data > 0) {
-		state->expected_data--;
+	/* Data byte */
+	if (state->data_count > 0) {
+		state->data_count--;
 		return b;
-	} else if (state->last_status >= 0x80) {
+	} else if (state->running_status >= 0x80) {
 		/* Message is complete but we got a data byte -> expand Running Status */
-		byte = state->last_status;
+		byte = state->running_status;
 		state->queued_byte = b;
 		state->has_queued_byte = true;
-		dev_dbg(dev, "MIDI OUT: Running Status Expansion, queued 0x%02x\n", b);
+		state->data_count = state->expected_data - 1; // already 1 byte queued
 		return byte;
 	}
 

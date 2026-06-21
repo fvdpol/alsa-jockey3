@@ -47,8 +47,9 @@ void ploytec_encode_s24_3le(u8 *dest, const u8 *src);
 void ploytec_decode_s24_3le(u8 *dest, const u8 *src);
 
 struct ploytec_midi_state {
-	int expected_data;
-	u8 last_status;
+	int expected_data;	// number data bytes for the 'running status' voice message
+	int data_count;
+	u8 running_status;	// the 'running status' (voice message)
 	u8 queued_byte;
 	bool has_queued_byte;
 };
