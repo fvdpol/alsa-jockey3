@@ -236,8 +236,16 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 		spin_unlock_irqrestore(&chip->midi_lock, flags);
 		return PLOYTEC_MIDI_IDLE_BYTE;
 	}
-
 	chip->midi_out_acc -= (chip->current_rate / 10);
+
+	/* Handle queued byte from Running Status expansion first before consuming from ALSA */
+	if (chip->midi_state.has_queued_byte) {
+		byte = chip->midi_state.queued_byte;
+		chip->midi_state.has_queued_byte = false;
+		spin_unlock_irqrestore(&chip->midi_lock, flags);
+		dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
+		return byte;
+	}
 
 	substream = chip->midi_out_substream;
 	spin_unlock_irqrestore(&chip->midi_lock, flags);
@@ -251,6 +259,7 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 	spin_lock_irqsave(&chip->midi_lock, flags);
 	byte = ploytec_midi_process_byte(&chip->midi_state, b, &chip->intf0->dev);
 	spin_unlock_irqrestore(&chip->midi_lock, flags);
+	dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
 
 	return byte;
 }
@@ -418,7 +427,8 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 	runtime->hw.rate_max = 96000;
 	runtime->hw.buffer_bytes_max = 1024 * 1024;
 
-	/* The period minimum bytes is limited by packet size of the USB URB frames
+	/*
+	 * The period minimum bytes is limited by packet size of the USB URB frames
 	 * - Playback URB: 10 frames * 4 channels * 3 bytes/sample = 120 bytes
 	 * - Capture URB: 8 frames 6 channels * 3 bytes/sample = 144 bytes
 	 */
