@@ -304,8 +304,9 @@ u8 ploytec_midi_process_byte(struct ploytec_midi_state *state, u8 b, struct devi
 			/* System Common messages clear Running Status */
 			state->running_status = 0;
 			state->expected_data = 0;
-		}
-		/* Real-time messages (0xf8-0xff) do not affect state */
+		} else 
+			/* System Real-Time Message (0xf8-0xff), do not affect Running State */
+			return b;
 
 		state->data_count = state->expected_data; // initialise expected data byte count
 		return b;
