@@ -806,7 +806,7 @@ static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
 		ploytec_prepare_out_packet(chip->playback_bufs[i]);
 
 		usb_fill_bulk_urb(chip->playback_urbs[i], dev,
-				  usb_sndbulkpipe(dev, PLOYTEC_EP_PCM_OUT),
+				  usb_sndbulkpipe(dev, PLOYTEC_EP_NUM_PCM_OUT),
 				  chip->playback_bufs[i], PLOYTEC_PKT_SIZE,
 				  jockey3_playback_callback, chip);
 	}
@@ -838,7 +838,7 @@ static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
 			return ret;
 
 		usb_fill_bulk_urb(chip->capture_urbs[i], dev,
-				  usb_rcvbulkpipe(dev, PLOYTEC_EP_PCM_IN),
+				  usb_rcvbulkpipe(dev, PLOYTEC_EP_NUM_PCM_IN),
 				  chip->capture_bufs[i], PLOYTEC_PKT_SIZE,
 				  jockey3_capture_callback, chip);
 	}
@@ -846,7 +846,7 @@ static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
 	return 0;
 }
 
-static bool jockey3_has_bulk_endpoint(struct usb_interface *intf, u8 addr, bool out)
+static bool jockey3_has_bulk_endpoint(struct usb_interface *intf, u8 ep_num, bool out)
 {
 	int i, j;
 
@@ -858,11 +858,11 @@ static bool jockey3_has_bulk_endpoint(struct usb_interface *intf, u8 addr, bool 
 
 			if (out) {
 				if (usb_endpoint_is_bulk_out(epd) &&
-				    epd->bEndpointAddress == addr)
+				    usb_endpoint_num(epd) == ep_num)
 					return true;
 			} else {
 				if (usb_endpoint_is_bulk_in(epd) &&
-				    epd->bEndpointAddress == addr)
+				    usb_endpoint_num(epd) == ep_num)
 					return true;
 			}
 		}
@@ -872,16 +872,16 @@ static bool jockey3_has_bulk_endpoint(struct usb_interface *intf, u8 addr, bool 
 
 static int jockey3_validate_endpoints(struct usb_interface *intf0, struct usb_interface *intf1)
 {
-	if (!jockey3_has_bulk_endpoint(intf0, PLOYTEC_EP_PCM_OUT, true) ||
-	    !jockey3_has_bulk_endpoint(intf0, PLOYTEC_EP_MIDI_IN, false)) {
+	if (!jockey3_has_bulk_endpoint(intf0, PLOYTEC_EP_NUM_PCM_OUT, true) ||
+	    !jockey3_has_bulk_endpoint(intf0, PLOYTEC_EP_NUM_MIDI_IN, false)) {
 		dev_err(&intf0->dev, "Required bulk endpoints not found on Interface 0 (OUT: 0x%02x, IN: 0x%02x)\n",
-			PLOYTEC_EP_PCM_OUT, PLOYTEC_EP_MIDI_IN);
+			PLOYTEC_EP_NUM_PCM_OUT, PLOYTEC_EP_NUM_MIDI_IN);
 		return -ENODEV;
 	}
 
-	if (!jockey3_has_bulk_endpoint(intf1, PLOYTEC_EP_PCM_IN, false)) {
+	if (!jockey3_has_bulk_endpoint(intf1, PLOYTEC_EP_NUM_PCM_IN, false)) {
 		dev_err(&intf0->dev, "Required bulk IN endpoint not found on Interface 1 (IN: 0x%02x)\n",
-			PLOYTEC_EP_PCM_IN);
+			PLOYTEC_EP_NUM_PCM_IN);
 		return -ENODEV;
 	}
 	return 0;
@@ -1017,7 +1017,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 		return ret;
 
 	usb_fill_bulk_urb(chip->midi_in_urb, dev,
-			  usb_rcvbulkpipe(dev, PLOYTEC_EP_MIDI_IN),
+			  usb_rcvbulkpipe(dev, PLOYTEC_EP_NUM_MIDI_IN),
 			  chip->midi_in_buf, PLOYTEC_PKT_SIZE,
 			  jockey3_midi_in_callback, chip);
 
