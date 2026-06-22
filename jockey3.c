@@ -196,6 +196,12 @@ static void jockey3_capture_callback(struct urb *urb)
 	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
 
+	if (unlikely(urb->actual_length < PLOYTEC_CAPTURE_FRAMES * PLOYTEC_CAPTURE_FRAME_SIZE)) {
+		dev_err(&chip->intf0->dev, "Capture URB too small: %d; required: %d\n",
+			urb->actual_length, PLOYTEC_CAPTURE_FRAMES * PLOYTEC_CAPTURE_FRAME_SIZE);
+		return;
+	}
+
 	scoped_guard(spinlock_irqsave, &chip->capture_lock) {
 		if (chip->capture_running && chip->capture_substream) {
 			period_elapsed = jockey3_process_in_packet(chip, urb->transfer_buffer);
