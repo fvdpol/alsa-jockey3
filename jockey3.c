@@ -74,7 +74,7 @@ struct jockey3_chip {
 	spinlock_t playback_lock; // protects playback stream state and buffer offsets
 	unsigned int dma_off;
 	unsigned int period_off;
-	bool stream_running;
+	bool playback_running;
 
 	/* Capture Path */
 	struct snd_pcm_substream *capture_substream;
@@ -285,7 +285,7 @@ static void jockey3_playback_callback(struct urb *urb)
 		return;
 
 	scoped_guard(spinlock_irqsave, &chip->playback_lock) {
-		if (chip->stream_running && chip->playback_substream) {
+		if (chip->playback_running && chip->playback_substream) {
 			period_elapsed = jockey3_process_out_packet(chip, buf);
 			substream = chip->playback_substream;
 		} else {
@@ -467,7 +467,7 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 			chip->active_streams);
 	}
 
-	/* Substream registration under spinlock to ensure memory consistency to the ISR*/
+	/* Substream registration under spinlock to ensure memory consistency to the ISR */
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		guard(spinlock_irqsave)(&chip->playback_lock);
 		chip->playback_substream = substream;
@@ -492,7 +492,7 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		guard(spinlock_irqsave)(&chip->playback_lock);
 		chip->playback_substream = NULL;
-		chip->stream_running = false;
+		chip->playback_running = false;
 	} else {
 		guard(spinlock_irqsave)(&chip->capture_lock);
 		chip->capture_substream = NULL;
@@ -528,11 +528,11 @@ static int jockey3_pcm_trigger_playback(struct jockey3_chip *chip, int cmd)
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
-		chip->stream_running = true;
+		chip->playback_running = true;
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
-		chip->stream_running = false;
+		chip->playback_running = false;
 		break;
 	default:
 		return -EINVAL;
@@ -631,7 +631,7 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 		 * enforced the constraint from jockey3_pcm_open. We still
 		 * sanity check here to be safe.
 		 */
-		if (chip->active_streams > 1) {
+		if (chip->playback_running || chip->capture_running) {
 			dev_err(&chip->intf0->dev, "Cannot change rate while other stream is active\n");
 			return -EBUSY;
 		}
@@ -1071,7 +1071,7 @@ static void jockey3_disconnect(struct usb_interface *intf)
 
 	if (chip && intf == chip->intf0) {
 		snd_card_disconnect(chip->card);
-		chip->stream_running = false;
+		chip->playback_running = false;
 		chip->capture_running = false;
 		set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
 		/*
