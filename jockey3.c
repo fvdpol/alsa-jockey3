@@ -43,6 +43,15 @@ MODULE_PARM_DESC(id, "ID string for " CARD_NAME " soundcard.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 
+/* Per-stream state machine (for safe handshake with continuous URBs) */
+enum jockey3_stream_state {
+	STREAM_IDLE = 0,	/* No substream attached */
+	STREAM_OPEN,		/* substream registered, but not started */
+	STREAM_RUNNING,		/* Active audio processing */
+	STREAM_STOPPING,	/* Stop/Close/Suspend requested - waiting for callback ack */
+	STREAM_STOPPED,		/* Callback has acknowledged stop - safe to release substream */
+};
+
 struct jockey3_chip {
 	/* Core ALSA and USB handles (Mostly read-only after probe) */
 	struct snd_card *card;
@@ -72,9 +81,9 @@ struct jockey3_chip {
 	struct urb *playback_urbs[JOCKEY3_N_URBS];
 	unsigned char *playback_bufs[JOCKEY3_N_URBS];
 	spinlock_t playback_lock; // protects playback stream state and buffer offsets
-	unsigned int dma_off;
-	unsigned int period_off;
-	bool playback_running;
+	enum jockey3_stream_state playback_state;
+	unsigned int playback_dma_off;
+	unsigned int playback_period_off;
 
 	/* Capture Path */
 	struct snd_pcm_substream *capture_substream;
@@ -82,10 +91,41 @@ struct jockey3_chip {
 	struct urb *capture_urbs[JOCKEY3_N_URBS];
 	unsigned char *capture_bufs[JOCKEY3_N_URBS];
 	spinlock_t capture_lock; // protects capture stream state and buffer offsets
+	enum jockey3_stream_state capture_state;
 	unsigned int capture_dma_off;
 	unsigned int capture_period_off;
-	bool capture_running;
 };
+
+static inline bool jockey3_stream_is_running(enum jockey3_stream_state state)
+{
+	return state == STREAM_RUNNING;
+}
+
+static inline bool jockey3_stream_is_stopping_or_stopped(enum jockey3_stream_state state)
+{
+	return state == STREAM_STOPPING || state == STREAM_STOPPED;
+}
+
+static inline void jockey3_set_stream_state(struct jockey3_chip *chip,
+					    struct snd_pcm_substream *substream,
+					    enum jockey3_stream_state new_state)
+{
+	/* ... helper to be expanded in follow-up patches */
+}
+
+/* Force terminal state (used in disconnect and error paths) */
+static inline void jockey3_force_stream_stop(struct jockey3_chip *chip,
+					     struct snd_pcm_substream **substream_ptr,
+					     enum jockey3_stream_state *state_ptr,
+					     spinlock_t *lock)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(lock, flags);  /* appropriate lock */
+	*substream_ptr = NULL;
+	*state_ptr = STREAM_STOPPED;
+	spin_unlock_irqrestore(lock, flags);
+}
 
 static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
 {
@@ -113,19 +153,19 @@ static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 		return false;
 
 	pcm_buffer_size = snd_pcm_lib_buffer_bytes(substream);
-	alsa_frame_size = runtime->channels * 3;  // 4 * 3 = 12 bytes
+	alsa_frame_size = runtime->channels * 3;  // 4 channels * 3 bytes/sample = 12 bytes
 
 	for (f = 0; f < PLOYTEC_PLAYBACK_FRAMES; f++) {
 		ploytec_encode_s24_3le(urb_buf + f * PLOYTEC_PLAYBACK_FRAME_SIZE,
-				       runtime->dma_area + chip->dma_off);
-		chip->dma_off += alsa_frame_size;
-		if (chip->dma_off >= pcm_buffer_size)
-			chip->dma_off -= pcm_buffer_size;
-		chip->period_off += alsa_frame_size;
+				       runtime->dma_area + chip->playback_dma_off);
+		chip->playback_dma_off += alsa_frame_size;
+		if (chip->playback_dma_off >= pcm_buffer_size)
+			chip->playback_dma_off -= pcm_buffer_size;
+		chip->playback_period_off += alsa_frame_size;
 	}
 
-	if (chip->period_off >= runtime->period_size * alsa_frame_size) {
-		chip->period_off %= runtime->period_size * alsa_frame_size;
+	if (chip->playback_period_off >= runtime->period_size * alsa_frame_size) {
+		chip->playback_period_off %= runtime->period_size * alsa_frame_size;
 		return true;
 	}
 
@@ -148,7 +188,7 @@ static bool jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_b
 		return false;
 
 	pcm_buffer_size = snd_pcm_lib_buffer_bytes(substream);
-	alsa_frame_size = runtime->channels * 3; // 6 * 3 = 18 bytes
+	alsa_frame_size = runtime->channels * 3; // 6 channels * 3 bytes/sample = 18 bytes
 
 	for (f = 0; f < PLOYTEC_CAPTURE_FRAMES; f++) {
 		ploytec_decode_s24_3le(runtime->dma_area + chip->capture_dma_off,
@@ -196,6 +236,7 @@ static void jockey3_capture_callback(struct urb *urb)
 	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
 
+	/* Failsafe to prevent packet processing if we have an undersized URB*/
 	if (unlikely(urb->actual_length < PLOYTEC_CAPTURE_FRAMES * PLOYTEC_CAPTURE_FRAME_SIZE)) {
 		dev_err(&chip->intf0->dev, "Capture URB too small: %d; required: %d\n",
 			urb->actual_length, PLOYTEC_CAPTURE_FRAMES * PLOYTEC_CAPTURE_FRAME_SIZE);
@@ -203,7 +244,8 @@ static void jockey3_capture_callback(struct urb *urb)
 	}
 
 	scoped_guard(spinlock_irqsave, &chip->capture_lock) {
-		if (chip->capture_running && chip->capture_substream) {
+		if (jockey3_stream_is_running(chip->capture_state) &&
+		    chip->capture_substream) {
 			period_elapsed = jockey3_process_in_packet(chip, urb->transfer_buffer);
 			substream = chip->capture_substream;
 		}
@@ -284,8 +326,16 @@ static void jockey3_playback_callback(struct urb *urb)
 	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
 
+	/* Failsafe to prevent packet processing if we have an undersized URB*/
+	if (unlikely(urb->actual_length < PLOYTEC_PLAYBACK_FRAMES * PLOYTEC_PLAYBACK_FRAME_SIZE)) {
+		dev_err(&chip->intf0->dev, "Playback URB too small: %d; required: %d\n",
+			urb->actual_length, PLOYTEC_PLAYBACK_FRAMES * PLOYTEC_PLAYBACK_FRAME_SIZE);
+		return;
+	}
+
 	scoped_guard(spinlock_irqsave, &chip->playback_lock) {
-		if (chip->playback_running && chip->playback_substream) {
+		if (jockey3_stream_is_running(chip->playback_state) &&
+		    chip->playback_substream) {
 			period_elapsed = jockey3_process_out_packet(chip, buf);
 			substream = chip->playback_substream;
 		} else {
@@ -354,6 +404,7 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 {
 	dev_dbg(&chip->intf0->dev, "Stopping all URBs\n");
 	set_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
+	/* TODO: in follow-up: set both stream states to STOPPING and wait for ack */
 	usb_kill_urb(chip->midi_in_urb);
 	usb_kill_anchored_urbs(&chip->playback_anchor);
 	usb_kill_anchored_urbs(&chip->capture_anchor);
@@ -471,9 +522,11 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		guard(spinlock_irqsave)(&chip->playback_lock);
 		chip->playback_substream = substream;
+		chip->playback_state = STREAM_OPEN;
 	} else {
 		guard(spinlock_irqsave)(&chip->capture_lock);
 		chip->capture_substream = substream;
+		chip->capture_state = STREAM_OPEN;
 	}
 
 	return 0;
@@ -492,11 +545,13 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		guard(spinlock_irqsave)(&chip->playback_lock);
 		chip->playback_substream = NULL;
-		chip->playback_running = false;
+		//chip->playback_running = false;
+		chip->playback_state = STREAM_IDLE;
 	} else {
 		guard(spinlock_irqsave)(&chip->capture_lock);
 		chip->capture_substream = NULL;
-		chip->capture_running = false;
+		//chip->capture_running = false;
+		chip->capture_state = STREAM_IDLE;
 	}
 	return 0;
 }
@@ -512,8 +567,8 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		guard(spinlock_irqsave)(&chip->playback_lock);
-		chip->dma_off = 0;
-		chip->period_off = 0;
+		chip->playback_dma_off = 0;
+		chip->playback_period_off = 0;
 	} else {
 		guard(spinlock_irqsave)(&chip->capture_lock);
 		chip->capture_dma_off = 0;
@@ -528,11 +583,13 @@ static int jockey3_pcm_trigger_playback(struct jockey3_chip *chip, int cmd)
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
-		chip->playback_running = true;
+		//chip->playback_running = true;
+		chip->playback_state = STREAM_RUNNING;
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
-		chip->playback_running = false;
+		//chip->playback_running = false;
+		chip->playback_state = STREAM_STOPPING;
 		break;
 	default:
 		return -EINVAL;
@@ -546,11 +603,13 @@ static int jockey3_pcm_trigger_capture(struct jockey3_chip *chip, int cmd)
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
-		chip->capture_running = true;
+		//chip->capture_running = true;
+		chip->capture_state = STREAM_RUNNING;
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
-		chip->capture_running = false;
+		//chip->capture_running = false;
+		chip->capture_state = STREAM_STOPPING;
 		break;
 	default:
 		return -EINVAL;
@@ -580,7 +639,7 @@ static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		scoped_guard(spinlock_irqsave, &chip->playback_lock) {
-			dma_off = chip->dma_off;
+			dma_off = chip->playback_dma_off;
 		}
 	} else {
 		scoped_guard(spinlock_irqsave, &chip->capture_lock) {
@@ -631,7 +690,8 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 		 * enforced the constraint from jockey3_pcm_open. We still
 		 * sanity check here to be safe.
 		 */
-		if (chip->playback_running || chip->capture_running) {
+		if (jockey3_stream_is_running(chip->playback_state) ||
+		    jockey3_stream_is_running(chip->capture_state)) {
 			dev_err(&chip->intf0->dev, "Cannot change rate while other stream is active\n");
 			return -EBUSY;
 		}
@@ -1071,13 +1131,16 @@ static void jockey3_disconnect(struct usb_interface *intf)
 
 	if (chip && intf == chip->intf0) {
 		snd_card_disconnect(chip->card);
-		chip->playback_running = false;
-		chip->capture_running = false;
+
+		/* Force state machine to terminal state (no handshake on unplug) */
+		jockey3_force_stream_stop(chip, &chip->playback_substream,
+					  &chip->playback_state, &chip->playback_lock);
+		jockey3_force_stream_stop(chip, &chip->capture_substream,
+					  &chip->capture_state, &chip->capture_lock);
+
 		set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
-		/*
-		 * Card cleanup, URB stopping/freeing, and interface release
-		 * are all handled automatically by devres.
-		 */
+
+		/* URBs will be killed by devres action */
 	}
 	usb_set_intfdata(intf, NULL);
 }
