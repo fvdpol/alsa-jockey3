@@ -49,7 +49,7 @@ enum jockey3_stream_state {
 	STREAM_OPEN,		/* substream registered, but not started */
 	STREAM_RUNNING,		/* Active audio processing */
 	STREAM_STOPPING,	/* Stop/Close/Suspend requested - waiting for callback ack */
-	STREAM_STOPPED,		/* Callback has acknowledged stop - safe to release substream */
+	STREAM_STOPPED,		/* Callback has acknowledged - safe to release substream */
 };
 
 struct jockey3_chip {
@@ -82,6 +82,7 @@ struct jockey3_chip {
 	unsigned char *playback_bufs[JOCKEY3_N_URBS];
 	spinlock_t playback_lock; // protects playback stream state and buffer offsets
 	enum jockey3_stream_state playback_state;
+	struct completion playback_stopped;
 	unsigned int playback_dma_off;
 	unsigned int playback_period_off;
 
@@ -92,9 +93,30 @@ struct jockey3_chip {
 	unsigned char *capture_bufs[JOCKEY3_N_URBS];
 	spinlock_t capture_lock; // protects capture stream state and buffer offsets
 	enum jockey3_stream_state capture_state;
+	struct completion capture_stopped;
 	unsigned int capture_dma_off;
 	unsigned int capture_period_off;
 };
+
+static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
+{
+	return test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+}
+
+static inline bool jockey3_is_stopping(const struct jockey3_chip *chip)
+{
+	return test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
+}
+
+static inline bool jockey3_stream_is_stopping(enum jockey3_stream_state state)
+{
+	return state == STREAM_STOPPING;
+}
+
+static inline bool jockey3_stream_is_open(enum jockey3_stream_state state)
+{
+	return state == STREAM_OPEN;
+}
 
 static inline bool jockey3_stream_is_running(enum jockey3_stream_state state)
 {
@@ -106,6 +128,11 @@ static inline bool jockey3_stream_is_stopping_or_stopped(enum jockey3_stream_sta
 	return state == STREAM_STOPPING || state == STREAM_STOPPED;
 }
 
+static inline bool jockey3_stream_is_stopped(enum jockey3_stream_state state)
+{
+	return state == STREAM_STOPPED;
+}
+
 static inline void jockey3_set_stream_state(struct jockey3_chip *chip,
 					    struct snd_pcm_substream *substream,
 					    enum jockey3_stream_state new_state)
@@ -113,7 +140,7 @@ static inline void jockey3_set_stream_state(struct jockey3_chip *chip,
 	/* ... helper to be expanded in follow-up patches */
 }
 
-/* Force terminal state (used in disconnect and error paths) */
+/* Force terminal state (used in disconnect and error paths - no wait for ack) */
 static inline void jockey3_force_stream_stop(struct jockey3_chip *chip,
 					     struct snd_pcm_substream **substream_ptr,
 					     enum jockey3_stream_state *state_ptr,
@@ -121,20 +148,36 @@ static inline void jockey3_force_stream_stop(struct jockey3_chip *chip,
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(lock, flags);  /* appropriate lock */
+	spin_lock_irqsave(lock, flags);
 	*substream_ptr = NULL;
 	*state_ptr = STREAM_STOPPED;
 	spin_unlock_irqrestore(lock, flags);
 }
 
-static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
+/* Request stop + wait for callback acknowledgment (called under rate_mutex) */
+static void jockey3_request_stream_stop(struct jockey3_chip *chip,
+					enum jockey3_stream_state *state_ptr,
+					struct completion *stopped,
+					spinlock_t *lock)
 {
-	return test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
-}
+	unsigned long flags;
 
-static inline bool jockey3_is_stopping(const struct jockey3_chip *chip)
-{
-	return test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
+	spin_lock_irqsave(lock, flags);
+	*state_ptr = STREAM_STOPPING;
+	spin_unlock_irqrestore(lock, flags);
+
+	/*
+	 * Wait for callback acknowledgment. Because URBs are submitted continuously
+	 * (JOCKEY3_N_URBS=8, fire-and-forget model matching original Windows/macOS
+	 * behavior), the next callback arrives very quickly:
+	 *
+	 * - Playback: 10 frames/URB  →  ~0.8–1.0 ms at 44.1/48 kHz; ~0.4 at 96 kHz
+	 * - Capture:   8 frames/URB  →  ~0.8–1.0 ms at 44.1/48 kHz; ~0.4 at 96 kHz
+	 *
+	 * The wait is therefore expected to be very brief (< 2 ms in practice).
+	 * The 500 ms timeout is only a safety net against stalled URBs or bugs.
+	 */
+	wait_for_completion_timeout(stopped, msecs_to_jiffies(500));
 }
 
 static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
@@ -248,13 +291,19 @@ static void jockey3_capture_callback(struct urb *urb)
 		    chip->capture_substream) {
 			period_elapsed = jockey3_process_in_packet(chip, urb->transfer_buffer);
 			substream = chip->capture_substream;
+		} else if (jockey3_stream_is_stopping(chip->capture_state)) {
+			/* Acknowledge stop */
+			chip->capture_state = STREAM_STOPPED;
+			complete(&chip->capture_stopped);
 		}
 	}
 
 	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
 
-	if (jockey3_is_stopping(chip))
+	/* Do NOT resubmit if stopping */
+	if (jockey3_is_stopping(chip) ||
+	    jockey3_stream_is_stopping(chip->capture_state))
 		return;
 
 	usb_anchor_urb(urb, &chip->capture_anchor);
@@ -338,6 +387,9 @@ static void jockey3_playback_callback(struct urb *urb)
 		    chip->playback_substream) {
 			period_elapsed = jockey3_process_out_packet(chip, buf);
 			substream = chip->playback_substream;
+		} else if (jockey3_stream_is_stopping(chip->playback_state)) {
+			chip->playback_state = STREAM_STOPPED;
+			complete(&chip->playback_stopped);
 		} else {
 			ploytec_prepare_out_packet(buf);
 		}
@@ -353,7 +405,9 @@ static void jockey3_playback_callback(struct urb *urb)
 	for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
 		buf[i] = 0x00;
 
-	if (jockey3_is_stopping(chip))
+	/* Do NOT resubmit if stopping */
+	if (jockey3_is_stopping(chip) ||
+	    jockey3_stream_is_stopping(chip->playback_state))
 		return;
 
 	usb_anchor_urb(urb, &chip->playback_anchor);
@@ -382,7 +436,7 @@ static void jockey3_midi_in_callback(struct urb *urb)
 		substream = chip->midi_in_substream;
 	}
 
-	if (substream) {
+	if (substream && !jockey3_is_stopping(chip)) {
 		for (i = 0; i < urb->actual_length; i++) {
 			if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
 				dev_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n",
@@ -523,10 +577,12 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 		guard(spinlock_irqsave)(&chip->playback_lock);
 		chip->playback_substream = substream;
 		chip->playback_state = STREAM_OPEN;
+		init_completion(&chip->playback_stopped);
 	} else {
 		guard(spinlock_irqsave)(&chip->capture_lock);
 		chip->capture_substream = substream;
 		chip->capture_state = STREAM_OPEN;
+		init_completion(&chip->capture_stopped);
 	}
 
 	return 0;
@@ -543,14 +599,18 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	dev_dbg(&chip->intf0->dev, "active_streams decremented to %d\n", chip->active_streams);
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		jockey3_request_stream_stop(chip, &chip->playback_state,
+					    &chip->playback_stopped,
+					    &chip->playback_lock);
 		guard(spinlock_irqsave)(&chip->playback_lock);
 		chip->playback_substream = NULL;
-		//chip->playback_running = false;
 		chip->playback_state = STREAM_IDLE;
 	} else {
+		jockey3_request_stream_stop(chip, &chip->capture_state,
+					    &chip->capture_stopped,
+					    &chip->capture_lock);
 		guard(spinlock_irqsave)(&chip->capture_lock);
 		chip->capture_substream = NULL;
-		//chip->capture_running = false;
 		chip->capture_state = STREAM_IDLE;
 	}
 	return 0;
@@ -566,13 +626,19 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 		return -ENODEV;
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		guard(spinlock_irqsave)(&chip->playback_lock);
-		chip->playback_dma_off = 0;
-		chip->playback_period_off = 0;
+		if (jockey3_stream_is_open(chip->playback_state) ||
+		    jockey3_stream_is_running(chip->playback_state)) {
+			guard(spinlock_irqsave)(&chip->playback_lock);
+			chip->playback_dma_off = 0;
+			chip->playback_period_off = 0;
+		}
 	} else {
-		guard(spinlock_irqsave)(&chip->capture_lock);
-		chip->capture_dma_off = 0;
-		chip->capture_period_off = 0;
+		if (jockey3_stream_is_open(chip->capture_state) ||
+		    jockey3_stream_is_running(chip->capture_state)) {
+			guard(spinlock_irqsave)(&chip->capture_lock);
+			chip->capture_dma_off = 0;
+			chip->capture_period_off = 0;
+		}
 	}
 	return 0;
 }
@@ -583,13 +649,18 @@ static int jockey3_pcm_trigger_playback(struct jockey3_chip *chip, int cmd)
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
-		//chip->playback_running = true;
 		chip->playback_state = STREAM_RUNNING;
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
-		//chip->playback_running = false;
 		chip->playback_state = STREAM_STOPPING;
+
+		/* immediate stop if no active substream or already stopped*/
+		if (!chip->playback_substream ||
+		    jockey3_stream_is_stopped(chip->playback_state)) {
+			chip->playback_state = STREAM_STOPPED;
+			complete_all(&chip->playback_stopped); // use complete_all() for safety
+		}
 		break;
 	default:
 		return -EINVAL;
@@ -603,13 +674,18 @@ static int jockey3_pcm_trigger_capture(struct jockey3_chip *chip, int cmd)
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
-		//chip->capture_running = true;
 		chip->capture_state = STREAM_RUNNING;
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
-		//chip->capture_running = false;
 		chip->capture_state = STREAM_STOPPING;
+
+		/* immediate stop if no active substream or already stopped*/
+		if (!chip->capture_substream ||
+		    jockey3_stream_is_stopped(chip->capture_state)) {
+			chip->capture_state = STREAM_STOPPED;
+			complete_all(&chip->capture_stopped);     // use complete_all() for safety
+		}
 		break;
 	default:
 		return -EINVAL;
@@ -1047,6 +1123,8 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback_lock);
 	spin_lock_init(&chip->capture_lock);
+	init_completion(&chip->playback_stopped);
+	init_completion(&chip->capture_stopped);
 	mutex_init(&chip->rate_mutex);
 	memset(&chip->midi_state, 0, sizeof(chip->midi_state));
 
