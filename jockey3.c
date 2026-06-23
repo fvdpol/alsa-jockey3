@@ -133,13 +133,6 @@ static inline bool jockey3_stream_is_stopped(enum jockey3_stream_state state)
 	return state == STREAM_STOPPED;
 }
 
-static inline void jockey3_set_stream_state(struct jockey3_chip *chip,
-					    struct snd_pcm_substream *substream,
-					    enum jockey3_stream_state new_state)
-{
-	/* ... helper to be expanded in follow-up patches */
-}
-
 /* Force terminal state (used in disconnect and error paths - no wait for ack) */
 static inline void jockey3_force_stream_stop(struct jockey3_chip *chip,
 					     struct snd_pcm_substream **substream_ptr,
@@ -458,7 +451,10 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 {
 	dev_dbg(&chip->intf0->dev, "Stopping all URBs\n");
 	set_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
-	/* TODO: in follow-up: set both stream states to STOPPING and wait for ack */
+	jockey3_request_stream_stop(chip, &chip->playback_state, &chip->playback_stopped,
+				    &chip->playback_lock);
+	jockey3_request_stream_stop(chip, &chip->capture_state, &chip->capture_stopped,
+				    &chip->capture_lock);
 	usb_kill_urb(chip->midi_in_urb);
 	usb_kill_anchored_urbs(&chip->playback_anchor);
 	usb_kill_anchored_urbs(&chip->capture_anchor);
@@ -654,13 +650,6 @@ static int jockey3_pcm_trigger_playback(struct jockey3_chip *chip, int cmd)
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 		chip->playback_state = STREAM_STOPPING;
-
-		/* immediate stop if no active substream or already stopped*/
-		if (!chip->playback_substream ||
-		    jockey3_stream_is_stopped(chip->playback_state)) {
-			chip->playback_state = STREAM_STOPPED;
-			complete_all(&chip->playback_stopped); // use complete_all() for safety
-		}
 		break;
 	default:
 		return -EINVAL;
@@ -679,13 +668,6 @@ static int jockey3_pcm_trigger_capture(struct jockey3_chip *chip, int cmd)
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 		chip->capture_state = STREAM_STOPPING;
-
-		/* immediate stop if no active substream or already stopped*/
-		if (!chip->capture_substream ||
-		    jockey3_stream_is_stopped(chip->capture_state)) {
-			chip->capture_state = STREAM_STOPPED;
-			complete_all(&chip->capture_stopped);     // use complete_all() for safety
-		}
 		break;
 	default:
 		return -EINVAL;
@@ -1215,6 +1197,8 @@ static void jockey3_disconnect(struct usb_interface *intf)
 					  &chip->playback_state, &chip->playback_lock);
 		jockey3_force_stream_stop(chip, &chip->capture_substream,
 					  &chip->capture_state, &chip->capture_lock);
+		complete(&chip->playback_stopped);
+		complete(&chip->capture_stopped);
 
 		set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
 
