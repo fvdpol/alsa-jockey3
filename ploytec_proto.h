@@ -18,7 +18,7 @@
 
 /* Playback & MIDI Out (EP 0x05) */
 #define PLOYTEC_EP_NUM_PCM_OUT 0x05
-#define PLOYTEC_PLAYBACK_FRAMES 10
+#define PLOYTEC_PLAYBACK_FRAMES 10	// number of samples per Frame
 #define PLOYTEC_PLAYBACK_FRAME_SIZE 48
 #define PLOYTEC_MIDI_OUT_OFFSET 480
 #define PLOYTEC_SYNC_BYTE_OFFSET 481
@@ -26,7 +26,7 @@
 
 /* Capture (EP 0x86) */
 #define PLOYTEC_EP_NUM_PCM_IN 0x06		// 0x86 & 0x0F
-#define PLOYTEC_CAPTURE_FRAMES 8
+#define PLOYTEC_CAPTURE_FRAMES 8	// number of samples per frame
 #define PLOYTEC_CAPTURE_FRAME_SIZE 64
 
 /* MIDI In (EP 0x83) */
