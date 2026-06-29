@@ -279,7 +279,7 @@ int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
 }
 
 /**
- * ploytec_midi_process_byte - Process a MIDI byte for Ploytec protocol
+ * ploytec_midi_process_byte - Expand MIDI running status
  * @state: The MIDI state machine instance
  * @b: The raw MIDI byte
  * @dev: Pointer to the struct device for logging
@@ -288,7 +288,7 @@ int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
  * valid MIDI streams with Running Status, we implement a simple state machine to expand the
  * Running Status messages into full MIDI messages before sending them to the device.
  */
-u8 ploytec_midi_process_byte(struct ploytec_midi_state *state, u8 b, struct device *dev)
+u8 ploytec_midi_running_status(struct ploytec_midi_state *state, u8 b, struct device *dev)
 {
 	u8 byte;
 

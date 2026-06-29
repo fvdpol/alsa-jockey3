@@ -55,7 +55,7 @@ struct ploytec_midi_state {
 };
 
 /* MIDI protocol state machine */
-u8 ploytec_midi_process_byte(struct ploytec_midi_state *state, u8 b, struct device *dev);
+u8 ploytec_midi_running_status(struct ploytec_midi_state *state, u8 b, struct device *dev);
 
 /* Protocol Helpers */
 void ploytec_prepare_out_packet(u8 *buf);
