@@ -42,7 +42,7 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_FLAG_DISCONNECTED 0
 #define JOCKEY3_FLAG_STOPPING     1
 
-struct jockey3_pcm_stream {
+struct jockey3_pcm_urb_stream {
 	struct snd_pcm_substream *substream;
 	struct usb_anchor anchor;
 	struct urb *urbs[JOCKEY3_N_URBS];
@@ -52,6 +52,7 @@ struct jockey3_pcm_stream {
 	unsigned int dma_off;
 	unsigned int period_off;
 	bool running;
+	bool callback_processing;
 };
 
 struct jockey3_chip {
@@ -78,8 +79,8 @@ struct jockey3_chip {
 	struct ploytec_midi_state midi_state;
 
 	/* PCM urb streams */
-	struct jockey3_pcm_stream playback;
-	struct jockey3_pcm_stream capture;
+	struct jockey3_pcm_urb_stream playback;
+	struct jockey3_pcm_urb_stream capture;
 };
 
 static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
@@ -92,9 +93,19 @@ static inline bool jockey3_is_stopping(const struct jockey3_chip *chip)
 	return test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
 }
 
+static inline struct jockey3_pcm_urb_stream *jockey3_get_pcm_urb_stream(struct jockey3_chip *chip,
+									const int direction)
+{
+	if (direction == SNDRV_PCM_STREAM_PLAYBACK)
+		return &chip->playback;
+	else
+		return &chip->capture;
+}
+
 static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 {
 	struct snd_pcm_substream *substream = chip->playback.substream;
+	struct jockey3_pcm_urb_stream *urb_stream = &chip->playback;
 	struct snd_pcm_runtime *runtime;
 	unsigned int pcm_buffer_size;
 	unsigned int alsa_frame_size;
@@ -112,15 +123,15 @@ static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 
 	for (f = 0; f < PLOYTEC_PLAYBACK_FRAMES; f++) {
 		ploytec_encode_s24_3le(urb_buf + f * PLOYTEC_PLAYBACK_FRAME_SIZE,
-				       runtime->dma_area + chip->playback.dma_off);
-		chip->playback.dma_off += alsa_frame_size;
-		if (chip->playback.dma_off >= pcm_buffer_size)
-			chip->playback.dma_off -= pcm_buffer_size;
-		chip->playback.period_off += alsa_frame_size;
+				       runtime->dma_area + urb_stream->dma_off);
+		urb_stream->dma_off += alsa_frame_size;
+		if (urb_stream->dma_off >= pcm_buffer_size)
+			urb_stream->dma_off -= pcm_buffer_size;
+		urb_stream->period_off += alsa_frame_size;
 	}
 
-	if (chip->playback.period_off >= runtime->period_size * alsa_frame_size) {
-		chip->playback.period_off %= runtime->period_size * alsa_frame_size;
+	if (urb_stream->period_off >= runtime->period_size * alsa_frame_size) {
+		urb_stream->period_off %= runtime->period_size * alsa_frame_size;
 		return true;
 	}
 
@@ -130,6 +141,7 @@ static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 static bool jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_buf)
 {
 	struct snd_pcm_substream *substream = chip->capture.substream;
+	struct jockey3_pcm_urb_stream *urb_stream = &chip->capture;
 	struct snd_pcm_runtime *runtime;
 	unsigned int pcm_buffer_size;
 	unsigned int alsa_frame_size;
@@ -146,16 +158,16 @@ static bool jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_b
 	alsa_frame_size = runtime->channels * 3; // 6 * 3 = 18 bytes
 
 	for (f = 0; f < PLOYTEC_CAPTURE_FRAMES; f++) {
-		ploytec_decode_s24_3le(runtime->dma_area + chip->capture.dma_off,
+		ploytec_decode_s24_3le(runtime->dma_area + urb_stream->dma_off,
 				       urb_buf + f * PLOYTEC_CAPTURE_FRAME_SIZE);
-		chip->capture.dma_off += alsa_frame_size;
-		if (chip->capture.dma_off >= pcm_buffer_size)
-			chip->capture.dma_off -= pcm_buffer_size;
-		chip->capture.period_off += alsa_frame_size;
+		urb_stream->dma_off += alsa_frame_size;
+		if (urb_stream->dma_off >= pcm_buffer_size)
+			urb_stream->dma_off -= pcm_buffer_size;
+		urb_stream->period_off += alsa_frame_size;
 	}
 
-	if (chip->capture.period_off >= runtime->period_size * alsa_frame_size) {
-		chip->capture.period_off %= runtime->period_size * alsa_frame_size;
+	if (urb_stream->period_off >= runtime->period_size * alsa_frame_size) {
+		urb_stream->period_off %= runtime->period_size * alsa_frame_size;
 		return true;
 	}
 
@@ -181,13 +193,12 @@ static inline bool jockey3_urb_error_fatal(struct jockey3_chip *chip,
 static void jockey3_capture_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
+	struct jockey3_pcm_urb_stream *urb_stream = &chip->capture;
 	struct snd_pcm_substream *substream = NULL;
 	bool period_elapsed = false;
 	int ret;
 
-	//dev_dbg_ratelimited(&chip->intf0->dev, "%s: substream=%p\n", __func__, substream);
-
-	atomic_dec(&chip->capture.urbs_in_flight);
+	atomic_dec(&urb_stream->urbs_in_flight);
 
 	if (unlikely(jockey3_urb_error_fatal(chip, urb, "Capture")))
 		return;
@@ -201,24 +212,39 @@ static void jockey3_capture_callback(struct urb *urb)
 		return;
 	}
 
-	scoped_guard(spinlock_irqsave, &chip->capture.lock) {
-		if (chip->capture.running && chip->capture.substream) {
+	/* Step 1: Safely fetch the pointer and flag that the callback is active */
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		if (urb_stream->running && urb_stream->substream) {
 			period_elapsed = jockey3_process_in_packet(chip, urb->transfer_buffer);
-			substream = chip->capture.substream;
+			substream = urb_stream->substream;
+
+			if (period_elapsed && substream)
+				/* Mark we're active in a critical section */
+				urb_stream->callback_processing = true;
 		}
 	}
 
-	if (period_elapsed && substream)
+	/*
+	 * Step 2: Safe Zone. ALSA core can't free 'substream' because our
+	 * .close path is waiting for 'callback_processing' to become false.
+	 */
+	if (period_elapsed && substream) {
 		snd_pcm_period_elapsed(substream);
+
+		/* Clear the execution flag under the lock */
+		scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+			urb_stream->callback_processing = false;
+		}
+	}
 
 	if (jockey3_is_stopping(chip))
 		return;
 
-	atomic_inc(&chip->capture.urbs_in_flight);
-	usb_anchor_urb(urb, &chip->capture.anchor);
+	atomic_inc(&urb_stream->urbs_in_flight);
+	usb_anchor_urb(urb, &urb_stream->anchor);
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0) {
-		atomic_dec(&chip->capture.urbs_in_flight);
+		atomic_dec(&urb_stream->urbs_in_flight);
 		usb_unanchor_urb(urb);
 		if (ret != -ENODEV && ret != -EPERM)
 			dev_err(&chip->intf0->dev, "Failed to resubmit capture URB: %d\n", ret);
@@ -274,12 +300,13 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 static void jockey3_playback_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
+	struct jockey3_pcm_urb_stream *urb_stream = &chip->playback;
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
 	struct snd_pcm_substream *substream = NULL;
 	bool period_elapsed = false;
 	int i, ret;
 
-	atomic_dec(&chip->playback.urbs_in_flight);
+	atomic_dec(&urb_stream->urbs_in_flight);
 
 	if (unlikely(jockey3_urb_error_fatal(chip, urb, "Playback")))
 		return;
@@ -287,17 +314,32 @@ static void jockey3_playback_callback(struct urb *urb)
 	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
 
-	scoped_guard(spinlock_irqsave, &chip->playback.lock) {
-		if (chip->playback.running && chip->playback.substream) {
+	/* Step 1: Safely fetch the pointer and flag that the callback is active */
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		if (urb_stream->running && urb_stream->substream) {
 			period_elapsed = jockey3_process_out_packet(chip, buf);
-			substream = chip->playback.substream;
+			substream = urb_stream->substream;
+
+			if (period_elapsed && substream)
+				/* Mark we're active in a critical section */
+				urb_stream->callback_processing = true;
 		} else {
 			ploytec_prepare_out_packet(buf);
 		}
 	}
 
-	if (period_elapsed && substream)
+	/*
+	 * Step 2: Safe Zone. ALSA core can't free 'substream' because our
+	 * .close path is waiting for 'callback_processing' to become false.
+	 */
+	if (period_elapsed && substream) {
 		snd_pcm_period_elapsed(substream);
+
+		/* Clear the execution flag under the lock */
+		scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+			urb_stream->callback_processing = false;
+		}
+	}
 
 	/* The outgoing MIDI data is encapsulated in the playback stream */
 	buf[PLOYTEC_MIDI_OUT_OFFSET] = jockey3_get_next_midi_out_byte(chip);
@@ -310,11 +352,11 @@ static void jockey3_playback_callback(struct urb *urb)
 	if (jockey3_is_stopping(chip))
 		return;
 
-	atomic_inc(&chip->playback.urbs_in_flight);
-	usb_anchor_urb(urb, &chip->playback.anchor);
+	atomic_inc(&urb_stream->urbs_in_flight);
+	usb_anchor_urb(urb, &urb_stream->anchor);
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0) {
-		atomic_dec(&chip->playback.urbs_in_flight);
+		atomic_dec(&urb_stream->urbs_in_flight);
 		usb_unanchor_urb(urb);
 		if (ret != -ENODEV && ret != -EPERM)
 			dev_err(&chip->intf0->dev, "Failed to resubmit playback URB: %d\n", ret);
@@ -507,6 +549,8 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+	struct jockey3_pcm_urb_stream *urb_stream =
+		jockey3_get_pcm_urb_stream(chip, substream->stream);
 
 	dev_dbg(&chip->intf0->dev, "PCM close stream %d\n", substream->stream);
 
@@ -514,103 +558,88 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	chip->active_streams--;
 	dev_dbg(&chip->intf0->dev, "active_streams decremented to %d\n", chip->active_streams);
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		guard(spinlock_irqsave)(&chip->playback.lock);
-		chip->playback.substream = NULL;
-		chip->playback.running = false;
-	} else {
-		guard(spinlock_irqsave)(&chip->capture.lock);
-		chip->capture.substream = NULL;
-		chip->capture.running = false;
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		urb_stream->substream = NULL;
+		urb_stream->running = false;
 	}
+
+	/*
+	 * Wait for any currently running callback to finish its safe-zone execution so we are
+	 * sure to not accessing it anymore before returning to ALSA, and prevent potential
+	 * Use-After-Free issues.
+	 */
+	while (1) {
+		bool busy;
+
+		scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+			busy = urb_stream->callback_processing;
+		}
+		if (!busy)
+			break;
+
+		/* Yield CPU slightly to let the Tasklet/BH context finish on the other core */
+		cpu_relax();
+	}
+
 	return 0;
 }
 
 static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+	struct jockey3_pcm_urb_stream *urb_stream =
+		jockey3_get_pcm_urb_stream(chip, substream->stream);
 
 	dev_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		guard(spinlock_irqsave)(&chip->playback.lock);
-		chip->playback.dma_off = 0;
-		chip->playback.period_off = 0;
-	} else {
-		guard(spinlock_irqsave)(&chip->capture.lock);
-		chip->capture.dma_off = 0;
-		chip->capture.period_off = 0;
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		urb_stream->dma_off = 0;
+		urb_stream->period_off = 0;
 	}
-	return 0;
-}
 
-static int jockey3_pcm_trigger_playback(struct jockey3_chip *chip, int cmd)
-{
-	guard(spinlock_irqsave)(&chip->playback.lock);
-	switch (cmd) {
-	case SNDRV_PCM_TRIGGER_START:
-	case SNDRV_PCM_TRIGGER_RESUME:
-		chip->playback.running = true;
-		break;
-	case SNDRV_PCM_TRIGGER_STOP:
-	case SNDRV_PCM_TRIGGER_SUSPEND:
-		chip->playback.running = false;
-		break;
-	default:
-		return -EINVAL;
-	}
-	return 0;
-}
-
-static int jockey3_pcm_trigger_capture(struct jockey3_chip *chip, int cmd)
-{
-	guard(spinlock_irqsave)(&chip->capture.lock);
-	switch (cmd) {
-	case SNDRV_PCM_TRIGGER_START:
-	case SNDRV_PCM_TRIGGER_RESUME:
-		chip->capture.running = true;
-		break;
-	case SNDRV_PCM_TRIGGER_STOP:
-	case SNDRV_PCM_TRIGGER_SUSPEND:
-		chip->capture.running = false;
-		break;
-	default:
-		return -EINVAL;
-	}
 	return 0;
 }
 
 static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+	struct jockey3_pcm_urb_stream *urb_stream =
+		jockey3_get_pcm_urb_stream(chip, substream->stream);
 
 	dev_dbg(&chip->intf0->dev, "PCM trigger stream %d, cmd %d\n", substream->stream, cmd);
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		return jockey3_pcm_trigger_playback(chip, cmd);
-	else
-		return jockey3_pcm_trigger_capture(chip, cmd);
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		switch (cmd) {
+		case SNDRV_PCM_TRIGGER_START:
+		case SNDRV_PCM_TRIGGER_RESUME:
+			urb_stream->running = true;
+			break;
+		case SNDRV_PCM_TRIGGER_STOP:
+		case SNDRV_PCM_TRIGGER_SUSPEND:
+			urb_stream->running = false;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+	return 0;
 }
 
 static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+	struct jockey3_pcm_urb_stream *urb_stream =
+		jockey3_get_pcm_urb_stream(chip, substream->stream);
 	unsigned int dma_off;
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		scoped_guard(spinlock_irqsave, &chip->playback.lock) {
-			dma_off = chip->playback.dma_off;
-		}
-	} else {
-		scoped_guard(spinlock_irqsave, &chip->capture.lock) {
-			dma_off = chip->capture.dma_off;
-		}
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		dma_off = urb_stream->dma_off;
 	}
 	return bytes_to_frames(substream->runtime, dma_off);
 }
