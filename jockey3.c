@@ -280,7 +280,6 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 		byte = chip->midi_state.queued_byte;
 		chip->midi_state.has_queued_byte = false;
 		spin_unlock_irqrestore(&chip->midi_lock, flags);
-		dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
 		return byte;
 	}
 
@@ -296,8 +295,6 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 	spin_lock_irqsave(&chip->midi_lock, flags);
 	byte = ploytec_midi_running_status(&chip->midi_state, b, &chip->intf0->dev);
 	spin_unlock_irqrestore(&chip->midi_lock, flags);
-	dev_dbg(&chip->intf0->dev, "MIDI OUT: 0x%02x\n", byte);
-
 	return byte;
 }
 
@@ -386,12 +383,9 @@ static void jockey3_midi_in_callback(struct urb *urb)
 	}
 
 	if (substream) {
-		for (i = 0; i < urb->actual_length; i++) {
-			if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
-				dev_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n", buf[i]);
+		for (i = 0; i < urb->actual_length; i++)
+			if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9)
 				snd_rawmidi_receive(substream, &buf[i], 1);
-			}
-		}
 	}
 
 	ret = 0;
