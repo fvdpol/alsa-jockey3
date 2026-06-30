@@ -68,7 +68,7 @@ struct jockey3_chip {
 	struct mutex rate_mutex; // serializes sample rate changes and active stream tracking
 	unsigned long flags;
 	unsigned int current_rate;
-	int active_streams;
+	int active_streams;	// streams fully configured or processing audio
 
 	/* MIDI Path */
 	struct snd_rawmidi_substream *midi_in_substream;
@@ -587,10 +587,6 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 			if (ret < 0)
 				return ret;
 		}
-
-		chip->active_streams++;
-		dev_dbg(&chip->intf0->dev, "active_streams incremented to %d\n",
-			chip->active_streams);
 	}
 
 	/* Substream registration under spinlock to ensure memory consistency to the ISR*/
@@ -639,6 +635,9 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 		jockey3_get_pcm_urb_stream(chip, substream->stream);
 
 	dev_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
+
+	chip->active_streams++;
+	dev_dbg(&chip->intf0->dev, "active_streams incremented to %d\n", chip->active_streams);
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
