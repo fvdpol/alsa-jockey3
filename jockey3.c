@@ -232,24 +232,24 @@ static void jockey3_capture_callback(struct urb *urb)
 	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
 
-	/* Clear the execution flag under the lock */
+	ret = 0;
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		/* mark we're done in the critical processing */
 		urb_stream->callback_processing = false;
-	}
 
-	/* Keep resubmitting the URB while the interface is alive */
-	if (!jockey3_is_stopping(chip) && !jockey3_is_disconnected(chip)) {
-		atomic_inc(&urb_stream->urbs_in_flight);
-		usb_anchor_urb(urb, &urb_stream->anchor);
-		ret = usb_submit_urb(urb, GFP_ATOMIC);
-		if (ret < 0) {
-			atomic_dec(&urb_stream->urbs_in_flight);
-			usb_unanchor_urb(urb);
-			if (ret != -ENODEV && ret != -EPERM)
-				dev_err(&chip->intf0->dev, "Failed to resubmit capture URB: %d\n",
-					ret);
+		/* Keep resubmitting the URB while the interface is alive */
+		if (!jockey3_is_stopping(chip) && !jockey3_is_disconnected(chip)) {
+			atomic_inc(&urb_stream->urbs_in_flight);
+			usb_anchor_urb(urb, &urb_stream->anchor);
+			ret = usb_submit_urb(urb, GFP_ATOMIC);
+			if (ret < 0) {
+				atomic_dec(&urb_stream->urbs_in_flight);
+				usb_unanchor_urb(urb);
+			}
 		}
 	}
+	if (ret < 0)
+		dev_err(&chip->intf0->dev, "Failed to resubmit capture URB: %d\n", ret);
 }
 
 static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
@@ -343,24 +343,24 @@ static void jockey3_playback_callback(struct urb *urb)
 	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
 
-	/* Clear the execution flag under the lock */
+	ret = 0;
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		/* mark we're done in the critical processing */
 		urb_stream->callback_processing = false;
-	}
 
-	/* Keep resubmitting the URB while the interface is alive */
-	if (!jockey3_is_stopping(chip) && !jockey3_is_disconnected(chip)) {
-		atomic_inc(&urb_stream->urbs_in_flight);
-		usb_anchor_urb(urb, &urb_stream->anchor);
-		ret = usb_submit_urb(urb, GFP_ATOMIC);
-		if (ret < 0) {
-			atomic_dec(&urb_stream->urbs_in_flight);
-			usb_unanchor_urb(urb);
-			if (ret != -ENODEV && ret != -EPERM)
-				dev_err(&chip->intf0->dev, "Failed to resubmit playback URB: %d\n",
-					ret);
+		/* Keep resubmitting the URB while the interface is alive */
+		if (!jockey3_is_stopping(chip) && !jockey3_is_disconnected(chip)) {
+			atomic_inc(&urb_stream->urbs_in_flight);
+			usb_anchor_urb(urb, &urb_stream->anchor);
+			ret = usb_submit_urb(urb, GFP_ATOMIC);
+			if (ret < 0) {
+				atomic_dec(&urb_stream->urbs_in_flight);
+				usb_unanchor_urb(urb);
+			}
 		}
 	}
+	if (ret < 0)
+		dev_err(&chip->intf0->dev, "Failed to resubmit playback URB: %d\n", ret);
 }
 
 static void jockey3_midi_in_callback(struct urb *urb)
@@ -390,15 +390,16 @@ static void jockey3_midi_in_callback(struct urb *urb)
 		}
 	}
 
+	ret = 0;
 	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
-		chip->midi_callback_processing = false;	// Mark we're done in critical section
-	}
+		/* Mark we're done in critical section */
+		chip->midi_callback_processing = false;
 
-	if (!jockey3_is_stopping(chip) && !jockey3_is_disconnected(chip)) {
-		ret = usb_submit_urb(urb, GFP_ATOMIC);
-		if (ret < 0 && ret != -ENODEV && ret != -EPERM)
-			dev_err(&chip->intf0->dev, "Failed to resubmit MIDI IN URB: %d\n", ret);
+		if (!jockey3_is_stopping(chip) && !jockey3_is_disconnected(chip))
+			ret = usb_submit_urb(urb, GFP_ATOMIC);
 	}
+	if (ret < 0)
+		dev_err(&chip->intf0->dev, "Failed to resubmit MIDI IN URB: %d\n", ret);
 }
 
 /*
