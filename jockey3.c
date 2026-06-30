@@ -878,6 +878,39 @@ static void jockey3_stop_urbs_action(void *data)
 	jockey3_stop_urbs(data);
 }
 
+static int jockey3_init_midi_urb(struct jockey3_chip *chip)
+{
+	struct usb_device *dev = chip->dev;
+	struct usb_interface *intf = chip->intf0;
+	int ret;
+
+	memset(&chip->midi_state, 0, sizeof(chip->midi_state));
+	chip->midi_out_acc = 0;
+
+	chip->midi_in_buf = kmalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
+	if (!chip->midi_in_buf)
+		return -ENOMEM;
+
+	ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action, chip->midi_in_buf);
+	if (ret)
+		return ret;
+
+	chip->midi_in_urb = usb_alloc_urb(0, GFP_KERNEL);
+	if (!chip->midi_in_urb)
+		return -ENOMEM;
+
+	ret = devm_add_action_or_reset(&intf->dev, jockey3_free_urb_action, chip->midi_in_urb);
+	if (ret)
+		return ret;
+
+	usb_fill_bulk_urb(chip->midi_in_urb, dev,
+			  usb_rcvbulkpipe(dev, PLOYTEC_EP_NUM_MIDI_IN),
+			  chip->midi_in_buf, PLOYTEC_PKT_SIZE,
+			  jockey3_midi_in_callback, chip);
+
+	return 0;
+}
+
 static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
 {
 	struct usb_device *dev = chip->dev;
@@ -1074,13 +1107,11 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->dev = dev;
 	chip->intf0 = intf;
 	chip->intf1 = intf1;
-	chip->midi_out_acc = 0;
 	chip->flags = 0;
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback.lock);
 	spin_lock_init(&chip->capture.lock);
 	mutex_init(&chip->rate_mutex);
-	memset(&chip->midi_state, 0, sizeof(chip->midi_state));
 
 	init_usb_anchor(&chip->playback.anchor);
 	init_usb_anchor(&chip->capture.anchor);
@@ -1092,18 +1123,8 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	if (ret)
 		return ret;
 
-	chip->midi_in_buf = kmalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
-	if (!chip->midi_in_buf)
-		return -ENOMEM;
-	ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action, chip->midi_in_buf);
-	if (ret)
-		return ret;
-
-	chip->midi_in_urb = usb_alloc_urb(0, GFP_KERNEL);
-	if (!chip->midi_in_urb)
-		return -ENOMEM;
-	ret = devm_add_action_or_reset(&intf->dev, jockey3_free_urb_action, chip->midi_in_urb);
-	if (ret)
+	ret = jockey3_init_midi_urb(chip);
+	if (ret < 0)
 		return ret;
 
 	ret = jockey3_init_playback_urbs(chip);
@@ -1113,11 +1134,6 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	ret = jockey3_init_capture_urbs(chip);
 	if (ret < 0)
 		return ret;
-
-	usb_fill_bulk_urb(chip->midi_in_urb, dev,
-			  usb_rcvbulkpipe(dev, PLOYTEC_EP_NUM_MIDI_IN),
-			  chip->midi_in_buf, PLOYTEC_PKT_SIZE,
-			  jockey3_midi_in_callback, chip);
 
 	/* Stop all URBs on disconnect */
 	ret = devm_add_action(&intf->dev, jockey3_stop_urbs_action, chip);
