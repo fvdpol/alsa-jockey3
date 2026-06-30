@@ -712,6 +712,7 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 	unsigned int rate = params_rate(hw_params);
+	unsigned long flags;
 	int ret = 0;
 
 	dev_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n",
@@ -738,7 +739,6 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 		}
 
 		jockey3_stop_urbs(chip);
-		//msleep(50);
 
 		ret = jockey3_set_rate(chip, rate);
 		if (ret != 0) {
@@ -746,7 +746,10 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 			jockey3_start_urbs(chip);
 			return ret;
 		}
+
+		spin_lock_irqsave(&chip->midi_lock, flags);
 		chip->current_rate = rate;
+		spin_unlock_irqrestore(&chip->midi_lock, flags);
 	}
 
 	dev_dbg(&chip->intf0->dev, "Rate changed to %u successfully, resetting device\n",
@@ -843,8 +846,10 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 	if (ret < 0)
 		return ret;
 
-	chip->current_rate = 44100;
-	ret = jockey3_set_rate(chip, 44100);
+	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
+		chip->current_rate = 44100;
+	}
+	ret = jockey3_set_rate(chip, chip->current_rate);
 	if (ret < 0)
 		return ret;
 	msleep(20);
