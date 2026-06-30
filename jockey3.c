@@ -603,8 +603,9 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 
 	dev_dbg(&chip->intf0->dev, "PCM close stream %d\n", substream->stream);
 
-	guard(mutex)(&chip->rate_mutex);
-	chip->active_streams--;
+	scoped_guard(mutex, &chip->rate_mutex) {
+		chip->active_streams--;
+	}
 	dev_dbg(&chip->intf0->dev, "active_streams decremented to %d\n", chip->active_streams);
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
@@ -630,7 +631,9 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 
 	dev_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
 
-	chip->active_streams++;
+	scoped_guard(mutex, &chip->rate_mutex) {
+		chip->active_streams++;
+	}
 	dev_dbg(&chip->intf0->dev, "active_streams incremented to %d\n", chip->active_streams);
 
 	if (jockey3_is_disconnected(chip))
