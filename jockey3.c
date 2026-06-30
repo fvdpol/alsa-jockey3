@@ -85,6 +85,8 @@ struct jockey3_chip {
 	struct jockey3_pcm_urb_stream capture;
 };
 
+static struct usb_driver jockey3_driver;
+
 static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
 {
 	return test_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
@@ -228,6 +230,7 @@ static void jockey3_capture_callback(struct urb *urb)
 	/*
 	 * Step 2: Safe Zone. ALSA core can't free 'substream' because our
 	 * .close path is waiting for 'callback_processing' to become false.
+	 * Our lock released to avoid ABBA deadlock with ALSA's internal locking
 	 */
 	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
@@ -339,6 +342,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	/*
 	 * Step 2: Safe Zone. ALSA core can't free 'substream' because our
 	 * .close path is waiting for 'callback_processing' to become false.
+	 * Our lock released to avoid ABBA deadlock with ALSA's internal locking
 	 */
 	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
@@ -440,22 +444,6 @@ static void jockey3_wait_for_callback_completion(struct jockey3_chip *chip)
 		} else {
 			usleep_range(10, 50);
 		}
-
-		/* Yield CPU slightly to let the Tasklet/BH context finish on the other core */
-		cpu_relax();
-	}
-}
-
-static void jockey3_wait_for_callback_completion_atomic(struct jockey3_pcm_urb_stream *urb_stream)
-{
-	while (1) {
-		bool busy;
-
-		scoped_guard(spinlock_irqsave, &urb_stream->lock) {
-			busy = urb_stream->callback_processing;
-		}
-		if (!busy)
-			break;
 
 		/* Yield CPU slightly to let the Tasklet/BH context finish on the other core */
 		cpu_relax();
@@ -869,15 +857,6 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 	return 0;
 }
 
-static const struct usb_device_id jockey3_ids[] = {
-	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_ME_PID), .driver_info = JOCKEY3_ME },
-	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_REMIX_PID), .driver_info = JOCKEY3_REMIX },
-	{}
-};
-MODULE_DEVICE_TABLE(usb, jockey3_ids);
-
-static struct usb_driver jockey3_driver;
-
 static void jockey3_release_intf1(void *data)
 {
 	struct usb_interface *intf1 = data;
@@ -1241,6 +1220,12 @@ static int jockey3_suspend(struct usb_interface *intf, pm_message_t message)
 
 	if (chip && intf == chip->intf0) {
 		dev_dbg(&intf->dev, "USB suspend, stopping URBs\n");
+
+		/* Notify ALSA core to transition state and unblock userspace */
+		if (chip->pcm)
+			snd_pcm_suspend_all(chip->pcm);
+
+		/* Stop the physical URBs */
 		jockey3_stop_urbs(chip);
 	}
 	return 0;
@@ -1288,6 +1273,13 @@ static int jockey3_reset_resume(struct usb_interface *intf)
 	}
 	return 0;
 }
+
+static const struct usb_device_id jockey3_ids[] = {
+	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_ME_PID), .driver_info = JOCKEY3_ME },
+	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_REMIX_PID), .driver_info = JOCKEY3_REMIX },
+	{}
+};
+MODULE_DEVICE_TABLE(usb, jockey3_ids);
 
 static struct usb_driver jockey3_driver = {
 	.name = "snd-reloop-jockey3",
