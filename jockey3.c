@@ -9,6 +9,7 @@
 #include <linux/usb.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
+#include <linux/jiffies.h>
 #include <linux/bitops.h>
 #include <sound/core.h>
 #include <sound/initval.h>
@@ -77,6 +78,7 @@ struct jockey3_chip {
 	spinlock_t midi_lock;
 	unsigned int midi_out_acc;	// for the 'Leaky Bucket' rate limiter
 	struct ploytec_midi_state midi_state;
+	bool midi_callback_processing;
 
 	/* PCM urb streams */
 	struct jockey3_pcm_urb_stream playback;
@@ -203,7 +205,7 @@ static void jockey3_capture_callback(struct urb *urb)
 	if (unlikely(jockey3_urb_error_fatal(chip, urb, "Capture")))
 		return;
 
-	if (unlikely(jockey3_is_disconnected(chip)))
+	if (unlikely(jockey3_is_disconnected(chip) || jockey3_is_stopping(chip)))
 		return;
 
 	if (unlikely(urb->actual_length < PLOYTEC_CAPTURE_FRAMES * PLOYTEC_CAPTURE_FRAME_SIZE)) {
@@ -214,13 +216,12 @@ static void jockey3_capture_callback(struct urb *urb)
 
 	/* Step 1: Safely fetch the pointer and flag that the callback is active */
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		/* Mark we're active in a critical section */
+		urb_stream->callback_processing = true;
+
 		if (urb_stream->running && urb_stream->substream) {
 			period_elapsed = jockey3_process_in_packet(chip, urb->transfer_buffer);
 			substream = urb_stream->substream;
-
-			if (period_elapsed && substream)
-				/* Mark we're active in a critical section */
-				urb_stream->callback_processing = true;
 		}
 	}
 
@@ -228,26 +229,26 @@ static void jockey3_capture_callback(struct urb *urb)
 	 * Step 2: Safe Zone. ALSA core can't free 'substream' because our
 	 * .close path is waiting for 'callback_processing' to become false.
 	 */
-	if (period_elapsed && substream) {
+	if (period_elapsed && substream)
 		snd_pcm_period_elapsed(substream);
 
-		/* Clear the execution flag under the lock */
-		scoped_guard(spinlock_irqsave, &urb_stream->lock) {
-			urb_stream->callback_processing = false;
-		}
+	/* Clear the execution flag under the lock */
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		urb_stream->callback_processing = false;
 	}
 
-	if (jockey3_is_stopping(chip))
-		return;
-
-	atomic_inc(&urb_stream->urbs_in_flight);
-	usb_anchor_urb(urb, &urb_stream->anchor);
-	ret = usb_submit_urb(urb, GFP_ATOMIC);
-	if (ret < 0) {
-		atomic_dec(&urb_stream->urbs_in_flight);
-		usb_unanchor_urb(urb);
-		if (ret != -ENODEV && ret != -EPERM)
-			dev_err(&chip->intf0->dev, "Failed to resubmit capture URB: %d\n", ret);
+	/* Keep resubmitting the URB while the interface is alive */
+	if (!jockey3_is_stopping(chip) && !jockey3_is_disconnected(chip)) {
+		atomic_inc(&urb_stream->urbs_in_flight);
+		usb_anchor_urb(urb, &urb_stream->anchor);
+		ret = usb_submit_urb(urb, GFP_ATOMIC);
+		if (ret < 0) {
+			atomic_dec(&urb_stream->urbs_in_flight);
+			usb_unanchor_urb(urb);
+			if (ret != -ENODEV && ret != -EPERM)
+				dev_err(&chip->intf0->dev, "Failed to resubmit capture URB: %d\n",
+					ret);
+		}
 	}
 }
 
@@ -311,33 +312,19 @@ static void jockey3_playback_callback(struct urb *urb)
 	if (unlikely(jockey3_urb_error_fatal(chip, urb, "Playback")))
 		return;
 
-	if (unlikely(jockey3_is_disconnected(chip)))
+	if (unlikely(jockey3_is_disconnected(chip) || jockey3_is_stopping(chip)))
 		return;
 
 	/* Step 1: Safely fetch the pointer and flag that the callback is active */
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		/* Mark we're active in a critical section */
+		urb_stream->callback_processing = true;
+
 		if (urb_stream->running && urb_stream->substream) {
 			period_elapsed = jockey3_process_out_packet(chip, buf);
 			substream = urb_stream->substream;
-
-			if (period_elapsed && substream)
-				/* Mark we're active in a critical section */
-				urb_stream->callback_processing = true;
 		} else {
 			ploytec_prepare_out_packet(buf);
-		}
-	}
-
-	/*
-	 * Step 2: Safe Zone. ALSA core can't free 'substream' because our
-	 * .close path is waiting for 'callback_processing' to become false.
-	 */
-	if (period_elapsed && substream) {
-		snd_pcm_period_elapsed(substream);
-
-		/* Clear the execution flag under the lock */
-		scoped_guard(spinlock_irqsave, &urb_stream->lock) {
-			urb_stream->callback_processing = false;
 		}
 	}
 
@@ -349,17 +336,30 @@ static void jockey3_playback_callback(struct urb *urb)
 	for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
 		buf[i] = 0x00;
 
-	if (jockey3_is_stopping(chip))
-		return;
+	/*
+	 * Step 2: Safe Zone. ALSA core can't free 'substream' because our
+	 * .close path is waiting for 'callback_processing' to become false.
+	 */
+	if (period_elapsed && substream)
+		snd_pcm_period_elapsed(substream);
 
-	atomic_inc(&urb_stream->urbs_in_flight);
-	usb_anchor_urb(urb, &urb_stream->anchor);
-	ret = usb_submit_urb(urb, GFP_ATOMIC);
-	if (ret < 0) {
-		atomic_dec(&urb_stream->urbs_in_flight);
-		usb_unanchor_urb(urb);
-		if (ret != -ENODEV && ret != -EPERM)
-			dev_err(&chip->intf0->dev, "Failed to resubmit playback URB: %d\n", ret);
+	/* Clear the execution flag under the lock */
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		urb_stream->callback_processing = false;
+	}
+
+	/* Keep resubmitting the URB while the interface is alive */
+	if (!jockey3_is_stopping(chip) && !jockey3_is_disconnected(chip)) {
+		atomic_inc(&urb_stream->urbs_in_flight);
+		usb_anchor_urb(urb, &urb_stream->anchor);
+		ret = usb_submit_urb(urb, GFP_ATOMIC);
+		if (ret < 0) {
+			atomic_dec(&urb_stream->urbs_in_flight);
+			usb_unanchor_urb(urb);
+			if (ret != -ENODEV && ret != -EPERM)
+				dev_err(&chip->intf0->dev, "Failed to resubmit playback URB: %d\n",
+					ret);
+		}
 	}
 }
 
@@ -373,29 +373,92 @@ static void jockey3_midi_in_callback(struct urb *urb)
 	if (jockey3_urb_error_fatal(chip, urb, "MIDI IN"))
 		return;
 
-	if (unlikely(jockey3_is_disconnected(chip)))
+	if (unlikely(jockey3_is_disconnected(chip) || jockey3_is_stopping(chip)))
 		return;
 
 	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
+		chip->midi_callback_processing = true;	// Mark we're active in a critical section
 		substream = chip->midi_in_substream;
 	}
 
 	if (substream) {
 		for (i = 0; i < urb->actual_length; i++) {
 			if (buf[i] != PLOYTEC_MIDI_IDLE_BYTE && buf[i] != 0xF9) {
-				dev_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n",
-					buf[i]);
+				dev_dbg(&chip->intf0->dev, "MIDI IN: 0x%02x\n", buf[i]);
 				snd_rawmidi_receive(substream, &buf[i], 1);
 			}
 		}
 	}
 
-	if (jockey3_is_stopping(chip))
-		return;
+	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
+		chip->midi_callback_processing = false;	// Mark we're done in critical section
+	}
 
-	ret = usb_submit_urb(urb, GFP_ATOMIC);
-	if (ret < 0 && ret != -ENODEV && ret != -EPERM)
-		dev_err(&chip->intf0->dev, "Failed to resubmit MIDI IN URB: %d\n", ret);
+	if (!jockey3_is_stopping(chip) && !jockey3_is_disconnected(chip)) {
+		ret = usb_submit_urb(urb, GFP_ATOMIC);
+		if (ret < 0 && ret != -ENODEV && ret != -EPERM)
+			dev_err(&chip->intf0->dev, "Failed to resubmit MIDI IN URB: %d\n", ret);
+	}
+}
+
+/*
+ * The URB callback signals when it is in a critical section processing data. This is meant to
+ * prevent other functions from de-allocating resources required by the callback while it is
+ * processing.
+ */
+static void jockey3_wait_for_callback_completion(struct jockey3_chip *chip)
+{
+	unsigned long timeout_jiffies = jiffies + msecs_to_jiffies(10);		// 10ms timeout
+	unsigned int spin_count = 0;
+
+	while (1) {
+		bool midi_busy, capture_busy, playback_busy;
+
+		scoped_guard(spinlock_irqsave, &chip->midi_lock) {
+			midi_busy = chip->midi_callback_processing;
+		}
+		scoped_guard(spinlock_irqsave, &chip->capture.lock) {
+			capture_busy = chip->capture.callback_processing;
+		}
+		scoped_guard(spinlock_irqsave, &chip->playback.lock) {
+			playback_busy = chip->playback.callback_processing;
+		}
+
+		if (!midi_busy && !capture_busy && !playback_busy)
+			break;
+
+		if (time_after(jiffies, timeout_jiffies)) {
+			dev_err(&chip->intf0->dev, "Timeout waiting for URB callback processing.\n");
+			break;
+		}
+
+		/* fast path: spin for couple of iterations */
+		if (spin_count < 100) {
+			cpu_relax();
+			spin_count++;
+		} else {
+			usleep_range(10, 50);
+		}
+
+		/* Yield CPU slightly to let the Tasklet/BH context finish on the other core */
+		cpu_relax();
+	}
+}
+
+static void jockey3_wait_for_callback_completion_atomic(struct jockey3_pcm_urb_stream *urb_stream)
+{
+	while (1) {
+		bool busy;
+
+		scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+			busy = urb_stream->callback_processing;
+		}
+		if (!busy)
+			break;
+
+		/* Yield CPU slightly to let the Tasklet/BH context finish on the other core */
+		cpu_relax();
+	}
 }
 
 static void jockey3_stop_urbs(struct jockey3_chip *chip)
@@ -406,10 +469,17 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 		atomic_read(&chip->playback.urbs_in_flight), chip->flags);
 
 	set_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
+
 	usb_kill_urb(chip->midi_in_urb);
 	usb_kill_anchored_urbs(&chip->playback.anchor);
 	usb_kill_anchored_urbs(&chip->capture.anchor);
 
+	jockey3_wait_for_callback_completion(chip);
+
+	/* after killing the URBs there will be no in-flight requests anymore since the callback
+	 * function has been called as part of the shutdown. The number of in-flight URBs should
+	 * therefore be zero at this point. Log an inconsistency error if not.
+	 */
 	if (atomic_read(&chip->playback.urbs_in_flight) != 0)
 		dev_err(&chip->intf0->dev, "Inconsistent URB in-flight count: playback=%d != 0\n",
 			atomic_read(&chip->playback.urbs_in_flight));
@@ -568,18 +638,7 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	 * sure to not accessing it anymore before returning to ALSA, and prevent potential
 	 * Use-After-Free issues.
 	 */
-	while (1) {
-		bool busy;
-
-		scoped_guard(spinlock_irqsave, &urb_stream->lock) {
-			busy = urb_stream->callback_processing;
-		}
-		if (!busy)
-			break;
-
-		/* Yield CPU slightly to let the Tasklet/BH context finish on the other core */
-		cpu_relax();
-	}
+	jockey3_wait_for_callback_completion(chip);
 
 	return 0;
 }
@@ -691,7 +750,7 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 		}
 
 		jockey3_stop_urbs(chip);
-		msleep(50);
+		//msleep(50);
 
 		ret = jockey3_set_rate(chip, rate);
 		if (ret != 0) {
@@ -1124,6 +1183,7 @@ static void jockey3_disconnect(struct usb_interface *intf)
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
 	if (chip && intf == chip->intf0) {
+		jockey3_stop_urbs(chip);
 		snd_card_disconnect(chip->card);
 		chip->playback.running = false;
 		chip->capture.running = false;
