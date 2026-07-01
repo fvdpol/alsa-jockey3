@@ -33,11 +33,11 @@
 #define PLOYTEC_EP_NUM_MIDI_IN 0x03		// 0x83 & 0x0F
 
 /* Protocol Commands */
-#define PLOYTEC_REQ_FIRMWARE 0x56
-#define PLOYTEC_REQ_STATUS   0x49
-#define PLOYTEC_REQ_GET_RATE 0x81
 #define PLOYTEC_SET_RATE     0x01
 #define PLOYTEC_SET_RATE_VAL 0x22
+#define PLOYTEC_REQ_STATUS   0x49
+#define PLOYTEC_REQ_FIRMWARE 0x56
+#define PLOYTEC_REQ_GET_RATE 0x81
 
 /* Status Bits */
 #define PLOYTEC_STATUS_READY 0x20

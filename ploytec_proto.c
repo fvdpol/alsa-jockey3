@@ -216,7 +216,8 @@ int ploytec_get_rate(struct usb_device *dev, void *xfer_buf, u32 *rate)
 
 	/* Read rate from Playback EP 0x05 */
 	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_GET_RATE, 0xA2,
-				   0x0100, 0x0005, buf, 3, 2000, GFP_KERNEL);
+				   0x0100, PLOYTEC_EP_NUM_PCM_OUT | USB_DIR_OUT,
+				   buf, 3, 2000, GFP_KERNEL);
 	if (ret < 0)
 		return ret;
 
@@ -246,7 +247,8 @@ int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
 
 	/* Set rate on Capture EP 0x86 */
 	ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_VAL,
-				   0x0100, 0x0086, buf, 3, 2000, GFP_KERNEL);
+				   0x0100, PLOYTEC_EP_NUM_PCM_IN | USB_DIR_IN,
+				   buf, 3, 2000, GFP_KERNEL);
 	if (ret < 0) {
 		pr_err("ploytec: Failed to set rate on EP 0x86: %d\n", ret);
 		return ret;
@@ -254,7 +256,8 @@ int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
 
 	/* Set rate on Playback EP 0x05 */
 	ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_VAL,
-				   0x0100, 0x0005, buf, 3, 2000, GFP_KERNEL);
+				   0x0100, PLOYTEC_EP_NUM_PCM_OUT | USB_DIR_OUT,
+				   buf, 3, 2000, GFP_KERNEL);
 	if (ret < 0) {
 		pr_err("ploytec: Failed to set rate on EP 0x05: %d\n", ret);
 		return ret;
