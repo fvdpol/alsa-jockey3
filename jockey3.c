@@ -69,7 +69,6 @@ struct jockey3_chip {
 	struct mutex rate_mutex; // serializes sample rate changes and active stream tracking
 	unsigned long flags;
 	unsigned int current_rate;
-	int active_streams;	// streams fully configured or processing audio
 
 	/* MIDI Path */
 	struct snd_rawmidi_substream *midi_in_substream;
@@ -110,6 +109,23 @@ static inline struct jockey3_pcm_urb_stream *jockey3_get_pcm_urb_stream(struct j
 		return &chip->playback;
 	else
 		return &chip->capture;
+}
+
+static int jockey3_active_streams(struct jockey3_chip *chip)
+{
+	int active_streams = 0;
+
+	scoped_guard(spinlock_irqsave, &chip->capture.lock) {
+		if (chip->capture.running)
+			active_streams++;
+	}
+
+	scoped_guard(spinlock_irqsave, &chip->playback.lock) {
+		if (chip->playback.running)
+			active_streams++;
+	}
+
+	return active_streams;
 }
 
 static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
@@ -580,7 +596,7 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 
 	/* Rate constraints under proper locking */
 	scoped_guard(mutex, &chip->rate_mutex) {
-		if (chip->active_streams > 0) {
+		if (jockey3_active_streams(chip) > 0) {
 			/* Force the new stream to match the existing hardware rate */
 			ret = snd_pcm_hw_constraint_single(runtime,
 							   SNDRV_PCM_HW_PARAM_RATE,
@@ -609,12 +625,6 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 		jockey3_get_pcm_urb_stream(chip, substream->stream);
 
 	dev_dbg(&chip->intf0->dev, "PCM close stream %d\n", substream->stream);
-
-	scoped_guard(mutex, &chip->rate_mutex) {
-		if (chip->active_streams > 0)
-			chip->active_streams--;
-	}
-	dev_dbg(&chip->intf0->dev, "active_streams decremented to %d\n", chip->active_streams);
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		urb_stream->substream = NULL;
@@ -654,11 +664,6 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	}
 	dev_dbg(&chip->intf0->dev, "%s waited %d ms for reset completion.\n",
 		__func__, 20 * (50 - count));
-
-	scoped_guard(mutex, &chip->rate_mutex) {
-		chip->active_streams++;
-	}
-	dev_dbg(&chip->intf0->dev, "active_streams incremented to %d\n", chip->active_streams);
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		urb_stream->dma_off = 0;
@@ -735,7 +740,7 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	int ret = 0;
 
 	dev_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n",
-		rate, chip->active_streams);
+		rate, jockey3_active_streams(chip));
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
@@ -752,7 +757,7 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 		 * enforced the constraint from jockey3_pcm_open. We still
 		 * sanity check here to be safe.
 		 */
-		if (chip->active_streams > 1) {
+		if (jockey3_active_streams(chip) > 1) {
 			dev_err(&chip->intf0->dev, "Cannot change rate while other stream is active\n");
 			return -EBUSY;
 		}
