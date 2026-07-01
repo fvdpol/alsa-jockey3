@@ -164,12 +164,10 @@ int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf)
 	ret = usb_set_interface(dev, 0, 1);
 	if (ret < 0)
 		return ret;
-	msleep(20);
 
 	ret = usb_set_interface(dev, 1, 1);
 	if (ret < 0)
 		return ret;
-	msleep(20);
 
 	/*
 	 * Read Firmware (Request 0x56):
@@ -183,7 +181,6 @@ int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf)
 	 */
 	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_FIRMWARE, 0xC0, 0, 0,
 				   buf, 15, 2000, GFP_KERNEL);
-	msleep(20);
 
 	/* Read Status (Request 0x49) */
 	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_STATUS, 0xC0, 0, 0,
@@ -192,7 +189,7 @@ int ploytec_handshake_step(struct usb_device *dev, void *xfer_buf)
 		return ret;
 
 	status = buf[0];
-	msleep(20);
+	pr_debug("ploytec: Read Status  %d\n", status);
 
 	/* Enable device if READY bit is not set */
 	if (!(status & PLOYTEC_STATUS_READY)) {
@@ -255,8 +252,6 @@ int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
 		return ret;
 	}
 
-	msleep(50);
-
 	/* Set rate on Playback EP 0x05 */
 	ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_VAL,
 				   0x0100, 0x0005, buf, 3, 2000, GFP_KERNEL);
@@ -264,8 +259,6 @@ int ploytec_set_rate(struct usb_device *dev, void *xfer_buf, u32 rate)
 		pr_err("ploytec: Failed to set rate on EP 0x05: %d\n", ret);
 		return ret;
 	}
-
-	msleep(50);
 
 	if (ploytec_get_rate(dev, xfer_buf, &current_hw_rate) == 0) {
 		if (current_hw_rate != rate)

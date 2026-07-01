@@ -652,7 +652,7 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	dev_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
-		
+
 	while (jockey3_is_resetting(chip)) {
 		usleep_range(1000, 5000);
 		if (jockey3_is_disconnected(chip))
@@ -871,6 +871,7 @@ static const struct snd_rawmidi_ops jockey3_midi_out_ops = {
 static int jockey3_handshake(struct jockey3_chip *chip)
 {
 	int ret;
+	int rate;
 
 	ret = jockey3_handshake_step(chip);
 	if (ret < 0)
@@ -878,11 +879,11 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 
 	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
 		chip->current_rate = 44100;
+		rate = chip->current_rate;
 	}
-	ret = jockey3_set_rate(chip, chip->current_rate);
+	ret = jockey3_set_rate(chip, rate);
 	if (ret < 0)
 		return ret;
-//	msleep(20);
 
 	dev_dbg(&chip->intf0->dev, "Handshake complete.\n");
 
