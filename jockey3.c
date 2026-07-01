@@ -42,6 +42,7 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 /* Chip flags */
 #define JOCKEY3_FLAG_DISCONNECTED 0
 #define JOCKEY3_FLAG_STOPPING     1
+#define JOCKEY3_FLAG_RESETTING    2
 
 struct jockey3_pcm_urb_stream {
 	struct snd_pcm_substream *substream;
@@ -95,6 +96,11 @@ static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
 static inline bool jockey3_is_stopping(const struct jockey3_chip *chip)
 {
 	return test_bit(JOCKEY3_FLAG_STOPPING, &chip->flags);
+}
+
+static inline bool jockey3_is_resetting(const struct jockey3_chip *chip)
+{
+	return test_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 }
 
 static inline struct jockey3_pcm_urb_stream *jockey3_get_pcm_urb_stream(struct jockey3_chip *chip,
@@ -403,11 +409,11 @@ static void jockey3_midi_in_callback(struct urb *urb)
 /*
  * The URB callback signals when it is in a critical section processing data. This is meant to
  * prevent other functions from de-allocating resources required by the callback while it is
- * processing.
+ * processing. Can only be called from non-atomic context since this function sleeps.
  */
 static void jockey3_wait_for_callback_completion(struct jockey3_chip *chip)
 {
-	unsigned long timeout_jiffies = jiffies + msecs_to_jiffies(10);		// 10ms timeout
+	unsigned long timeout_jiffies = jiffies + msecs_to_jiffies(10);
 	unsigned int spin_count = 0;
 
 	while (1) {
@@ -427,12 +433,13 @@ static void jockey3_wait_for_callback_completion(struct jockey3_chip *chip)
 			break;
 
 		if (time_after(jiffies, timeout_jiffies)) {
-			dev_err(&chip->intf0->dev, "Timeout waiting for URB callback processing.\n");
+			dev_err(&chip->intf0->dev,
+				"Timeout waiting for URB callback processing to complete.\n");
 			break;
 		}
 
-		/* fast path: spin for couple of iterations */
-		if (spin_count < 100) {
+		/* fast path: spin for couple of iterations before sleeping */
+		if (spin_count < 50) {
 			cpu_relax();
 			spin_count++;
 		} else {
@@ -604,7 +611,8 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	dev_dbg(&chip->intf0->dev, "PCM close stream %d\n", substream->stream);
 
 	scoped_guard(mutex, &chip->rate_mutex) {
-		chip->active_streams--;
+		if (chip->active_streams > 0)
+			chip->active_streams--;
 	}
 	dev_dbg(&chip->intf0->dev, "active_streams decremented to %d\n", chip->active_streams);
 
@@ -628,22 +636,34 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 	struct jockey3_pcm_urb_stream *urb_stream =
 		jockey3_get_pcm_urb_stream(chip, substream->stream);
+	int count = 50;
 
 	dev_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
+	if (jockey3_is_disconnected(chip))
+		return -ENODEV;
+
+	while (jockey3_is_resetting(chip)) {
+		msleep(20);
+		if (jockey3_is_disconnected(chip))
+			return -ENODEV;
+		count--;
+		if (count == 0) {
+			dev_warn(&chip->intf0->dev, "Timeout waiting for reset completion\n");
+			return -EAGAIN;
+		}
+	}
+	dev_dbg(&chip->intf0->dev, "%s waited %d ms for reset completion.\n",
+		__func__, 20 * (50 - count));
 
 	scoped_guard(mutex, &chip->rate_mutex) {
 		chip->active_streams++;
 	}
 	dev_dbg(&chip->intf0->dev, "active_streams incremented to %d\n", chip->active_streams);
 
-	if (jockey3_is_disconnected(chip))
-		return -ENODEV;
-
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		urb_stream->dma_off = 0;
 		urb_stream->period_off = 0;
 	}
-
 	return 0;
 }
 
@@ -657,6 +677,8 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
+	if (jockey3_is_resetting(chip))
+		return -EBUSY;
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		switch (cmd) {
@@ -765,7 +787,8 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	 * pre_reset/post_reset callbacks handle the URB lifecycle.
 	 * We call this outside the rate_mutex to allow pre/post_reset to acquire it.
 	 */
-	usb_reset_device(chip->dev);
+	set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
+	usb_queue_reset_device(chip->intf0);
 
 	return 0;
 }
@@ -1179,12 +1202,14 @@ static void jockey3_disconnect(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
+	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
 	if (chip && intf == chip->intf0) {
 		jockey3_stop_urbs(chip);
 		snd_card_disconnect(chip->card);
 		chip->playback.running = false;
 		chip->capture.running = false;
 		set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+		clear_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 		/*
 		 * Card cleanup, URB stopping/freeing, and interface release
 		 * are all handled automatically by devres.
@@ -1197,7 +1222,9 @@ static int jockey3_pre_reset(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
+	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
 	if (chip && intf == chip->intf0) {
+		set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 		mutex_lock(&chip->rate_mutex);
 		jockey3_stop_urbs(chip);
 	}
@@ -1209,6 +1236,7 @@ static int jockey3_post_reset(struct usb_interface *intf)
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 	u32 hw_rate = 0;
 
+	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
 	if (chip && intf == chip->intf0) {
 		jockey3_handshake_step(chip);
 
@@ -1226,6 +1254,7 @@ static int jockey3_post_reset(struct usb_interface *intf)
 		}
 
 		jockey3_start_urbs(chip);
+		clear_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 		mutex_unlock(&chip->rate_mutex);
 	}
 	return 0;
@@ -1252,6 +1281,8 @@ static int jockey3_restore_device(struct jockey3_chip *chip, bool reset)
 {
 	int ret;
 
+	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
+
 	guard(mutex)(&chip->rate_mutex);
 
 	if (reset) {
@@ -1273,6 +1304,7 @@ static int jockey3_resume(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
+	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
 	if (chip && intf == chip->intf0) {
 		dev_dbg(&intf->dev, "USB resume, restoring device\n");
 		return jockey3_restore_device(chip, false);
@@ -1284,6 +1316,7 @@ static int jockey3_reset_resume(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
+	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
 	if (chip && intf == chip->intf0) {
 		dev_dbg(&intf->dev, "USB reset resume, restoring device\n");
 		return jockey3_restore_device(chip, true);
