@@ -646,24 +646,24 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 	struct jockey3_pcm_urb_stream *urb_stream =
 		jockey3_get_pcm_urb_stream(chip, substream->stream);
-	int count = 50;
+	unsigned long start_jiffies = jiffies;
+	unsigned long timeout_jiffies = start_jiffies + msecs_to_jiffies(1000);
 
 	dev_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
 	while (jockey3_is_resetting(chip)) {
-		msleep(20);
+		usleep_range(1000, 5000);
 		if (jockey3_is_disconnected(chip))
 			return -ENODEV;
-		count--;
-		if (count == 0) {
+		if (time_after(jiffies, timeout_jiffies)) {
 			dev_warn(&chip->intf0->dev, "Timeout waiting for reset completion\n");
 			return -EAGAIN;
 		}
 	}
 	dev_dbg(&chip->intf0->dev, "%s waited %d ms for reset completion.\n",
-		__func__, 20 * (50 - count));
+		__func__, jiffies_to_msecs(jiffies - start_jiffies));
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		urb_stream->dma_off = 0;
