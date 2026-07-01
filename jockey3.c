@@ -647,17 +647,22 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	struct jockey3_pcm_urb_stream *urb_stream =
 		jockey3_get_pcm_urb_stream(chip, substream->stream);
 	unsigned long start_jiffies = jiffies;
-	unsigned long timeout_jiffies = start_jiffies + msecs_to_jiffies(1000);
+	unsigned long timeout_jiffies = start_jiffies + msecs_to_jiffies(1500);
 
 	dev_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
-
+		
 	while (jockey3_is_resetting(chip)) {
 		usleep_range(1000, 5000);
 		if (jockey3_is_disconnected(chip))
 			return -ENODEV;
 		if (time_after(jiffies, timeout_jiffies)) {
+			/*
+			 * Empirical testing shows that the reset cycle required for changing the
+			 * sample rate typically takes around 334 ms, unless the change failed and
+			 * a re-submission is required, in which case it typically takes 1035 ms.
+			 */
 			dev_warn(&chip->intf0->dev, "Timeout waiting for reset completion\n");
 			return -EAGAIN;
 		}
@@ -877,7 +882,7 @@ static int jockey3_handshake(struct jockey3_chip *chip)
 	ret = jockey3_set_rate(chip, chip->current_rate);
 	if (ret < 0)
 		return ret;
-	msleep(20);
+//	msleep(20);
 
 	dev_dbg(&chip->intf0->dev, "Handshake complete.\n");
 
@@ -1207,7 +1212,6 @@ static void jockey3_disconnect(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
-	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
 	if (chip && intf == chip->intf0) {
 		jockey3_stop_urbs(chip);
 		snd_card_disconnect(chip->card);
@@ -1227,7 +1231,6 @@ static int jockey3_pre_reset(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
-	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
 	if (chip && intf == chip->intf0) {
 		set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 		mutex_lock(&chip->rate_mutex);
@@ -1241,7 +1244,6 @@ static int jockey3_post_reset(struct usb_interface *intf)
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 	u32 hw_rate = 0;
 
-	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
 	if (chip && intf == chip->intf0) {
 		jockey3_handshake_step(chip);
 
@@ -1286,30 +1288,26 @@ static int jockey3_restore_device(struct jockey3_chip *chip, bool reset)
 {
 	int ret;
 
-	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
+	scoped_guard(mutex, &chip->rate_mutex) {
+		if (reset) {
+			ret = jockey3_handshake_step(chip);
+			if (ret < 0)
+				return ret;
+		}
 
-	guard(mutex)(&chip->rate_mutex);
-
-	if (reset) {
-		ret = jockey3_handshake_step(chip);
+		ret = jockey3_set_rate(chip, chip->current_rate);
 		if (ret < 0)
 			return ret;
+
+		jockey3_start_urbs(chip);
+		return 0;
 	}
-
-	ret = jockey3_set_rate(chip, chip->current_rate);
-	if (ret < 0)
-		return ret;
-	msleep(20);
-
-	jockey3_start_urbs(chip);
-	return 0;
 }
 
 static int jockey3_resume(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
-	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
 	if (chip && intf == chip->intf0) {
 		dev_dbg(&intf->dev, "USB resume, restoring device\n");
 		return jockey3_restore_device(chip, false);
@@ -1321,7 +1319,6 @@ static int jockey3_reset_resume(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
-	dev_dbg(&chip->intf0->dev, "%s\n", __func__);
 	if (chip && intf == chip->intf0) {
 		dev_dbg(&intf->dev, "USB reset resume, restoring device\n");
 		return jockey3_restore_device(chip, true);
