@@ -9,3 +9,6 @@ modules.order
 .tmp_versions/
 *.cmd
 *~
+tests/test_codec
+tests/ploytec_codec.c
+tests/ploytec_codec.h
