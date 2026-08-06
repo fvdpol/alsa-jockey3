@@ -12,17 +12,18 @@
 
 #ifdef REFERENCE_CODEC
 
-/**
- * The reference implementation of the Ploytec is performing a bit gather/scatter
- * operation with minimal optimization, and mainly serves for reference and validation
- * of correctness of any optimized version of the encoder/decoder.
+/*
+ * The reference implementation of the Ploytec codec performs a bit
+ * gather/scatter operation with minimal optimization. It mainly serves as
+ * a readable reference and for validating the correctness of the optimized
+ * encoder/decoder variants below.
  *
- * compile with the REFERENCE_CODEC symbol set to use this encoder instead of the
- * optimized variants.
+ * Compile with the REFERENCE_CODEC symbol set to use this codec instead of
+ * the optimized variants.
  */
 
 /**
- * ploytec_encode_s24_3le - Encode 4-channel S24_3LE to 48-byte Ploytec frame
+ * ploytec_encode_s24_3le() - Encode 4-channel S24_3LE to 48-byte Ploytec frame
  * @dest: 48-byte destination buffer
  * @src: 12-byte source buffer (4 channels * 3 bytes)
  *
@@ -57,7 +58,7 @@ static inline void ploytec_encode_s24_3le(u8 *dest, const u8 *src)
 }
 
 /**
- * ploytec_decode_s24_3le - Decode 64-byte Ploytec frame to 6-channel S24_3LE
+ * ploytec_decode_s24_3le() - Decode 64-byte Ploytec frame to 6-channel S24_3LE
  * @dest: 18-byte destination buffer (6 channels * 3 bytes)
  * @src: 64-byte source buffer
  *
@@ -106,11 +107,10 @@ static inline void ploytec_decode_s24_3le(u8 *dest, const u8 *src)
 }
 #else // not REFERENCE_CODEC
 #ifdef CONFIG_64BIT
-/*
- * =========================================================================
- * PLOYTEC BIT-PLANE INTERLEAVING OPTIMIZATION NOTE
- * =========================================================================
- * * CORE PERFORMANCE PROBLEM:
+/**
+ * DOC: Ploytec bit-plane interleaving optimization
+ *
+ * CORE PERFORMANCE PROBLEM:
  * The Ploytec firmware uses a non-standard "bit-plane" format where bits
  * from different channels are interleaved into the same byte. The naive
  * implementation processes data bit-by-bit using heavily nested loops,
@@ -201,9 +201,9 @@ static inline void ploytec_decode_s24_3le(u8 *dest, const u8 *src)
  * -------------------------------------------------------------------------
  * 4. EMPIRICAL PERFORMANCE TESTING
  * -------------------------------------------------------------------------
- * Compared to the reference implementation, testing of these optimised
+ * Compared to the reference implementation, testing of these optimized
  * versions showed a significant improvement, justifying the added complexity
- * from these optimisations. Table show the relative speed-up and the time
+ * from these optimizations. Table shows the relative speed-up and the time
  * for encoding (4ch) or decoding (6ch) a sample frame on the validation
  * hardware:
  *
@@ -212,12 +212,17 @@ static inline void ploytec_decode_s24_3le(u8 *dest, const u8 *src)
  *   x86_64	64	10.2x	 8.8x		  7.3 ns	 15.0 ns
  *   armhf	32	 3.9x	 4.6x		208.9 ns	448.5 ns
  *   arm64	64	 8.1x	 5.7x		 15.6 ns	 41.5 ns
- *
- * =========================================================================
  */
 
 static u64 ploytec_bit_spread_64[256];
 
+/**
+ * init_ploytec_bit_spread_lut64() - Build the 64-bit bit-spread lookup table
+ *
+ * Precomputes ploytec_bit_spread_64[], mapping each possible input byte to
+ * the 8-byte bit-plane pattern used by ploytec_encode_s24_3le_lut64(). See
+ * the optimization note above for details of the algorithm.
+ */
 static void init_ploytec_bit_spread_lut64(void)
 {
 	for (int b = 0; b < 256; b++) {
@@ -231,6 +236,15 @@ static void init_ploytec_bit_spread_lut64(void)
 	}
 }
 
+/**
+ * ploytec_encode_s24_3le_lut64() - Encode 4-channel S24_3LE using the 64-bit LUT bit-spread method
+ * @dest: 48-byte destination buffer
+ * @src: 12-byte source buffer (4 channels * 3 bytes)
+ *
+ * Optimized, CONFIG_64BIT equivalent of ploytec_encode_s24_3le(); produces
+ * identical output. See the bit-plane layout on ploytec_encode_s24_3le()
+ * and the optimization note above for the LUT technique used here.
+ */
 static inline void ploytec_encode_s24_3le_lut64(u8 *dest, const u8 *src)
 {
 	// put_unaligned_le64 safely writes a 64-bit value in Little Endian order,
@@ -253,6 +267,14 @@ static inline void ploytec_encode_s24_3le_lut64(u8 *dest, const u8 *src)
 			   (ploytec_bit_spread_64[src[9]] << 1), dest + 40);
 }
 
+/**
+ * pack_bit_plane64() - Gather bit @bit_index of 8 consecutive bytes into one byte
+ * @val: 8 source bytes loaded as a little-endian u64
+ * @bit_index: bit position (0-7) to extract from each source byte
+ *
+ * Return: the gathered byte, using the magic-multiplier technique described
+ * in the optimization note above.
+ */
 static inline u8 pack_bit_plane64(u64 val, int bit_index)
 {
 	// Shift target bit to bit 0 of each byte, then mask it
@@ -263,6 +285,15 @@ static inline u8 pack_bit_plane64(u64 val, int bit_index)
 	return (u8)((masked * 0x8040201008040201ULL) >> 56);
 }
 
+/**
+ * ploytec_decode_s24_3le_pack64() - Decode a Ploytec frame using the 64-bit magic-multiplier method
+ * @dest: 18-byte destination buffer (6 channels * 3 bytes)
+ * @src: 64-byte source buffer
+ *
+ * Optimized, CONFIG_64BIT equivalent of ploytec_decode_s24_3le(); produces
+ * identical output. See the bit-plane layout on ploytec_decode_s24_3le()
+ * and the optimization note above for the gather technique used here.
+ */
 static inline void ploytec_decode_s24_3le_pack64(u8 *dest, const u8 *src)
 {
 	u64 blocks_0_17_low  = get_unaligned_le64(src + 0x00);
@@ -308,7 +339,15 @@ static inline void ploytec_decode_s24_3le_pack64(u8 *dest, const u8 *src)
 static u32 ploytec_bit_spread_32_high[256];
 static u32 ploytec_bit_spread_32_low[256];
 
-void init_ploytec_bit_spread_lut32(void)
+/**
+ * init_ploytec_bit_spread_lut32() - Build the 32-bit bit-spread lookup tables
+ *
+ * Precomputes ploytec_bit_spread_32_high[] and ploytec_bit_spread_32_low[],
+ * the 32-bit nibble-split equivalent of init_ploytec_bit_spread_lut64() for
+ * architectures without efficient native 64-bit arithmetic. See the
+ * optimization note above for details.
+ */
+static void init_ploytec_bit_spread_lut32(void)
 {
 	for (int b = 0; b < 256; b++) {
 		u32 high_spread = 0;
@@ -327,6 +366,14 @@ void init_ploytec_bit_spread_lut32(void)
 	}
 }
 
+/**
+ * ploytec_encode_s24_3le_lut32() - Encode 4-channel S24_3LE using the 32-bit LUT bit-spread method
+ * @dest: 48-byte destination buffer
+ * @src: 12-byte source buffer (4 channels * 3 bytes)
+ *
+ * 32-bit equivalent of ploytec_encode_s24_3le_lut64() for architectures
+ * without efficient native 64-bit arithmetic; produces identical output.
+ */
 static inline void ploytec_encode_s24_3le_lut32(u8 *dest, const u8 *src)
 {
 	// put_unaligned_le32 safely writes a 32-bit value in Little Endian order,
@@ -371,6 +418,15 @@ static inline void ploytec_encode_s24_3le_lut32(u8 *dest, const u8 *src)
 			   (ploytec_bit_spread_32_low[src[9]]  << 1), dest + 44);
 }
 
+/**
+ * pack_bit_plane32() - Gather bit @bit_index of 8 consecutive bytes into one byte
+ * @high_4_bytes: first 4 source bytes of the block, holding the high nibble (bits 7-4)
+ * @low_4_bytes: last 4 source bytes of the block, holding the low nibble (bits 3-0)
+ * @bit_index: bit position (0-7) to extract from each source byte
+ *
+ * Return: the gathered byte, using the magic-multiplier technique described
+ * in the optimization note above.
+ */
 static inline u8 pack_bit_plane32(u32 high_4_bytes, u32 low_4_bytes, int bit_index)
 {
 	// Isolate the targeted bit index across all 4 bytes simultaneously
@@ -385,6 +441,14 @@ static inline u8 pack_bit_plane32(u32 high_4_bytes, u32 low_4_bytes, int bit_ind
 	return (high_bits << 4) | low_bits;
 }
 
+/**
+ * ploytec_decode_s24_3le_pack32() - Decode a Ploytec frame using the 32-bit magic-multiplier method
+ * @dest: 18-byte destination buffer (6 channels * 3 bytes)
+ * @src: 64-byte source buffer
+ *
+ * 32-bit equivalent of ploytec_decode_s24_3le_pack64() for architectures
+ * without efficient native 64-bit arithmetic; produces identical output.
+ */
 static inline void ploytec_decode_s24_3le_pack32(u8 *dest, const u8 *src)
 {
 	// Pre-load all required 4-byte chunks into native 32-bit registers
@@ -436,7 +500,11 @@ static inline void ploytec_decode_s24_3le_pack32(u8 *dest, const u8 *src)
 #endif	// REFERENCE_CODEC
 
 /**
- * ploytec_initialise_codec - Initialisation of the pre-computed lookup table
+ * ploytec_initialise_codec() - Initialize the codec's pre-computed lookup tables
+ *
+ * Builds the bit-spread lookup table(s) used by the optimized encoder/decoder.
+ * Must be called once (e.g. at driver probe) before any call to
+ * ploytec_encode_batch() or ploytec_decode_batch().
  */
 void ploytec_initialise_codec(void)
 {
@@ -454,10 +522,10 @@ void ploytec_initialise_codec(void)
 }
 
 /**
- * ploytec_encode_batch - Encode a number of 4-channel S24_3LE to 48-byte Ploytec frames
- * @dest: 18-byte destination buffer (6 channels * 3 bytes)
- * @src: 64-byte source buffer
- * @n_frames: number of frames to be processed batch
+ * ploytec_encode_batch() - Encode a number of 4-channel S24_3LE to 48-byte Ploytec frames
+ * @dest: n_frames * 48-byte destination buffer (Ploytec playback frame)
+ * @src: n_frames * 12-byte source buffer (4 channels * 3 bytes)
+ * @n_frames: number of frames to process in this batch
  */
 void ploytec_encode_batch(u8 *dest, const u8 *src, const int n_frames)
 {
@@ -477,10 +545,10 @@ void ploytec_encode_batch(u8 *dest, const u8 *src, const int n_frames)
 }
 
 /**
- * ploytec_decode_batch - Decode a number of 64-byte Ploytec frames to 6-channel S24_3LE
- * @dest: nframes * 18-byte destination buffer (6 channels * 3 bytes)
+ * ploytec_decode_batch() - Decode a number of 64-byte Ploytec frames to 6-channel S24_3LE
+ * @dest: n_frames * 18-byte destination buffer (6 channels * 3 bytes)
  * @src: n_frames * 64-byte source buffer
- * @n_frames: number of frames to be processed batch
+ * @n_frames: number of frames to process in this batch
  */
 void ploytec_decode_batch(u8 *dest, const u8 *src, const int n_frames)
 {

@@ -11,7 +11,7 @@
 
 #include <linux/types.h>
 
-#define PLOYTEC_PLAYBACK_FRAMES		10	// number of samples per Frame
+#define PLOYTEC_PLAYBACK_FRAMES		10	// number of samples per frame
 #define PLOYTEC_PLAYBACK_FRAME_SIZE	48
 
 #define PLOYTEC_CAPTURE_FRAMES		8	// number of samples per frame
