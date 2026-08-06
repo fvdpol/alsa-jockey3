@@ -5,12 +5,15 @@
  *   Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
  */
 
+#include <linux/types.h>
+#include <linux/atomic.h>
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include <linux/bitops.h>
+#include <linux/timekeeping.h>
 #include <linux/mutex.h>
 #include <linux/cleanup.h>
 #include <sound/core.h>
@@ -52,8 +55,8 @@ struct jockey3_pcm_urb_stream {
 	struct urb *urbs[JOCKEY3_N_URBS];
 	unsigned char *bufs[JOCKEY3_N_URBS];
 	atomic_t urbs_in_flight;	// keep track of in-flight URBs
+	atomic64_t last_callback_time;	// keep track of active/stall
 	spinlock_t lock; // protects playback stream state and buffer offsets
-	unsigned long last_callback_jiffies;	// for monitoring stalled URB stream
 	unsigned int dma_off;
 	unsigned int period_off;
 	bool running;
@@ -128,6 +131,45 @@ static int jockey3_wait_for_rate_change_completion(const struct jockey3_chip *ch
 			 * headroom for the rate-change to complete.
 			 */
 			dev_warn(&chip->intf0->dev, "Timeout waiting for rate change completion\n");
+			return -EAGAIN;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * Bounded, synchronous wait for a device reset queued via
+ * usb_queue_reset_device() to complete (JOCKEY3_FLAG_RESETTING cleared by
+ * jockey3_post_reset()).
+ *
+ * Deliberately does NOT call usb_reset_device() itself: doing so from an
+ * ALSA ioctl context risks a self-deadlock, since a failed/aborted reset
+ * can lead to jockey3_disconnect() and the resulting synchronous
+ * snd_card_free() (via the card's devm cleanup) running in the same calling
+ * thread — which then blocks forever waiting for the very file descriptor
+ * this ioctl is still executing under to be closed. Polling here instead
+ * lets the actual reset (and any resulting disconnect/card-free) run on the
+ * USB core's own workqueue thread.
+ */
+static int jockey3_wait_for_reset_completion(const struct jockey3_chip *chip)
+{
+	unsigned long timeout_jiffies = jiffies + msecs_to_jiffies(1000);
+
+	if (jockey3_is_resetting(chip))
+		dev_dbg(&chip->intf0->dev, "Waiting for reset completion\n");
+
+	while (jockey3_is_resetting(chip)) {
+		usleep_range(5000, 20000);
+		if (jockey3_is_disconnected(chip))
+			return -ENODEV;
+		if (time_after(jiffies, timeout_jiffies)) {
+			/*
+			 * Empirical testing shows that the reset cycle typically takes
+			 * around 334 ms; so a 1000 ms timeout should give us sufficient
+			 * headroom for the reset to complete.
+			 */
+			dev_warn(&chip->intf0->dev, "Timeout waiting for reset completion\n");
 			return -EAGAIN;
 		}
 	}
@@ -294,7 +336,7 @@ static void jockey3_capture_callback(struct urb *urb)
 	int ret;
 
 	atomic_dec(&urb_stream->urbs_in_flight);
-	WRITE_ONCE(urb_stream->last_callback_jiffies, jiffies);
+	atomic64_set(&urb_stream->last_callback_time, ktime_get_mono_fast_ns());
 
 	if (unlikely(urb_stream->callback_processing))
 		dev_warn_ratelimited(&chip->intf0->dev, "Capture: callback_processing already true on new callback!\n");
@@ -403,7 +445,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	int i, ret;
 
 	atomic_dec(&urb_stream->urbs_in_flight);
-	WRITE_ONCE(urb_stream->last_callback_jiffies, jiffies);
+	atomic64_set(&urb_stream->last_callback_time, ktime_get_mono_fast_ns());
 
 	if (unlikely(jockey3_urb_error_fatal(chip, urb, "Playback")))
 		return;
@@ -641,6 +683,107 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 	return 0;
 }
 
+static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int direction)
+{
+	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
+	bool open;
+
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		open = urb_stream->substream;
+	}
+	return open;
+}
+
+static bool jockey3_check_urb_steam_alive(const struct jockey3_pcm_urb_stream *urb_stream)
+{
+	u64 last_time = atomic64_read(&urb_stream->last_callback_time);
+
+	if (!last_time)
+		return false;
+
+	/* alive if we had activity within the last 1 ms = 1,000,000 ns */
+	return (ktime_get_mono_fast_ns() - last_time <= NSEC_PER_MSEC);
+}
+
+/*
+ * Poll a stream's URB liveness for up to timeout_ms. Always logs a dev_warn
+ * on timeout regardless of whether the caller ends up acting on the result,
+ * so that stall frequency (Playback and Capture alike) can be tracked in the
+ * field via dmesg while we narrow down the Ploytec firmware behavior.
+ */
+static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int direction,
+					    const unsigned int timeout_ms)
+{
+	unsigned long timeout_jiffies = msecs_to_jiffies(timeout_ms);
+	unsigned long deadline = jiffies + timeout_jiffies;
+
+	while (time_before(jiffies, deadline)) {
+		if (jockey3_is_disconnected(chip))
+			return false;
+
+		if (jockey3_check_urb_steam_alive(jockey3_get_pcm_urb_stream(chip, direction)))
+			return true;
+
+		usleep_range(500, 2000);
+	}
+
+	if (direction == SNDRV_PCM_STREAM_PLAYBACK)
+		dev_warn(&chip->intf0->dev, "Playback URB has stalled.\n");
+	else
+		dev_warn(&chip->intf0->dev, "Capture URB has stalled.\n");
+	return false;
+}
+
+/*
+ * Attempt to recover a stalled Capture URB stream outside of a sample-rate
+ * change.
+ *
+ * This is the deferred counterpart to the post-rate-change check in
+ * jockey3_pcm_hw_params(): if Capture stalled while no capture stream was
+ * open there, we don't force a disruptive device reset on the spot (it would
+ * interrupt any in-progress Playback audio for the sake of a direction
+ * nobody is using yet).
+ *
+ * Instead, the next time a capture stream is opened, jockey3_pcm_prepare()
+ * calls this to first retry a lightweight URB stop/start; if Capture still
+ * doesn't come back, escalate to a full USB device reset, queued via
+ * usb_queue_reset_device() and awaited with jockey3_wait_for_reset_completion()
+ * (bounded at 1000 ms; the reset itself measures ~334 ms) rather than calling
+ * usb_reset_device() directly from this ioctl context — see
+ * jockey3_wait_for_reset_completion() for why.
+ */
+static int jockey3_recover_capture_stream(struct jockey3_chip *chip)
+{
+	int ret;
+
+	if (jockey3_is_disconnected(chip))
+		return -ENODEV;
+
+	scoped_guard(mutex, &chip->rate_mutex) {
+		dev_warn(&chip->intf0->dev, "Restarting URBs to recover stalled Capture stream\n");
+		jockey3_stop_urbs(chip);
+		jockey3_start_urbs(chip);
+	}
+
+	if (jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE, 50))
+		return 0;
+
+	dev_warn(&chip->intf0->dev,
+		 "Capture stream still stalled after URB restart; queuing full USB reset\n");
+	set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
+	usb_queue_reset_device(chip->intf0);
+
+	ret = jockey3_wait_for_reset_completion(chip);
+	if (ret < 0)
+		return ret;
+
+	if (!jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE, 50))
+		dev_err(&chip->intf0->dev,
+			"Capture stream still stalled after full USB reset; hardware may need power-cycling\n");
+
+	return 0;
+}
+
 static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
@@ -740,32 +883,35 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 	struct jockey3_pcm_urb_stream *urb_stream =
 		jockey3_get_pcm_urb_stream(chip, substream->stream);
-	unsigned long timeout_jiffies = jiffies + msecs_to_jiffies(1000);
 	int ret = 0;
 
 	dev_dbg(&chip->intf0->dev, "PCM prepare stream %d\n", substream->stream);
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	while (jockey3_is_resetting(chip)) {
-		usleep_range(5000, 20000);
-		if (jockey3_is_disconnected(chip))
-			return -ENODEV;
-		if (time_after(jiffies, timeout_jiffies)) {
-			/*
-			 * Empirical testing shows that the reset cycle typically takes
-			 * around 334 ms; so a 1000 ms timeout should give us sufficient
-			 * headroom for the reset to complete.
-			 */
-			dev_warn(&chip->intf0->dev, "Timeout waiting for reset completion\n");
-			return -EAGAIN;
-		}
-	}
+	ret = jockey3_wait_for_reset_completion(chip);
+	if (ret < 0)
+		return ret;
 
 	/* Ensure the card is not in-process of a rate-change */
 	ret = jockey3_wait_for_rate_change_completion(chip);
 	if (ret < 0)
 		return ret;
+
+	/*
+	 * Capture may have been left stalled by an earlier rate change that
+	 * happened while no capture stream was open (see jockey3_pcm_hw_params()).
+	 * Catch it here, before this newly-opened capture stream starts relying
+	 * on it.
+	 */
+	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE &&
+	    !jockey3_check_urb_steam_alive(&chip->capture)) {
+		dev_warn(&chip->intf0->dev,
+			 "Capture URB stalled when opening capture stream; attempting recovery\n");
+		ret = jockey3_recover_capture_stream(chip);
+		if (ret < 0)
+			return ret;
+	}
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		urb_stream->dma_off = 0;
@@ -848,44 +994,13 @@ static int jockey3_initialise_ploytec(struct jockey3_chip *chip)
 	return 0;
 }
 
-static bool jockey3_check_urb_stream_alive(struct jockey3_chip *chip, const unsigned int timeout_ms)
-{
-	unsigned long timeout_jiffies = msecs_to_jiffies(timeout_ms);
-	unsigned long deadline = jiffies + timeout_jiffies;
-	unsigned long capture_last_seen;
-	unsigned long playback_last_seen;
-	bool capture_alive = false;
-	bool playback_alive = false;
-
-	while (time_before(jiffies, deadline)) {
-		if (jockey3_is_disconnected(chip))
-			return false;
-
-		capture_last_seen = READ_ONCE(chip->capture.last_callback_jiffies);
-		capture_alive =	time_after(capture_last_seen + timeout_jiffies, jiffies);
-
-		playback_last_seen = READ_ONCE(chip->playback.last_callback_jiffies);
-		playback_alive = time_after(playback_last_seen + timeout_jiffies, jiffies);
-
-		if (capture_alive && playback_alive)
-			return true;
-
-		usleep_range(1000, 2000);
-	}
-
-	if (!playback_alive)
-		dev_warn(&chip->intf0->dev, "Playback URB has stalled.\n");
-	if (!capture_alive)
-		dev_warn(&chip->intf0->dev, "Capture URB has stalled.\n");
-	return false;
-}
-
 static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 				 struct snd_pcm_hw_params *hw_params)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 	unsigned int rate = params_rate(hw_params);
 	unsigned long flags;
+	bool playback_alive, capture_alive, capture_open;
 	int ret = 0;
 
 	dev_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n",
@@ -945,18 +1060,39 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	 * re-synchronize the internal engine and restart sending packets.
 	 * The stalled flow would otherwise lead to EIO errors in ALSA.
 	 *
-	 * TODO: There is an opportunity to improve or replace this once we have
-	 * a better understanding of the Ploytec firmware interaction through
-	 * further protocol analysis or reverse engineering.
+	 * The exact firmware trigger for this failure is still not fully
+	 * understood (see notes.md); as mitigation we check URB liveness on
+	 * both directions after every rate change:
+	 *
+	 *  - Playback always carries the MIDI OUT channel, so it must come
+	 *    back alive unconditionally, or MIDI control of the device breaks.
+	 *    A Playback stall always forces a reset.
+	 *
+	 *  - Capture only forces a reset here if a capture stream is currently
+	 *    open. An idle Capture stall (no recording in progress) is logged
+	 *    but not acted on immediately, to avoid an audible reset glitch on
+	 *    unrelated, currently-working Playback audio. Recovery is deferred
+	 *    to the next capture stream open (see jockey3_recover_capture_stream()
+	 *    called from jockey3_pcm_prepare()).
 	 *
 	 * pre_reset/post_reset callbacks handle the URB lifecycle.
 	 * We call this outside the rate_mutex to allow pre/post_reset to acquire it.
 	 */
-	if (!jockey3_check_urb_stream_alive(chip, 50)) {
-		dev_warn(&chip->intf0->dev, "Resetting device to recover from stall...\n");
+	playback_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_PLAYBACK, 50);
+	capture_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE, 50);
+	capture_open = jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE);
+
+	if (!playback_alive || (!capture_alive && capture_open)) {
+		dev_warn(&chip->intf0->dev,
+			 "Resetting device to recover from stall after rate change to %u Hz (playback_alive=%d, capture_alive=%d, capture_open=%d)\n",
+			 rate, playback_alive, capture_alive, capture_open);
 		set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 		usb_queue_reset_device(chip->intf0);
 	} else {
+		if (!capture_alive)
+			dev_dbg(&chip->intf0->dev,
+				"Capture URB stalled after rate change to %u Hz, but no capture stream is open; deferring recovery to next capture open\n",
+				rate);
 		dev_dbg(&chip->intf0->dev, "Rate changed to %u successfully\n", rate);
 	}
 
