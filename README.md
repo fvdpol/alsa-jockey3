@@ -74,7 +74,8 @@ Areas especially appreciated:
 
 # License
 
-This project is licensed under the GPLv3. See [LICENSE](LICENSE.md) for details.
+This project is licensed under the GPL-2.0-or-later, matching the Linux kernel
+it is intended to be merged into. See [LICENSE](LICENSE) for details.
 
 
 # Related Projects

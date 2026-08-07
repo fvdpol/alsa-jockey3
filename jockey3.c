@@ -2102,7 +2102,7 @@ static struct usb_driver jockey3_driver = {
 
 module_usb_driver(jockey3_driver);
 
-MODULE_AUTHOR("Frank van de Pol");
+MODULE_AUTHOR("Frank van de Pol <fvdpol@gmail.com>");
 MODULE_DESCRIPTION(CARD_NAME " ALSA Driver");
 MODULE_LICENSE("GPL");
 MODULE_SOFTDEP("pre: snd-pcm snd-rawmidi");
