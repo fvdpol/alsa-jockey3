@@ -40,7 +40,8 @@
  *
  * Return: the next byte to send to the receiver.
  */
-u8 ploytec_midi_running_status_expand(struct ploytec_midi_running_status *state, u8 b, struct device *dev)
+u8 ploytec_midi_running_status_expand(struct ploytec_midi_running_status *state,
+				      u8 b, struct device *dev)
 {
 	u8 byte;
 

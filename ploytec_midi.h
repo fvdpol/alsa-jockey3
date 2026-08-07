@@ -30,6 +30,7 @@ struct ploytec_midi_running_status {
 	bool has_queued_byte;
 };
 
-u8 ploytec_midi_running_status_expand(struct ploytec_midi_running_status *state, u8 b, struct device *dev);
+u8 ploytec_midi_running_status_expand(struct ploytec_midi_running_status *state,
+				      u8 b, struct device *dev);
 
 #endif /* __SOUND_USB_JOCKEY3_PLOYTEC_MIDI_H */
