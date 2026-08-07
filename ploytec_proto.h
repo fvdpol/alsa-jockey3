@@ -38,13 +38,11 @@
 #define PLOYTEC_REQ_GET_RATE		0x81	// bRequest to get current sample rate
 #define PLOYTEC_REQ_GET_RATE_TYPE	0xA2	// bmRequestType to get current sample rate
 
-/* Status Bits */
-#define PLOYTEC_STATUS_BIT0		0x01
-#define PLOYTEC_STATUS_BIT1		0x02
-#define PLOYTEC_STATUS_BIT2		0x04
-#define PLOYTEC_STATUS_BIT3		0x08
-#define PLOYTEC_STATUS_BIT4		0x10
+/* Status Bits (bits 0-4 are observed but not understood, and unused) */
 #define PLOYTEC_STATUS_STREAMING	0x20
+
+/* Timeout for the EP0 control transfers above, in milliseconds */
+#define PLOYTEC_CTRL_TIMEOUT_MS		2000
 
 /*
  * Protocol Helpers

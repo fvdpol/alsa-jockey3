@@ -568,17 +568,26 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 }
 
 /*
- * FIXME: the MIDI-idle-byte/sync-byte writes below are redundant at both
- * call sites: jockey3_playback_callback()'s idle branch immediately
- * overwrites both fields again a few lines further down regardless of
- * which branch ran, and the buffer-allocation call site hands us an
- * already-zeroed kzalloc() buffer, making the memset() here redundant
- * there. Left as a straight move for now; worth restructuring later
- * instead of duplicating these writes.
+ * Fill the sample area of a playback packet with silence, for when there is
+ * no PCM data to send.
+ *
+ * Only the sample area is touched: everything from PLOYTEC_MIDI_OUT_OFFSET
+ * onwards -- the MIDI slot, the sync byte and the trailing gap -- is rewritten
+ * unconditionally by jockey3_playback_callback() immediately afterwards.
  */
-static void jockey3_prepare_idle_out_packet(u8 *buf)
+static void jockey3_silence_out_packet(u8 *buf)
 {
-	memset(buf, 0, PLOYTEC_PKT_SIZE);
+	memset(buf, 0, PLOYTEC_MIDI_OUT_OFFSET);
+}
+
+/*
+ * Prime a freshly allocated playback buffer so the first URB, which is
+ * submitted before any completion handler has run, carries a valid idle
+ * packet. The buffer comes from kzalloc(), so the sample area and the
+ * trailing gap are already silent.
+ */
+static void jockey3_init_out_packet(u8 *buf)
+{
 	buf[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
 	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
 }
@@ -624,7 +633,7 @@ static void jockey3_playback_callback(struct urb *urb)
 			period_elapsed = jockey3_process_out_packet(chip, buf);
 			substream = urb_stream->substream;
 		} else {
-			jockey3_prepare_idle_out_packet(buf);
+			jockey3_silence_out_packet(buf);
 		}
 	}
 
@@ -772,7 +781,7 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 
 	/*
 	 * Drop the liveness timestamps: a stale value would otherwise make
-	 * jockey3_check_urb_steam_alive() report a stopped stream as alive for
+	 * jockey3_check_urb_stream_alive() report a stopped stream as alive for
 	 * up to its 1 ms window.
 	 */
 	atomic64_set(&chip->playback.last_callback_time, 0);
@@ -910,7 +919,7 @@ static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int directio
 	return open;
 }
 
-static bool jockey3_check_urb_steam_alive(const struct jockey3_pcm_urb_stream *urb_stream)
+static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *urb_stream)
 {
 	u64 last_time = atomic64_read(&urb_stream->last_callback_time);
 
@@ -937,7 +946,7 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
 		if (jockey3_is_disconnected(chip))
 			return false;
 
-		if (jockey3_check_urb_steam_alive(jockey3_get_pcm_urb_stream(chip, direction)))
+		if (jockey3_check_urb_stream_alive(jockey3_get_pcm_urb_stream(chip, direction)))
 			return true;
 
 		usleep_range(500, 2000);
@@ -1189,7 +1198,7 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 		 * on it.
 		 */
 		needs_recovery = substream->stream == SNDRV_PCM_STREAM_CAPTURE &&
-				 !jockey3_check_urb_steam_alive(&chip->capture);
+				 !jockey3_check_urb_stream_alive(&chip->capture);
 	}
 
 	/*
@@ -1299,7 +1308,7 @@ static int jockey3_initialize_ploytec(struct jockey3_chip *chip)
 		return ret;
 	}
 
-	dev_dbg(&chip->intf0->dev, "Ploytec initialized successfully; status = 0x%02x\n", ret);
+	dev_dbg(&chip->intf0->dev, "Ploytec initialized successfully\n");
 	return 0;
 }
 
@@ -1365,8 +1374,8 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	 * The stalled flow would otherwise lead to EIO errors in ALSA.
 	 *
 	 * The exact firmware trigger for this failure is still not fully
-	 * understood (see notes.md); as mitigation we check URB liveness on
-	 * both directions after every rate change:
+	 * understood; as mitigation we check URB liveness on both directions
+	 * after every rate change:
 	 *
 	 *  - Playback always carries the MIDI OUT channel, so it must come
 	 *    back alive unconditionally, or MIDI control of the device breaks.
@@ -1606,7 +1615,7 @@ static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
 		if (ret)
 			return ret;
 
-		jockey3_prepare_idle_out_packet(chip->playback.bufs[i]);
+		jockey3_init_out_packet(chip->playback.bufs[i]);
 
 		usb_fill_bulk_urb(chip->playback.urbs[i], dev,
 				  usb_sndbulkpipe(dev, PLOYTEC_EP_NUM_PCM_OUT),
@@ -1843,7 +1852,9 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback.lock);
 	spin_lock_init(&chip->capture.lock);
-	mutex_init(&chip->rate_mutex);
+	ret = devm_mutex_init(&intf->dev, &chip->rate_mutex);
+	if (ret)
+		return ret;
 	init_completion(&chip->reset_done);
 
 	init_usb_anchor(&chip->playback.anchor);
@@ -2043,20 +2054,20 @@ static int jockey3_restore_device(struct jockey3_chip *chip, bool reset)
 {
 	int ret;
 
-	scoped_guard(mutex, &chip->rate_mutex) {
-		if (reset) {
-			ret = jockey3_initialize_ploytec(chip);
-			if (ret < 0)
-				return ret;
-		}
+	guard(mutex)(&chip->rate_mutex);
 
-		ret = jockey3_set_rate(chip, chip->current_rate);
+	if (reset) {
+		ret = jockey3_initialize_ploytec(chip);
 		if (ret < 0)
 			return ret;
-
-		jockey3_start_urbs(chip);
-		return 0;
 	}
+
+	ret = jockey3_set_rate(chip, chip->current_rate);
+	if (ret < 0)
+		return ret;
+
+	jockey3_start_urbs(chip);
+	return 0;
 }
 
 static int jockey3_resume(struct usb_interface *intf)

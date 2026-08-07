@@ -34,7 +34,7 @@ int ploytec_get_firmware(struct usb_interface *intf, void *xfer_buf)
 	int ret;
 
 	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_FIRMWARE, PLOYTEC_REQ_FIRMWARE_TYPE, 0, 0,
-				   buf, 3, 2000, GFP_KERNEL);
+				   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
 	if (ret < 0)
 		return ret;
 
@@ -62,7 +62,7 @@ int ploytec_get_status(struct usb_interface *intf, void *xfer_buf, u8 *status)
 
 	// Read Status (Request 0x49)
 	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_STATUS, PLOYTEC_REQ_STATUS_TYPE, 0, 0,
-				   buf, 1, 2000, GFP_KERNEL);
+				   buf, 1, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
 	if (ret < 0)
 		return ret;
 
@@ -106,9 +106,9 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf)
 		return ret;
 
 	// Clear Feature (ENDPOINT_HALT):
-	usb_clear_halt(dev, usb_rcvbulkpipe(dev, 0x86));
-	usb_clear_halt(dev, usb_sndbulkpipe(dev, 0x05));
-	usb_clear_halt(dev, usb_rcvbulkpipe(dev, 0x83));
+	usb_clear_halt(dev, usb_rcvbulkpipe(dev, PLOYTEC_EP_NUM_PCM_IN));
+	usb_clear_halt(dev, usb_sndbulkpipe(dev, PLOYTEC_EP_NUM_PCM_OUT));
+	usb_clear_halt(dev, usb_rcvbulkpipe(dev, PLOYTEC_EP_NUM_MIDI_IN));
 
 	return ploytec_get_status(intf, xfer_buf, &status);
 }
@@ -134,8 +134,8 @@ int ploytec_start_streaming(struct usb_interface *intf, void *xfer_buf)
 	/* Enable device if STREAMING bit is not set */
 	if (!(status & PLOYTEC_STATUS_STREAMING)) {
 		ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_STATUS, PLOYTEC_SET_STATUS_TYPE,
-					   (uint16_t)((status | PLOYTEC_STATUS_STREAMING) & 0xFF),
-					   0, NULL, 0, 2000, GFP_KERNEL);
+					   status | PLOYTEC_STATUS_STREAMING,
+					   0, NULL, 0, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
 		if (ret < 0)
 			return ret;
 	}
@@ -159,7 +159,7 @@ int ploytec_get_rate(struct usb_interface *intf, void *xfer_buf, u32 *rate)
 	// Read rate from Playback EP 0x05
 	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_GET_RATE, PLOYTEC_REQ_GET_RATE_TYPE,
 				   0x0100, PLOYTEC_EP_NUM_PCM_OUT | USB_DIR_OUT,
-				   buf, 3, 2000, GFP_KERNEL);
+				   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
 	if (ret < 0)
 		return ret;
 
@@ -195,7 +195,7 @@ int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate)
 	// Set rate on Capture EP 0x86
 	ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_TYPE,
 				   0x0100, PLOYTEC_EP_NUM_PCM_IN | USB_DIR_IN,
-				   buf, 3, 2000, GFP_KERNEL);
+				   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
 	if (ret < 0) {
 		dev_err(&intf->dev, "Failed to set rate on EP 0x86: %d\n", ret);
 		return ret;
@@ -209,7 +209,7 @@ int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate)
 		// Set rate on Capture EP 0x86
 		ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_TYPE,
 					   0x0100, PLOYTEC_EP_NUM_PCM_IN | USB_DIR_IN,
-					   buf, 3, 2000, GFP_KERNEL);
+					   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
 		if (ret < 0) {
 			dev_err(&intf->dev, "Failed to set rate on EP 0x86: %d\n", ret);
 			return ret;
@@ -218,7 +218,7 @@ int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate)
 		// Set rate on Playback EP 0x05
 		ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_TYPE,
 					   0x0100, PLOYTEC_EP_NUM_PCM_OUT | USB_DIR_OUT,
-					   buf, 3, 2000, GFP_KERNEL);
+					   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
 		if (ret < 0) {
 			dev_err(&intf->dev, "Failed to set rate on EP 0x05: %d\n", ret);
 			return ret;
