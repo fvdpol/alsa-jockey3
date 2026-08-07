@@ -6,20 +6,21 @@
  */
 
 /*
- * This file implements generic MIDI 1.0 Running Status handling. It is not
- * specific to the Ploytec chipset/firmware or to Jockey 3 hardware in any
- * way - it operates purely on a byte stream and has no dependency on USB
- * or on the rest of this driver. It lives here only because the Ploytec
- * firmware is the current reason it's needed (see
- * midi_running_status_expand() below). Should a second driver ever need
- * the same behaviour, this would be a reasonable candidate to migrate into
- * a shared kernel library instead of duplicating it.
+ * The logic here is generic MIDI 1.0 Running Status handling: it operates
+ * purely on a byte stream, with no dependency on USB or on the rest of this
+ * driver. It carries the ploytec_ prefix and lives in the Ploytec layer
+ * because that firmware is what requires it -- the device does not accept a
+ * Running Status stream and needs every message fully status-prefixed.
+ *
+ * Should a second driver ever need the same behaviour, this would be a
+ * reasonable candidate to migrate into a shared kernel library rather than
+ * duplicating it.
  */
 
-#include "midi.h"
+#include "ploytec_midi.h"
 
 /**
- * midi_running_status_expand() - Expand MIDI 1.0 Running Status
+ * ploytec_midi_running_status_expand() - Expand MIDI 1.0 Running Status
  * @state: expander state, zero-initialised by the caller before first use
  * @b: the next raw MIDI byte from the source stream, in stream order
  * @dev: struct device for diagnostic logging (currently unused)
@@ -39,7 +40,7 @@
  *
  * Return: the next byte to send to the receiver.
  */
-u8 midi_running_status_expand(struct midi_running_status *state, u8 b, struct device *dev)
+u8 ploytec_midi_running_status_expand(struct ploytec_midi_running_status *state, u8 b, struct device *dev)
 {
 	u8 byte;
 

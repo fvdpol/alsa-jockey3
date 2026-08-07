@@ -10,17 +10,15 @@
 #include <linux/string.h>
 #include "ploytec_codec.h"
 
-#ifdef REFERENCE_CODEC
+#if IS_ENABLED(CONFIG_SND_USB_JOCKEY3_REFERENCE_CODEC)
 
 /*
  * The reference implementation of the Ploytec codec performs a bit
- * gather/scatter operation with minimal optimization. It mainly serves as
- * a readable reference and for validating the correctness of the optimized
- * encoder/decoder variants below (see tests/test_ploytec_codec.c).
+ * gather/scatter operation with minimal optimization. It mainly serves as a
+ * readable definition of the wire format, and as the oracle the optimized
+ * variants below are validated against.
  *
- * Enable CONFIG_SND_USB_JOCKEY3_REFERENCE_CODEC to build the driver with
- * this codec instead of the optimized variants (equivalent to compiling
- * with the REFERENCE_CODEC symbol set directly).
+ * Selected by CONFIG_SND_USB_JOCKEY3_REFERENCE_CODEC.
  */
 
 /**
@@ -106,8 +104,7 @@ static inline void ploytec_decode_s24_3le(u8 *dest, const u8 *src)
 		dest[0x11] |= (((src[0x20 + i] & 0x04) >> 2) << (7 - i));
 	}
 }
-#else // not REFERENCE_CODEC
-#ifdef CONFIG_64BIT
+#elif defined(CONFIG_64BIT)
 /**
  * DOC: Ploytec bit-plane interleaving optimization
  *
@@ -248,8 +245,10 @@ static void init_ploytec_bit_spread_lut64(void)
  */
 static inline void ploytec_encode_s24_3le_lut64(u8 *dest, const u8 *src)
 {
-	// put_unaligned_le64 safely writes a 64-bit value in Little Endian order,
-	// even if the target CPU is Big Endian or alignment-strict.
+	/*
+	 * put_unaligned_le64 safely writes a 64-bit value in Little Endian
+	 * order, even if the target CPU is Big Endian or alignment-strict.
+	 */
 
 	// First 24 bytes: odd channels (ALSA Ch 1 & 3)
 	put_unaligned_le64(ploytec_bit_spread_64[src[2]] |
@@ -281,8 +280,10 @@ static inline u8 pack_bit_plane64(u64 val, int bit_index)
 	// Shift target bit to bit 0 of each byte, then mask it
 	u64 masked = (val >> bit_index) & 0x0101010101010101ULL;
 
-	// Multiplier acts as a parallel shift-and-add, collecting
-	// the bits into the highest byte of the u64
+	/*
+	 * Multiplier acts as a parallel shift-and-add, collecting the bits
+	 * into the highest byte of the u64.
+	 */
 	return (u8)((masked * 0x8040201008040201ULL) >> 56);
 }
 
@@ -336,7 +337,7 @@ static inline void ploytec_decode_s24_3le_pack64(u8 *dest, const u8 *src)
 	dest[0x11] = pack_bit_plane64(blocks_20_37_low,  2);
 }
 
-#else // not CONFIG_64BIT
+#else /* optimized codec, 32-bit build */
 static u32 ploytec_bit_spread_32_high[256];
 static u32 ploytec_bit_spread_32_low[256];
 
@@ -377,8 +378,10 @@ static void init_ploytec_bit_spread_lut32(void)
  */
 static inline void ploytec_encode_s24_3le_lut32(u8 *dest, const u8 *src)
 {
-	// put_unaligned_le32 safely writes a 32-bit value in Little Endian order,
-	// even if the target CPU is Big Endian or alignment-strict.
+	/*
+	 * put_unaligned_le32 safely writes a 32-bit value in Little Endian
+	 * order, even if the target CPU is Big Endian or alignment-strict.
+	 */
 
 	// First 24 bytes: Odd channels (ALSA Ch 1 [src 0,1,2] & Ch 3 [src 6,7,8])
 	// Block 1: Most Significant Bytes
@@ -497,8 +500,71 @@ static inline void ploytec_decode_s24_3le_pack32(u8 *dest, const u8 *src)
 	dest[0x10] = pack_bit_plane32(src_28_high, src_2C_low, 2);
 	dest[0x11] = pack_bit_plane32(src_20_high, src_24_low, 2);
 }
-#endif	// CONFIG_64BIT
-#endif	// REFERENCE_CODEC
+#endif
+
+/*
+ * Bind the build's chosen implementation to a single pair of names, so that
+ * everything below is free of conditional compilation (see
+ * Documentation/process/coding-style.rst, "Conditional Compilation").
+ */
+#if IS_ENABLED(CONFIG_SND_USB_JOCKEY3_REFERENCE_CODEC)
+
+static const enum ploytec_codec_variant ploytec_codec_selected =
+	PLOYTEC_CODEC_PORTABLE;
+
+static void ploytec_codec_init_tables(void) { }
+
+static inline void ploytec_encode_frame(u8 *dest, const u8 *src)
+{
+	ploytec_encode_s24_3le(dest, src);
+}
+
+static inline void ploytec_decode_frame(u8 *dest, const u8 *src)
+{
+	ploytec_decode_s24_3le(dest, src);
+}
+
+#elif defined(CONFIG_64BIT)
+
+static const enum ploytec_codec_variant ploytec_codec_selected =
+	PLOYTEC_CODEC_OPTIMIZED_64BIT;
+
+static void ploytec_codec_init_tables(void)
+{
+	init_ploytec_bit_spread_lut64();
+}
+
+static inline void ploytec_encode_frame(u8 *dest, const u8 *src)
+{
+	ploytec_encode_s24_3le_lut64(dest, src);
+}
+
+static inline void ploytec_decode_frame(u8 *dest, const u8 *src)
+{
+	ploytec_decode_s24_3le_pack64(dest, src);
+}
+
+#else
+
+static const enum ploytec_codec_variant ploytec_codec_selected =
+	PLOYTEC_CODEC_OPTIMIZED_32BIT;
+
+static void ploytec_codec_init_tables(void)
+{
+	init_ploytec_bit_spread_lut32();
+}
+
+static inline void ploytec_encode_frame(u8 *dest, const u8 *src)
+{
+	ploytec_encode_s24_3le_lut32(dest, src);
+}
+
+static inline void ploytec_decode_frame(u8 *dest, const u8 *src)
+{
+	ploytec_decode_s24_3le_pack32(dest, src);
+}
+
+#endif
 
 /**
  * ploytec_initialise_codec() - Initialize the codec's pre-computed lookup tables
@@ -511,17 +577,8 @@ static inline void ploytec_decode_s24_3le_pack32(u8 *dest, const u8 *src)
  */
 enum ploytec_codec_variant ploytec_initialise_codec(void)
 {
-#ifdef REFERENCE_CODEC
-	return PLOYTEC_CODEC_PORTABLE;
-#else
-#ifdef CONFIG_64BIT
-	init_ploytec_bit_spread_lut64();
-	return PLOYTEC_CODEC_OPTIMIZED_64BIT;
-#else
-	init_ploytec_bit_spread_lut32();
-	return PLOYTEC_CODEC_OPTIMIZED_32BIT;
-#endif // CONFIG_64BIT
-#endif // REFERENCE_CODEC
+	ploytec_codec_init_tables();
+	return ploytec_codec_selected;
 }
 
 /**
@@ -533,17 +590,9 @@ enum ploytec_codec_variant ploytec_initialise_codec(void)
 void ploytec_encode_batch(u8 *dest, const u8 *src, const int n_frames)
 {
 	for (int f = 0; f < n_frames; f++) {
-#ifdef REFERENCE_CODEC
-		ploytec_encode_s24_3le(dest, src);
-#else
-#ifdef CONFIG_64BIT
-		ploytec_encode_s24_3le_lut64(dest, src);
-#else
-		ploytec_encode_s24_3le_lut32(dest, src);
-#endif	// CONFIG_64BIT
-#endif	// REFERENCE_CODEC
+		ploytec_encode_frame(dest, src);
 		dest += PLOYTEC_PLAYBACK_FRAME_SIZE;
-		src  += 12;	// 4 channels * 3 bytes/sample
+		src += PLOYTEC_PLAYBACK_PCM_FRAME_SIZE;
 	}
 }
 
@@ -556,16 +605,8 @@ void ploytec_encode_batch(u8 *dest, const u8 *src, const int n_frames)
 void ploytec_decode_batch(u8 *dest, const u8 *src, const int n_frames)
 {
 	for (int f = 0; f < n_frames; f++) {
-#ifdef REFERENCE_CODEC
-		ploytec_decode_s24_3le(dest, src);
-#else
-#ifdef CONFIG_64BIT
-		ploytec_decode_s24_3le_pack64(dest, src);
-#else
-		ploytec_decode_s24_3le_pack32(dest, src);
-#endif
-#endif
-		dest += 18;	// 6 channels * 3 bytes/sample
+		ploytec_decode_frame(dest, src);
+		dest += PLOYTEC_CAPTURE_PCM_FRAME_SIZE;
 		src += PLOYTEC_CAPTURE_FRAME_SIZE;
 	}
 }

@@ -6,8 +6,8 @@
  *   Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
  */
 
-#ifndef PLOYTEC_PROTO_H
-#define PLOYTEC_PROTO_H
+#ifndef __SOUND_USB_JOCKEY3_PLOYTEC_PROTO_H
+#define __SOUND_USB_JOCKEY3_PLOYTEC_PROTO_H
 
 #include <linux/types.h>
 #include <linux/usb.h>
@@ -62,4 +62,4 @@ int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate);
 int ploytec_get_firmware(struct usb_interface *intf, void *xfer_buf);
 int ploytec_get_status(struct usb_interface *intf, void *xfer_buf, u8 *status);
 
-#endif /* PLOYTEC_PROTO_H */
+#endif /* __SOUND_USB_JOCKEY3_PLOYTEC_PROTO_H */

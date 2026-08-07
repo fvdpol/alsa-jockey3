@@ -24,7 +24,7 @@
 #include <sound/pcm.h>
 #include "ploytec_proto.h"
 #include "ploytec_codec.h"
-#include "midi.h"
+#include "ploytec_midi.h"
 
 #define RELOOP_VENDOR_ID         0x200c
 #define RELOOP_JOCKEY3_ME_PID    0x1009
@@ -132,7 +132,7 @@ struct jockey3_chip {
 	spinlock_t midi_lock;
 	unsigned int midi_out_acc;	// for the 'Leaky Bucket' rate limiter
 	unsigned int midi_rate_divisor;	// current_rate / PLOYTEC_PLAYBACK_FRAMES; @midi_lock
-	struct midi_running_status midi_state;
+	struct ploytec_midi_running_status midi_state;
 	bool midi_stopping;		// see jockey3_pcm_urb_stream::stopping
 	unsigned int midi_consec_errors;	// consecutive MIDI IN URB errors; @midi_lock
 
@@ -564,7 +564,7 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 	if (snd_rawmidi_transmit(chip->midi_out_substream, &b, 1) != 1)
 		return PLOYTEC_MIDI_IDLE_BYTE;
 
-	return midi_running_status_expand(&chip->midi_state, b, &chip->intf0->dev);
+	return ploytec_midi_running_status_expand(&chip->midi_state, b, &chip->intf0->dev);
 }
 
 /*
