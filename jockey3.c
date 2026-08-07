@@ -44,22 +44,52 @@ MODULE_PARM_DESC(id, "ID string for " CARD_NAME " soundcard.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 
-/*
- * Locking overview
- * ================
+/**
+ * DOC: Device model
  *
- *   rate_mutex                     process context only, outermost
- *     |- playback.lock             IRQ-safe leaf
- *     |- capture.lock              IRQ-safe leaf
- *     `- midi_lock                 IRQ-safe leaf
+ * The Reloop Jockey 3 presents two USB interfaces and speaks a proprietary
+ * Ploytec protocol rather than USB Audio Class. Interface 0 is claimed by
+ * probe(); interface 1 is claimed explicitly, as it owns the capture endpoint.
+ * Three bulk endpoints carry everything:
+ *
+ * - EP 0x05 OUT: PCM playback, with the MIDI OUT byte stream multiplexed into
+ *   a reserved slot of every packet (see PLOYTEC_MIDI_OUT_OFFSET)
+ * - EP 0x86 IN:  PCM capture
+ * - EP 0x83 IN:  MIDI input
+ *
+ * Audio is not sample-interleaved but bit-plane interleaved; see
+ * ploytec_codec.c for the wire format and the encode/decode implementations.
+ *
+ * URBs run free for the lifetime of the device rather than being started and
+ * stopped around PCM use: the playback stream must keep flowing because it
+ * carries MIDI OUT, and the device expects a continuous packet stream. The PCM
+ * callbacks therefore only toggle whether a URB's payload is filled from (or
+ * copied to) an ALSA buffer.
+ *
+ * A sample-rate change requires tearing the URBs down, reprogramming the
+ * device over EP0, and starting them again. The firmware does not always
+ * restart the capture endpoint afterwards; jockey3_pcm_hw_params() detects
+ * this and either resets the device or defers recovery to the next capture
+ * open. See Documentation/sound/cards/jockey3.rst.
+ */
+
+/**
+ * DOC: Locking
+ *
+ * The lock hierarchy is::
+ *
+ *     rate_mutex                     process context only, outermost
+ *       |- playback.lock             IRQ-safe leaf
+ *       |- capture.lock              IRQ-safe leaf
+ *       `- midi_lock                 IRQ-safe leaf
  *
  * The three leaf spinlocks are never nested inside one another; anything that
  * needs more than one takes them in sequence, not nested. rate_mutex is never
  * taken from atomic context.
  *
- * Against the ALSA core the order is:
+ * Against the ALSA core the order is::
  *
- *   snd_pcm_stream_lock  ->  playback.lock / capture.lock
+ *     snd_pcm_stream_lock  ->  playback.lock / capture.lock
  *
  * which is why the URB completion handlers drop their stream spinlock before
  * calling snd_pcm_period_elapsed() or snd_pcm_stop_xrun(); both take the
@@ -78,39 +108,82 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_FLAG_DISCONNECTED	0
 #define JOCKEY3_FLAG_RESETTING		1
 
+/**
+ * struct jockey3_pcm_urb_stream - per-direction PCM streaming state
+ * @substream: the open ALSA substream, or NULL; @lock
+ * @anchor: anchor holding the submitted URBs, for stop/kill
+ * @urbs: the URB ring
+ * @bufs: transfer buffer for each URB, PLOYTEC_PKT_SIZE bytes each
+ * @urbs_in_flight: number of submitted URBs; diagnostic, must reach 0 after a stop
+ * @last_callback_time: ktime of the last completion, for stall detection. Zeroed
+ *	by jockey3_stop_urbs() so a stopped stream is not reported as alive.
+ * @lock: protects the fields marked "@lock" below; IRQ-safe leaf
+ * @dma_off: byte offset into runtime->dma_area, i.e. the hardware pointer; @lock
+ * @period_off: bytes accumulated towards the current period; @lock
+ * @running: stream is triggered and its payload should be filled; @lock
+ * @callbacks_active: number of URB completions currently inside the "safe zone"
+ *	where they may still touch @substream or runtime->dma_area; @lock. The
+ *	last one out wakes @drain_wait. A count rather than a flag because there
+ *	are JOCKEY3_N_URBS URBs per direction and their completions can overlap
+ *	on SMP.
+ * @drain_wait: waited on by jockey3_pcm_sync_stop() until @callbacks_active is 0
+ * @stopping: set by jockey3_stop_urbs() before the anchor is killed, cleared by
+ *	jockey3_start_urbs(); @lock. Tested by the completion handler inside the
+ *	same critical section that anchors and resubmits, so a callback can never
+ *	re-anchor a URB after the kill has drained the anchor.
+ * @consec_errors: consecutive URB transport errors; @lock. Reset on any
+ *	successful completion and by jockey3_start_urbs().
+ */
 struct jockey3_pcm_urb_stream {
 	struct snd_pcm_substream *substream;
 	struct usb_anchor anchor;
 	struct urb *urbs[JOCKEY3_N_URBS];
 	unsigned char *bufs[JOCKEY3_N_URBS];
-	atomic_t urbs_in_flight;	// keep track of in-flight URBs
-	atomic64_t last_callback_time;	// keep track of active/stall
-	spinlock_t lock; // protects playback stream state and buffer offsets
+	atomic_t urbs_in_flight;
+	atomic64_t last_callback_time;
+	spinlock_t lock;	/* protects this stream's state; IRQ-safe leaf */
 	unsigned int dma_off;
 	unsigned int period_off;
 	bool running;
-	/*
-	 * Number of URB completions currently inside the "safe zone" where they
-	 * may still touch substream/runtime->dma_area. Protected by @lock; the
-	 * last one out wakes @drain_wait. A count rather than a flag because
-	 * there are JOCKEY3_N_URBS URBs per direction and their completions can
-	 * overlap on SMP.
-	 */
 	unsigned int callbacks_active;
 	wait_queue_head_t drain_wait;
-	/*
-	 * Set by jockey3_stop_urbs() before the anchor is killed, cleared by
-	 * jockey3_start_urbs(). Protected by @lock and tested by the completion
-	 * handler inside the same critical section that anchors and resubmits,
-	 * so a callback can never re-anchor a URB after the kill has drained the
-	 * anchor.
-	 */
 	bool stopping;
-	unsigned int consec_errors;	// consecutive URB transport errors; @lock
+	unsigned int consec_errors;
 };
 
+/**
+ * struct jockey3_chip - per-device driver state
+ * @card: the ALSA card; read-only after probe
+ * @dev: the USB device; read-only after probe
+ * @intf0: interface 0, which the driver is bound to; read-only after probe
+ * @intf1: interface 1, claimed explicitly because it owns EP 0x86
+ * @pcm: the PCM device; read-only after probe
+ * @rmidi: the rawmidi device; read-only after probe
+ * @xfer_buf: bounce buffer for EP0 control transfers, USB_XFER_BUF_SIZE bytes.
+ *	Serialized by @rate_mutex, which every caller holds.
+ * @rate_mutex: serializes sample-rate changes and the URB stop/start that goes
+ *	with them; process context only, outermost lock
+ * @flags: JOCKEY3_FLAG_* bits, accessed with the atomic bitops
+ * @current_rate: sample rate the hardware is programmed to; @rate_mutex
+ * @dev_idx: card slot held in jockey3_devices_used
+ * @reset_done: completed by jockey3_post_reset(), and by jockey3_disconnect()
+ *	so a waiter is released when the USB core skips post_reset() entirely
+ * @midi_in_substream: open MIDI IN substream, or NULL; @midi_lock
+ * @midi_out_substream: open MIDI OUT substream, or NULL; @midi_lock
+ * @midi_in_urb: the single MIDI IN URB; not anchored, killed directly
+ * @midi_in_buf: transfer buffer for @midi_in_urb
+ * @midi_lock: protects the MIDI fields; IRQ-safe leaf
+ * @midi_out_acc: accumulator for the MIDI OUT rate limiter; @midi_lock
+ * @midi_rate_divisor: current_rate / PLOYTEC_PLAYBACK_FRAMES; @midi_lock.
+ *	Derived from @current_rate and published here because the rate limiter
+ *	runs in URB completion context and cannot take @rate_mutex.
+ * @midi_state: Running Status expander state; @midi_lock
+ * @midi_stopping: see jockey3_pcm_urb_stream.stopping; @midi_lock
+ * @midi_consec_errors: consecutive MIDI IN URB errors; @midi_lock
+ * @playback: playback streaming state
+ * @capture: capture streaming state
+ */
 struct jockey3_chip {
-	/* Core ALSA and USB handles (Mostly read-only after probe) */
 	struct snd_card *card;
 	struct usb_device *dev;
 	struct usb_interface *intf0;
@@ -118,23 +191,23 @@ struct jockey3_chip {
 	struct snd_pcm *pcm;
 	struct snd_rawmidi *rmidi;
 	unsigned char *xfer_buf;
-	struct mutex rate_mutex; // serializes sample rate changes and active stream tracking
+	struct mutex rate_mutex;	/* serializes rate changes; outermost lock */
 	unsigned long flags;
-	unsigned int current_rate;	// @rate_mutex
-	unsigned int dev_idx;		// slot held in jockey3_devices_used
-	struct completion reset_done;	// signalled by post_reset/disconnect
+	unsigned int current_rate;
+	unsigned int dev_idx;
+	struct completion reset_done;
 
 	/* MIDI Path */
 	struct snd_rawmidi_substream *midi_in_substream;
 	struct snd_rawmidi_substream *midi_out_substream;
 	struct urb *midi_in_urb;
 	unsigned char *midi_in_buf;
-	spinlock_t midi_lock;
-	unsigned int midi_out_acc;	// for the 'Leaky Bucket' rate limiter
-	unsigned int midi_rate_divisor;	// current_rate / PLOYTEC_PLAYBACK_FRAMES; @midi_lock
+	spinlock_t midi_lock;	/* protects the MIDI fields; IRQ-safe leaf */
+	unsigned int midi_out_acc;
+	unsigned int midi_rate_divisor;
 	struct ploytec_midi_running_status midi_state;
-	bool midi_stopping;		// see jockey3_pcm_urb_stream::stopping
-	unsigned int midi_consec_errors;	// consecutive MIDI IN URB errors; @midi_lock
+	bool midi_stopping;
+	unsigned int midi_consec_errors;
 
 	/* PCM urb streams */
 	struct jockey3_pcm_urb_stream playback;
@@ -377,8 +450,14 @@ static inline enum jockey3_urb_state jockey3_urb_check(const struct urb *urb)
 	return JOCKEY3_URB_ERROR;
 }
 
-/*
- * Account for a transport error (-EPROTO, -EPIPE, -EOVERFLOW, -ETIME, ...).
+/**
+ * jockey3_urb_error_give_up() - account for a URB transport error
+ * @chip: driver state
+ * @urb_stream: the affected direction
+ * @status: the urb->status that was seen
+ * @type: direction name, for log messages
+ *
+ * Accounts for a transport error (-EPROTO, -EPIPE, -EOVERFLOW, -ETIME, ...).
  *
  * These are frequently transient -- marginal cabling and some host controllers
  * produce them routinely -- so a single one must not disable the card. Keep
@@ -529,13 +608,27 @@ static void jockey3_capture_callback(struct urb *urb)
 		dev_err(&chip->intf0->dev, "Failed to resubmit capture URB: %d\n", ret);
 }
 
-/*
+/**
+ * jockey3_get_next_midi_out_byte() - pick the MIDI byte for one playback packet
+ * @chip: driver state
+ *
+ * Every outgoing playback packet reserves one slot for MIDI. This returns the
+ * byte to put there, applying a leaky-bucket limiter that holds the MIDI stream
+ * to roughly 3125 bytes/sec: the device overruns its own buffers and truncates
+ * messages if fed faster. When there is nothing to send, or the budget is not
+ * yet available, the idle byte is returned.
+ *
  * midi_lock is held across snd_rawmidi_transmit() rather than being dropped
  * around it: that keeps chip->midi_out_substream from changing under us, and
  * the lock order is safe because snd_rawmidi_output_trigger() is invoked by the
  * rawmidi core without substream->lock held. Holding a driver lock across
  * snd_rawmidi_transmit() is the established idiom (see sound/usb/midi.c, which
  * calls it under ep->buffer_lock).
+ *
+ * Called from the playback URB completion handler, so this runs in atomic
+ * context.
+ *
+ * Return: the byte to place in the packet's MIDI slot.
  */
 static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 {
@@ -750,6 +843,14 @@ static void jockey3_midi_in_callback(struct urb *urb)
 		dev_err(&chip->intf0->dev, "Failed to resubmit MIDI IN URB: %d\n", ret);
 }
 
+/**
+ * jockey3_stop_urbs() - stop all PCM and MIDI URBs
+ * @chip: driver state
+ *
+ * Fences the completion handlers, then kills every URB. Sleeps, so it must not
+ * be called from atomic context. On return no completion handler is running and
+ * none can resubmit.
+ */
 static void jockey3_stop_urbs(struct jockey3_chip *chip)
 {
 	dev_dbg(&chip->intf0->dev, "Stopping all URBs\n");
@@ -799,7 +900,16 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 			atomic_read(&chip->capture.urbs_in_flight));
 }
 
-/* Return: 0 on success, or the first submit error encountered. */
+/**
+ * jockey3_start_urbs() - submit all PCM and MIDI URBs
+ * @chip: driver state
+ *
+ * Clears the stop fences and error budgets, then submits the full URB ring for
+ * both directions plus the MIDI IN URB. Uses GFP_KERNEL, so process context
+ * only. A failure to submit one URB does not prevent the others being tried.
+ *
+ * Return: 0 on success, or the first submit error encountered.
+ */
 static int jockey3_start_urbs(struct jockey3_chip *chip)
 {
 	int i, ret, first_err = 0;
@@ -1132,8 +1242,11 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	return 0;
 }
 
-/*
- * Wait for every URB completion that could still touch this stream's substream
+/**
+ * jockey3_pcm_sync_stop() - wait for in-flight URB callbacks to drain
+ * @substream: the substream being stopped
+ *
+ * Waits for every URB completion that could still touch this stream's substream
  * or runtime->dma_area to leave its safe zone.
  *
  * The ALSA core calls this from snd_pcm_do_prepare() and from do_hw_free()
@@ -1142,6 +1255,8 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
  * with no stream lock held, so sleeping here is safe: a callback in its safe
  * zone has dropped urb_stream->lock and may freely take the stream lock, so the
  * stream lock -> urb_stream->lock order is never inverted.
+ *
+ * Return: 0 always; a timeout is logged but cannot usefully be reported.
  */
 static int jockey3_pcm_sync_stop(struct snd_pcm_substream *substream)
 {
