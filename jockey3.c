@@ -436,6 +436,22 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 	return byte;
 }
 
+/*
+ * FIXME: the MIDI-idle-byte/sync-byte writes below are redundant at both
+ * call sites: jockey3_playback_callback()'s idle branch immediately
+ * overwrites both fields again a few lines further down regardless of
+ * which branch ran, and the buffer-allocation call site hands us an
+ * already-zeroed kzalloc() buffer, making the memset() here redundant
+ * there. Left as a straight move for now; worth restructuring later
+ * instead of duplicating these writes.
+ */
+static void jockey3_prepare_idle_out_packet(u8 *buf)
+{
+	memset(buf, 0, PLOYTEC_PKT_SIZE);
+	buf[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
+	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
+}
+
 static void jockey3_playback_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
@@ -463,7 +479,7 @@ static void jockey3_playback_callback(struct urb *urb)
 			period_elapsed = jockey3_process_out_packet(chip, buf);
 			substream = urb_stream->substream;
 		} else {
-			ploytec_prepare_out_packet(buf);
+			jockey3_prepare_idle_out_packet(buf);
 		}
 	}
 
@@ -646,25 +662,29 @@ static void jockey3_start_urbs(struct jockey3_chip *chip)
 static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 {
 	int ret;
-	int current_hw_rate;
+	u32 current_hw_rate;
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
 	dev_dbg(&chip->intf0->dev, "Setting rate to %u Hz\n", rate);
 
-	ret = ploytec_initialise_device(chip->dev, chip->xfer_buf);
+	ret = ploytec_initialise_device(chip->intf0, chip->xfer_buf);
 	if (ret < 0) {
 		dev_err(&chip->intf0->dev, "Failed to initialise device to change rate: %d\n",
 			ret);
 		return ret;
 	}
 
-	ploytec_get_rate(chip->dev, chip->xfer_buf, &current_hw_rate);
+	ret = ploytec_get_rate(chip->intf0, chip->xfer_buf, &current_hw_rate);
+	if (ret < 0) {
+		dev_err(&chip->intf0->dev, "Failed to read current hardware rate: %d\n", ret);
+		return ret;
+	}
 	dev_dbg(&chip->intf0->dev, "Current hardware rate: %u Hz\n", current_hw_rate);
 	if (current_hw_rate != rate) {
 		dev_dbg(&chip->intf0->dev, "Setting new hardware rate: %u Hz\n", rate);
-		ret = ploytec_set_rate(chip->dev, chip->xfer_buf, rate);
+		ret = ploytec_set_rate(chip->intf0, chip->xfer_buf, rate);
 		if (ret < 0) {
 			dev_err(&chip->intf0->dev, "Failed to set rate: %d\n", ret);
 			return ret;
@@ -673,7 +693,7 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 		dev_dbg(&chip->intf0->dev, "Hardware rate already at requested value: %u Hz\n",
 			current_hw_rate);
 	}
-	ret = ploytec_start_streaming(chip->dev, chip->xfer_buf);
+	ret = ploytec_start_streaming(chip->intf0, chip->xfer_buf);
 	if (ret < 0) {
 		dev_err(&chip->intf0->dev, "Failed to start streaming after rate change: %d\n",
 			ret);
@@ -972,20 +992,32 @@ static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream
 
 static int jockey3_initialise_ploytec(struct jockey3_chip *chip)
 {
+	enum ploytec_codec_variant codec_variant;
 	int ret;
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	ploytec_initialise_codec();
+	codec_variant = ploytec_initialise_codec();
+	switch (codec_variant) {
+	case PLOYTEC_CODEC_PORTABLE:
+		dev_dbg(&chip->intf0->dev, "Using portable codec\n");
+		break;
+	case PLOYTEC_CODEC_OPTIMIZED_64BIT:
+		dev_dbg(&chip->intf0->dev, "Using 64-bit optimized codec\n");
+		break;
+	case PLOYTEC_CODEC_OPTIMIZED_32BIT:
+		dev_dbg(&chip->intf0->dev, "Using 32-bit optimized codec\n");
+		break;
+	}
 
-	ret = ploytec_initialise_device(chip->dev, chip->xfer_buf);
+	ret = ploytec_initialise_device(chip->intf0, chip->xfer_buf);
 	if (ret < 0) {
 		dev_err(&chip->intf0->dev, "Ploytec failed to initialise: %d\n", ret);
 		return ret;
 	}
 
-	ret = ploytec_start_streaming(chip->dev, chip->xfer_buf);
+	ret = ploytec_start_streaming(chip->intf0, chip->xfer_buf);
 	if (ret < 0) {
 		dev_err(&chip->intf0->dev, "Ploytec failed to start streaming: %d\n", ret);
 		return ret;
@@ -1274,7 +1306,7 @@ static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
 		if (ret)
 			return ret;
 
-		ploytec_prepare_out_packet(chip->playback.bufs[i]);
+		jockey3_prepare_idle_out_packet(chip->playback.bufs[i]);
 
 		usb_fill_bulk_urb(chip->playback.urbs[i], dev,
 				  usb_sndbulkpipe(dev, PLOYTEC_EP_NUM_PCM_OUT),
@@ -1553,7 +1585,7 @@ static int jockey3_post_reset(struct usb_interface *intf)
 		jockey3_initialise_ploytec(chip);
 
 		/* Verify if the sample rate persisted through the reset */
-		if (ploytec_get_rate(chip->dev, chip->xfer_buf, &hw_rate) == 0) {
+		if (ploytec_get_rate(chip->intf0, chip->xfer_buf, &hw_rate) == 0) {
 			if (hw_rate != chip->current_rate) {
 				dev_warn(&chip->intf0->dev,
 					 "Rate mismatch after reset. HW: %u, Expected: %u. Re-applying...\n",
