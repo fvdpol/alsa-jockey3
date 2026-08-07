@@ -1001,6 +1001,58 @@ static int jockey3_recover_capture_stream(struct jockey3_chip *chip)
 	return 0;
 }
 
+/*
+ * SNDRV_PCM_INFO_BATCH: the hardware pointer only advances once per completed
+ * bulk URB (a whole Ploytec frame group), never per sample, so userspace must
+ * not assume a sample-accurate position.
+ *
+ * SNDRV_PCM_INFO_RESUME is deliberately absent: the device loses stream
+ * synchronisation across a suspend, so the ALSA core should return -ESTRPIPE
+ * and have userspace re-prepare rather than issue TRIGGER_RESUME.
+ */
+#define JOCKEY3_PCM_INFO	(SNDRV_PCM_INFO_MMAP |		\
+				 SNDRV_PCM_INFO_INTERLEAVED |	\
+				 SNDRV_PCM_INFO_BLOCK_TRANSFER |\
+				 SNDRV_PCM_INFO_BATCH |		\
+				 SNDRV_PCM_INFO_MMAP_VALID)
+
+#define JOCKEY3_PCM_RATES	(SNDRV_PCM_RATE_44100 |	\
+				 SNDRV_PCM_RATE_48000 |	\
+				 SNDRV_PCM_RATE_88200 |	\
+				 SNDRV_PCM_RATE_96000)
+
+static const struct snd_pcm_hardware jockey3_pcm_hw_playback = {
+	.info			= JOCKEY3_PCM_INFO,
+	.formats		= SNDRV_PCM_FMTBIT_S24_3LE,
+	.rates			= JOCKEY3_PCM_RATES,
+	.rate_min		= 44100,
+	.rate_max		= 96000,
+	.channels_min		= 4,
+	.channels_max		= 4,
+	.buffer_bytes_max	= 1024 * 1024,
+	/* One playback URB carries 10 frames * 4 channels * 3 bytes = 120 bytes */
+	.period_bytes_min	= PLOYTEC_PLAYBACK_FRAMES * 4 * 3,
+	.period_bytes_max	= 512 * 1024,
+	.periods_min		= 2,
+	.periods_max		= 1024,
+};
+
+static const struct snd_pcm_hardware jockey3_pcm_hw_capture = {
+	.info			= JOCKEY3_PCM_INFO,
+	.formats		= SNDRV_PCM_FMTBIT_S24_3LE,
+	.rates			= JOCKEY3_PCM_RATES,
+	.rate_min		= 44100,
+	.rate_max		= 96000,
+	.channels_min		= 6,
+	.channels_max		= 6,
+	.buffer_bytes_max	= 1024 * 1024,
+	/* One capture URB carries 8 frames * 6 channels * 3 bytes = 144 bytes */
+	.period_bytes_min	= PLOYTEC_CAPTURE_FRAMES * 6 * 3,
+	.period_bytes_max	= 512 * 1024,
+	.periods_min		= 2,
+	.periods_max		= 1024,
+};
+
 static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
@@ -1014,38 +1066,13 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	runtime->hw.info =
-		SNDRV_PCM_INFO_MMAP |
-		SNDRV_PCM_INFO_INTERLEAVED |
-		SNDRV_PCM_INFO_BLOCK_TRANSFER |
-		SNDRV_PCM_INFO_MMAP_VALID;
-	runtime->hw.formats = SNDRV_PCM_FMTBIT_S24_3LE;
-	runtime->hw.rates =
-		SNDRV_PCM_RATE_44100 |
-		SNDRV_PCM_RATE_48000 |
-		SNDRV_PCM_RATE_88200 |
-		SNDRV_PCM_RATE_96000;
-	runtime->hw.rate_min = 44100;
-	runtime->hw.rate_max = 96000;
-	runtime->hw.buffer_bytes_max = 1024 * 1024;
+	runtime->hw = substream->stream == SNDRV_PCM_STREAM_PLAYBACK ?
+		      jockey3_pcm_hw_playback : jockey3_pcm_hw_capture;
 
-	/*
-	 * The period minimum bytes is limited by packet size of the USB URB frames
-	 * - Playback URB: 10 frames * 4 channels * 3 bytes/sample = 120 bytes
-	 * - Capture URB: 8 frames 6 channels * 3 bytes/sample = 144 bytes
-	 */
-	runtime->hw.period_bytes_min = 144;
-	runtime->hw.period_bytes_max = 512 * 1024;
-	runtime->hw.periods_min = 2;
-	runtime->hw.periods_max = 1024;
-
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		runtime->hw.channels_min = 4;
-		runtime->hw.channels_max = 4;
-	} else {
-		runtime->hw.channels_min = 6;
-		runtime->hw.channels_max = 6;
-	}
+	/* The period accounting assumes a whole number of periods per buffer */
+	ret = snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
+	if (ret < 0)
+		return ret;
 
 	/*
 	 * Rate constraints under rate_mutex, which also excludes a concurrent
@@ -1663,6 +1690,42 @@ static int jockey3_validate_endpoints(struct usb_interface *intf0, struct usb_in
 	return 0;
 }
 
+/*
+ * Channel maps.
+ *
+ * This device exposes several independent stereo pairs, which is a different
+ * thing from a multichannel speaker arrangement -- and speaker positions are
+ * all the chmap enum can express. Claiming, say, RL/RR for the headphone pair
+ * would invite an audio server to treat a cue output as rear speakers, so the
+ * discrete pairs are reported as SNDRV_CHMAP_UNKNOWN.
+ *
+ * The one exception is the playback Master pair, which is marked FL/FR so that
+ * userspace (PipeWire and friends) can identify the device's primary output.
+ * There is no equivalent notion for the inputs, so capture is left entirely
+ * unpositioned.
+ *
+ * Physical layout (see Documentation/sound/cards/jockey3.rst):
+ *   Playback: 1-2 Master Out L/R, 3-4 Headphone L/R
+ *   Capture:  1-2 Input 1 L/R, 3-4 Input 2 L/R, 5-6 Microphone
+ *
+ * The microphone is mono: the balanced input stage feeds the same analog
+ * signal to both converters, so channels 5 and 6 carry identical content.
+ */
+static const struct snd_pcm_chmap_elem jockey3_playback_chmap[] = {
+	{ .channels = 4,
+	  .map = { SNDRV_CHMAP_FL, SNDRV_CHMAP_FR,
+		   SNDRV_CHMAP_UNKNOWN, SNDRV_CHMAP_UNKNOWN } },
+	{ }
+};
+
+static const struct snd_pcm_chmap_elem jockey3_capture_chmap[] = {
+	{ .channels = 6,
+	  .map = { SNDRV_CHMAP_UNKNOWN, SNDRV_CHMAP_UNKNOWN,
+		   SNDRV_CHMAP_UNKNOWN, SNDRV_CHMAP_UNKNOWN,
+		   SNDRV_CHMAP_UNKNOWN, SNDRV_CHMAP_UNKNOWN } },
+	{ }
+};
+
 static int jockey3_init_pcm(struct jockey3_chip *chip)
 {
 	int ret = snd_pcm_new(chip->card, CARD_NAME " Audio", 0, 1, 1, &chip->pcm);
@@ -1675,7 +1738,14 @@ static int jockey3_init_pcm(struct jockey3_chip *chip)
 	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_PLAYBACK, &jockey3_pcm_ops);
 	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_CAPTURE, &jockey3_pcm_ops);
 	snd_pcm_set_managed_buffer_all(chip->pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
-	return 0;
+
+	ret = snd_pcm_add_chmap_ctls(chip->pcm, SNDRV_PCM_STREAM_PLAYBACK,
+				     jockey3_playback_chmap, 4, 0, NULL);
+	if (ret < 0)
+		return ret;
+
+	return snd_pcm_add_chmap_ctls(chip->pcm, SNDRV_PCM_STREAM_CAPTURE,
+				      jockey3_capture_chmap, 6, 0, NULL);
 }
 
 static int jockey3_init_midi(struct jockey3_chip *chip)
@@ -1699,8 +1769,14 @@ static void jockey3_setup_card_names(struct jockey3_chip *chip, int driver_info)
 {
 	char *jockey3_type;
 
-	strscpy(chip->card->driver, "snd-reloop-jockey3", sizeof(chip->card->driver));
+	/*
+	 * card->driver is only char[16] and is what shows up as the card ID in
+	 * /proc/asound, so it holds a short model identifier rather than the
+	 * module name (which would be silently truncated).
+	 */
+	strscpy(chip->card->driver, "Jockey3", sizeof(chip->card->driver));
 	strscpy(chip->card->shortname, CARD_NAME, sizeof(chip->card->shortname));
+	strscpy(chip->card->mixername, CARD_NAME, sizeof(chip->card->mixername));
 
 	switch (driver_info) {
 	case JOCKEY3_ME:
