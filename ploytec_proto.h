@@ -48,17 +48,6 @@
 #define PLOYTEC_STATUS_BIT4		0x10
 #define PLOYTEC_STATUS_STREAMING	0x20
 
-struct ploytec_midi_state {
-	int expected_data;	// number data bytes for the 'running status' voice message
-	int data_count;
-	u8 running_status;	// the 'running status' (voice message)
-	u8 queued_byte;
-	bool has_queued_byte;
-};
-
-/* MIDI protocol state machine */
-u8 ploytec_midi_running_status(struct ploytec_midi_state *state, u8 b, struct device *dev);
-
 /* Protocol Helpers */
 void ploytec_prepare_out_packet(u8 *buf);
 int ploytec_initialise_device(struct usb_device *dev, void *xfer_buf);
