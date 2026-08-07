@@ -16,10 +16,11 @@
  * The reference implementation of the Ploytec codec performs a bit
  * gather/scatter operation with minimal optimization. It mainly serves as
  * a readable reference and for validating the correctness of the optimized
- * encoder/decoder variants below.
+ * encoder/decoder variants below (see tests/test_ploytec_codec.c).
  *
- * Compile with the REFERENCE_CODEC symbol set to use this codec instead of
- * the optimized variants.
+ * Enable CONFIG_SND_USB_JOCKEY3_REFERENCE_CODEC to build the driver with
+ * this codec instead of the optimized variants (equivalent to compiling
+ * with the REFERENCE_CODEC symbol set directly).
  */
 
 /**
@@ -505,18 +506,20 @@ static inline void ploytec_decode_s24_3le_pack32(u8 *dest, const u8 *src)
  * Builds the bit-spread lookup table(s) used by the optimized encoder/decoder.
  * Must be called once (e.g. at driver probe) before any call to
  * ploytec_encode_batch() or ploytec_decode_batch().
+ *
+ * Return: which codec variant this build selected, for the caller to log.
  */
-void ploytec_initialise_codec(void)
+enum ploytec_codec_variant ploytec_initialise_codec(void)
 {
 #ifdef REFERENCE_CODEC
-	pr_debug("ploytec: using portable codec\n");
+	return PLOYTEC_CODEC_PORTABLE;
 #else
 #ifdef CONFIG_64BIT
-	pr_debug("ploytec: using 64-bit optimized codec\n");
 	init_ploytec_bit_spread_lut64();
+	return PLOYTEC_CODEC_OPTIMIZED_64BIT;
 #else
-	pr_debug("ploytec: using 32-bit optimized codec\n");
 	init_ploytec_bit_spread_lut32();
+	return PLOYTEC_CODEC_OPTIMIZED_32BIT;
 #endif // CONFIG_64BIT
 #endif // REFERENCE_CODEC
 }

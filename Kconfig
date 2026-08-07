@@ -15,3 +15,24 @@ config SND_USB_JOCKEY3
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called snd-reloop-jockey3.
+
+config SND_USB_JOCKEY3_REFERENCE_CODEC
+	bool "Use portable reference codec implementation"
+	depends on SND_USB_JOCKEY3
+	depends on EXPERT
+	default n
+	help
+	  The Jockey 3 driver normally uses an architecture-optimized
+	  bit-packing codec (separate 32-bit and 64-bit variants) to convert
+	  between ALSA's S24_3LE sample format and the Ploytec wire format.
+	  This is validated against a portable reference implementation by
+	  the driver's userspace test suite, and is the default on all
+	  architectures.
+
+	  Say Y to build the driver with the portable reference
+	  implementation instead. It is much slower and only intended as a
+	  fallback/workaround on architectures the optimized codec has not
+	  been explicitly verified on (e.g. big-endian or less common
+	  32-bit targets).
+
+	  If unsure, say N.
