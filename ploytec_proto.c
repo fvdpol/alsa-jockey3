@@ -71,13 +71,13 @@ int ploytec_get_status(struct usb_interface *intf, void *xfer_buf, u8 *status)
 }
 
 /**
- * ploytec_initialise_device - Perform Ploytec handshake sequence as observed in USB traces.
+ * ploytec_initialize_device - Perform Ploytec handshake sequence as observed in USB traces.
  * @intf: USB interface
  * @xfer_buf: Temporary transfer buffer
  *
  * Return: 0 on success, negative errno on failure.
  */
-int ploytec_initialise_device(struct usb_interface *intf, void *xfer_buf)
+int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf)
 {
 	struct usb_device *dev = interface_to_usbdev(intf);
 	u8 status;

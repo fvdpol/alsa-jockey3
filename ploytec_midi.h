@@ -20,7 +20,7 @@ struct device;
  * @queued_byte: data byte held back when a Running Status byte had to be synthesised
  * @has_queued_byte: true when @queued_byte holds a byte still to be delivered
  *
- * Zero-initialise before first use.
+ * Zero-initialize before first use.
  */
 struct ploytec_midi_running_status {
 	int expected_data;

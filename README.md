@@ -72,6 +72,38 @@ Areas especially appreciated:
 - Code review & refactoring
 - Documentation
 
+## Coding style
+
+This driver targets inclusion in the mainline Linux kernel, so
+[the kernel coding style](https://www.kernel.org/doc/html/latest/process/coding-style.html)
+applies throughout. Beyond that, a few project-specific conventions:
+
+- **American English.** The kernel overwhelmingly uses American spelling
+  (`initialize` outnumbers `initialise` roughly 14:1 in-tree, `optimize` over
+  `optimise` 25:1), so use `initialize`, `serialize`, `synchronization`,
+  `behavior`, `optimize`. This applies to identifiers as well as comments.
+  Note that neither `scripts/spelling.txt` nor `codespell` flags British
+  spellings, so this is not caught automatically.
+
+- **Two namespaces.** `jockey3_*` for the ALSA/USB glue that is specific to
+  this card; `ploytec_*` for the hardware protocol, codec and firmware-quirk
+  layer, which is in principle shared with other Ploytec-based devices.
+
+- **Comments.** `/* */` for substantial or multi-line explanations; `//` for
+  short single-line notes, such as recording where a magic value came from.
+
+- **Locking.** The lock hierarchy is documented at the top of `jockey3.c`.
+  Anything reachable from a PCM `.trigger` or `.pointer` callback runs in
+  atomic context and must not sleep.
+
+Before submitting, run the checks the kernel itself uses:
+
+```sh
+scripts/checkpatch.pl --strict --codespell -g <range>
+scripts/kernel-doc -Wall -Werror --none <file>.c
+make W=1 C=1 M=sound/usb/jockey3      # sparse
+```
+
 # License
 
 This project is licensed under the GPL-2.0-or-later, matching the Linux kernel

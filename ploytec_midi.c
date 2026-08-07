@@ -12,7 +12,7 @@
  * because that firmware is what requires it -- the device does not accept a
  * Running Status stream and needs every message fully status-prefixed.
  *
- * Should a second driver ever need the same behaviour, this would be a
+ * Should a second driver ever need the same behavior, this would be a
  * reasonable candidate to migrate into a shared kernel library rather than
  * duplicating it.
  */
@@ -21,7 +21,7 @@
 
 /**
  * ploytec_midi_running_status_expand() - Expand MIDI 1.0 Running Status
- * @state: expander state, zero-initialised by the caller before first use
+ * @state: expander state, zero-initialized by the caller before first use
  * @b: the next raw MIDI byte from the source stream, in stream order
  * @dev: struct device for diagnostic logging (currently unused)
  *
@@ -60,7 +60,7 @@ u8 ploytec_midi_running_status_expand(struct ploytec_midi_running_status *state,
 			return b;
 		}
 
-		state->data_count = state->expected_data; // initialise expected data byte count
+		state->data_count = state->expected_data; // initialize expected data byte count
 		return b;
 	}
 

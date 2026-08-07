@@ -180,7 +180,7 @@ static void jockey3_set_current_rate(struct jockey3_chip *chip, unsigned int rat
 }
 
 /*
- * Rate changes are serialised by chip->rate_mutex alone: jockey3_pcm_hw_params()
+ * Rate changes are serialized by chip->rate_mutex alone: jockey3_pcm_hw_params()
  * performs the whole stop/set-rate/start sequence while holding it, so any other
  * sleepable callback that takes the mutex is automatically excluded for the
  * duration. There is deliberately no separate "rate changing" flag to poll --
@@ -864,9 +864,9 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate)
 
 	dev_dbg(&chip->intf0->dev, "Setting rate to %u Hz\n", rate);
 
-	ret = ploytec_initialise_device(chip->intf0, chip->xfer_buf);
+	ret = ploytec_initialize_device(chip->intf0, chip->xfer_buf);
 	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to initialise device to change rate: %d\n",
+		dev_err(&chip->intf0->dev, "Failed to initialize device to change rate: %d\n",
 			ret);
 		return ret;
 	}
@@ -1007,7 +1007,7 @@ static int jockey3_recover_capture_stream(struct jockey3_chip *chip)
  * not assume a sample-accurate position.
  *
  * SNDRV_PCM_INFO_RESUME is deliberately absent: the device loses stream
- * synchronisation across a suspend, so the ALSA core should return -ESTRPIPE
+ * synchronization across a suspend, so the ALSA core should return -ESTRPIPE
  * and have userspace re-prepare rather than issue TRIGGER_RESUME.
  */
 #define JOCKEY3_PCM_INFO	(SNDRV_PCM_INFO_MMAP |		\
@@ -1173,7 +1173,7 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 		return ret;
 
 	/*
-	 * Taking rate_mutex here serialises against an in-flight rate change in
+	 * Taking rate_mutex here serializes against an in-flight rate change in
 	 * jockey3_pcm_hw_params(), which holds it across the whole stop/set/start
 	 * sequence -- so the capture liveness below is sampled from a settled
 	 * state rather than from the middle of a URB restart.
@@ -1219,7 +1219,7 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
  * snd_pcm_period_elapsed() -> snd_pcm_stop_xrun(), and blocking would then
  * stall the very rate change it is waiting on.
  *
- * Serialisation against a concurrent rate change is provided by rate_mutex in
+ * Serialization against a concurrent rate change is provided by rate_mutex in
  * the sleepable callbacks instead; the ALSA state machine guarantees .prepare
  * runs before TRIGGER_START and after every XRUN.
  *
@@ -1266,7 +1266,7 @@ static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream
 	return bytes_to_frames(substream->runtime, dma_off);
 }
 
-static int jockey3_initialise_ploytec(struct jockey3_chip *chip)
+static int jockey3_initialize_ploytec(struct jockey3_chip *chip)
 {
 	enum ploytec_codec_variant codec_variant;
 	int ret;
@@ -1274,7 +1274,7 @@ static int jockey3_initialise_ploytec(struct jockey3_chip *chip)
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	codec_variant = ploytec_initialise_codec();
+	codec_variant = ploytec_initialize_codec();
 	switch (codec_variant) {
 	case PLOYTEC_CODEC_PORTABLE:
 		dev_dbg(&chip->intf0->dev, "Using portable codec\n");
@@ -1287,9 +1287,9 @@ static int jockey3_initialise_ploytec(struct jockey3_chip *chip)
 		break;
 	}
 
-	ret = ploytec_initialise_device(chip->intf0, chip->xfer_buf);
+	ret = ploytec_initialize_device(chip->intf0, chip->xfer_buf);
 	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Ploytec failed to initialise: %d\n", ret);
+		dev_err(&chip->intf0->dev, "Ploytec failed to initialize: %d\n", ret);
 		return ret;
 	}
 
@@ -1299,7 +1299,7 @@ static int jockey3_initialise_ploytec(struct jockey3_chip *chip)
 		return ret;
 	}
 
-	dev_dbg(&chip->intf0->dev, "Ploytec initialised successfully; status = 0x%02x\n", ret);
+	dev_dbg(&chip->intf0->dev, "Ploytec initialized successfully; status = 0x%02x\n", ret);
 	return 0;
 }
 
@@ -1489,19 +1489,19 @@ static const struct snd_rawmidi_ops jockey3_midi_out_ops = {
 	.trigger = jockey3_midi_out_trigger
 };
 
-static int jockey3_initialise(struct jockey3_chip *chip)
+static int jockey3_initialize(struct jockey3_chip *chip)
 {
 	int ret;
 	int rate;
 
 	for (int retry = 10; retry > 0; retry--) {
-		ret = jockey3_initialise_ploytec(chip);
+		ret = jockey3_initialize_ploytec(chip);
 		if (ret == 0)
 			break;
 		usleep_range(50000, 100000); /* Wait 50-100 ms before retrying */
 	}
 	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to initialise Ploytec: %d\n", ret);
+		dev_err(&chip->intf0->dev, "Failed to initialize Ploytec: %d\n", ret);
 		return ret;
 	}
 
@@ -1515,7 +1515,7 @@ static int jockey3_initialise(struct jockey3_chip *chip)
 
 	jockey3_start_urbs(chip);
 
-	dev_dbg(&chip->intf0->dev, "Initialisation complete.\n");
+	dev_dbg(&chip->intf0->dev, "Initialization complete.\n");
 
 	return 0;
 }
@@ -1909,7 +1909,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 		snd_card_set_id(card, "RJ3");
 
 	usb_set_intfdata(intf, chip);
-	ret = jockey3_initialise(chip);
+	ret = jockey3_initialize(chip);
 	if (ret < 0)
 		return ret;
 
@@ -1993,7 +1993,7 @@ static int jockey3_post_reset(struct usb_interface *intf)
 
 	if (chip && intf == chip->intf0) {
 		scoped_guard(mutex, &chip->rate_mutex) {
-			jockey3_initialise_ploytec(chip);
+			jockey3_initialize_ploytec(chip);
 
 			/* Verify if the sample rate persisted through the reset */
 			if (ploytec_get_rate(chip->intf0, chip->xfer_buf, &hw_rate) == 0) {
@@ -2045,7 +2045,7 @@ static int jockey3_restore_device(struct jockey3_chip *chip, bool reset)
 
 	scoped_guard(mutex, &chip->rate_mutex) {
 		if (reset) {
-			ret = jockey3_initialise_ploytec(chip);
+			ret = jockey3_initialize_ploytec(chip);
 			if (ret < 0)
 				return ret;
 		}

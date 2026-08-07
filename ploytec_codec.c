@@ -567,7 +567,7 @@ static inline void ploytec_decode_frame(u8 *dest, const u8 *src)
 #endif
 
 /**
- * ploytec_initialise_codec() - Initialize the codec's pre-computed lookup tables
+ * ploytec_initialize_codec() - Initialize the codec's pre-computed lookup tables
  *
  * Builds the bit-spread lookup table(s) used by the optimized encoder/decoder.
  * Must be called once (e.g. at driver probe) before any call to
@@ -575,7 +575,7 @@ static inline void ploytec_decode_frame(u8 *dest, const u8 *src)
  *
  * Return: which codec variant this build selected, for the caller to log.
  */
-enum ploytec_codec_variant ploytec_initialise_codec(void)
+enum ploytec_codec_variant ploytec_initialize_codec(void)
 {
 	ploytec_codec_init_tables();
 	return ploytec_codec_selected;

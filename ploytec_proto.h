@@ -55,7 +55,7 @@
  * per-device node (e.g. "usb 1-13: ..."), which is what struct usb_device's
  * embedded struct device is bound to.
  */
-int ploytec_initialise_device(struct usb_interface *intf, void *xfer_buf);
+int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf);
 int ploytec_start_streaming(struct usb_interface *intf, void *xfer_buf);
 int ploytec_get_rate(struct usb_interface *intf, void *xfer_buf, u32 *rate);
 int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate);

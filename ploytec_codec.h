@@ -37,7 +37,7 @@ enum ploytec_codec_variant {
 };
 
 /* batching of the sample processing */
-enum ploytec_codec_variant ploytec_initialise_codec(void);
+enum ploytec_codec_variant ploytec_initialize_codec(void);
 void ploytec_encode_batch(u8 *dest, const u8 *src, const int n_frames);
 void ploytec_decode_batch(u8 *dest, const u8 *src, const int n_frames);
 
