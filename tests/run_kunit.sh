@@ -129,7 +129,6 @@ setup_tree() {
 	cp "$SRC_DIR/Kconfig"         "$dst/Kconfig"
 	cp "$SRC_DIR/Makefile.kernel" "$dst/Makefile"
 	cp "$SRC_DIR/.kunitconfig"    "$dst/.kunitconfig"
-	cp "$SRC_DIR/.kunitconfig.um" "$dst/.kunitconfig.um"
 
 	local f
 	for f in jockey3.c \
@@ -155,23 +154,34 @@ run_arch() {
 
 	args=(run "--kunitconfig=$DST_REL" "--build_dir=$build_dir")
 
-	if [ "$arch" = um ]; then
-		# UML cannot reach CONFIG_USB without the IOMEM emulation; see
-		# .kunitconfig.um. Those symbols only exist under arch/um, and
-		# kunit.py errors on any requested option it cannot satisfy, so
-		# they are a separate fragment rather than part of the base.
-		args+=("--kunitconfig=$DST_REL/.kunitconfig.um")
-	else
+	if [ "$arch" != um ]; then
 		args+=("--arch=$arch")
 		prefix=$(cross_prefix "$arch")
 		[ -n "$prefix" ] && args+=("--cross_compile=$prefix")
 	fi
 
-	# On s390, "config HAS_IOMEM / def_bool PCI" (arch/s390/Kconfig), so
-	# without PCI there is no IOMEM, hence no SOUND and no USB_SUPPORT.
-	if [ "$arch" = s390 ]; then
+	#
+	# Two architectures cannot reach CONFIG_USB - and so cannot reach
+	# sound/usb at all - without extra options. Both are added here rather
+	# than in .kunitconfig, because kunit.py treats a requested option it
+	# cannot satisfy as an error, so an arch-specific symbol in the shared
+	# fragment breaks configuration on every *other* architecture.
+	#
+	case "$arch" in
+	um)
+		# UML defaults to NO_IOMEM. UML_PCI_OVER_VIRTIO selects UML_PCI,
+		# which brings in the IOMEM emulation that makes USB_SUPPORT
+		# selectable again. VIRTIO_UML is a hard dependency of it.
+		args+=(--kconfig_add CONFIG_VIRTIO=y
+		       --kconfig_add CONFIG_VIRTIO_UML=y
+		       --kconfig_add CONFIG_UML_PCI_OVER_VIRTIO=y)
+		;;
+	s390)
+		# arch/s390/Kconfig: "config HAS_IOMEM / def_bool PCI", so
+		# without PCI there is no IOMEM, hence no SOUND either.
 		args+=(--kconfig_add CONFIG_PCI=y)
-	fi
+		;;
+	esac
 
 	# The reference codec is behind EXPERT, so it needs enabling too.
 	if [ "$use_reference_codec" -eq 1 ]; then

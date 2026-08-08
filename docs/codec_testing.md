@@ -173,17 +173,28 @@ sudo apt install gcc-s390x-linux-gnu
 Both are handled by `run_kunit.sh`; they are recorded here because they are
 non-obvious and cost time to rediscover.
 
+Both are passed with `--kconfig_add` rather than placed in `.kunitconfig`,
+because kunit.py treats a requested option it cannot satisfy as an **error** —
+so an architecture-specific symbol in the shared fragment breaks configuration
+on every *other* architecture. That is not hypothetical: it is exactly how the
+first cross-architecture run failed.
+
 **UML cannot reach `CONFIG_USB`.** It disables IOMEM by default, which makes
 `USB_SUPPORT` — and with it all of `sound/usb` — unselectable. The only
-user-selectable way in is `CONFIG_UML_PCI_OVER_VIRTIO`, which pulls in the
-IOMEM emulation. Those symbols live in `arch/um` and do not exist elsewhere,
-and kunit.py errors on any requested option it cannot satisfy, so they are in
-a separate `.kunitconfig.um` fragment rather than the main `.kunitconfig`.
-Putting them in the base file makes *every non-UML target fail to configure*.
+user-selectable way in is `CONFIG_UML_PCI_OVER_VIRTIO`, which selects
+`UML_PCI` and pulls in the IOMEM emulation. `VIRTIO_UML` is a hard dependency
+of it:
+
+```sh
+--kconfig_add CONFIG_VIRTIO=y \
+--kconfig_add CONFIG_VIRTIO_UML=y \
+--kconfig_add CONFIG_UML_PCI_OVER_VIRTIO=y
+```
 
 **s390 needs `CONFIG_PCI=y`.** `arch/s390/Kconfig` has
 `config HAS_IOMEM / def_bool PCI`, so without PCI there is no IOMEM, hence no
-`SOUND` and no `USB_SUPPORT` — the same failure as UML, by a different route.
+`SOUND` and no `USB_SUPPORT` — the same wall as UML, reached by a different
+route.
 
 ### The separate worktree
 

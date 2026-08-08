@@ -1,7 +1,7 @@
 # tests/
 
 Test tooling for the Ploytec codec. The full guide is
-**[../docs/testing.md](../docs/testing.md)**; this is just a map of the
+**[../docs/codec_testing.md](../docs/codec_testing.md)**; this is just a map of the
 directory.
 
 | Path | What it is |
