@@ -29,7 +29,8 @@
  * Ploytec Bit-Plane Interleaving (Playback):
  * The firmware uses a non-standard "bit-plane" format where bits from different
  * channels are interleaved into the same byte.
- * - Each 48-byte frame contains 8 samples for 2 pairs of channels.
+ * - Each 48-byte frame carries one PCM frame: a single sample for each of
+ *   the 4 channels, spread one bit per wire byte.
  * - Bytes 0-23: ALSA Channels 1 & 3
  * - Bytes 24-47: ALSA Channels 2 & 4
  * - Within each 24-byte block, bits are grouped by significance:
@@ -76,7 +77,7 @@ static inline void ploytec_decode_s24_3le(u8 *dest, const u8 *src)
 		/* Channel 1: odd channel 1 (bit 0 of bytes 0x00-0x17) */
 		dest[0x00] |= ((src[0x10 + i] & 0x01) << (7 - i));	// Ch1 LSB byte
 		dest[0x01] |= ((src[0x08 + i] & 0x01) << (7 - i));
-		dest[0x02] |= ((src[0x00 + i] & 0x01) << (7 - i));	// Ch2 MSB byte
+		dest[0x02] |= ((src[0x00 + i] & 0x01) << (7 - i));	// Ch1 MSB byte
 
 		/* Channel 2: even channel 2 (bit 0 of bytes 0x20-0x37) */
 		dest[0x03] |= ((src[0x30 + i] & 0x01) << (7 - i));

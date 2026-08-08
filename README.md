@@ -52,10 +52,36 @@ Unlike most modern DJ controllers, the Reloop Jockey 3 does not use a class-comp
 git clone https://github.com/fvdpol/alsa-jockey3.git
 cd alsa-jockey3
 make
-sudo make install
+sudo insmod snd-reloop-jockey3.ko
 ```
 
 TODO add suggestions on usage (audio, midi)
+
+
+# Testing
+
+The audio codec — the bit-scattering conversion between ALSA's `S24_3LE`
+format and the Ploytec wire format — has its own test suite, because it exists
+in three architecture-specific versions of which only one is compiled into any
+given build, and the fast ones are not verifiable by reading.
+
+```bash
+cd tests
+
+./run_kunit.sh          # in-kernel KUnit suite, under UML (seconds)
+./run_kunit.sh --all    # and under QEMU: i386, arm64, arm, riscv
+
+./codecbench.py test    # user-space: all three variants + candidates
+./codecbench.py bench   # benchmark them on this machine
+```
+
+The KUnit suite ships with the driver and runs in the kernel; the user-space
+bench compares every variant against the others and doubles as a workbench for
+developing new ones. Both are checked against an independent model of the wire
+format, so they cannot agree on a wrong answer.
+
+See **[docs/testing.md](docs/testing.md)** for the full guide, including how to
+develop and promote a new codec implementation.
 
 
 # Technical Background

@@ -7,14 +7,17 @@
  * bit positions so the compiler gets one straight-line body to schedule and
  * vectorize rather than several nested loops.
  *
- * It is kept as a candidate because it is the baseline the SWAR variants are
- * measured against, and because it is the only implementation here that a
- * reader can check against the format description by eye.
+ * It is kept as a candidate because it is the only implementation here that a
+ * reader can check against the format description by eye, and because it
+ * anchors the driver's reference codec: this variant was promoted into
+ * ploytec_codec.c and *is* what the portable reference does today. It should
+ * therefore benchmark at roughly 1.0x against "reference", and measuring
+ * anything else means one of the two has drifted.
  *
- * Historical measurements, from the notes in the harness this replaced:
- * on x86_64 it encoded 10-25% faster and decoded 2-10% faster than the
- * unfused original - a modest win, later dwarfed by the 4-10x from the
- * bit-spread tables.
+ * Historical measurements, from the notes in the harness this replaced: on
+ * x86_64 fusing the loop encoded 10-25% faster and decoded 2-10% faster than
+ * the unfused original it replaced - a modest win, later dwarfed by the
+ * 4-10x from the bit-spread tables.
  *
  * (C) 2026 Frank van de Pol <fvdpol@gmail.com>
  */
