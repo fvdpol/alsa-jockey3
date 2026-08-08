@@ -1,0 +1,1 @@
+ sudo rmmod xhci_pci && sudo modprobe xhci_pci

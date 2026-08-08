@@ -1,0 +1,76 @@
+[75764.051146] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[75764.998948] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 436 ms for reset completion.
+[76088.588213] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 8 ms for reset completion.
+[76090.264088] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 356 ms for reset completion.
+[76091.909177] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76093.524040] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 328 ms for reset completion.
+[76095.572079] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76097.784013] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76098.316079] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76099.936018] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76102.012102] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76103.552056] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76105.196011] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76106.939987] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 340 ms for reset completion.
+[76109.091954] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76110.623934] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76112.419858] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76114.035850] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 328 ms for reset completion.
+[76116.891897] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76118.047832] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76118.595834] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 340 ms for reset completion.
+[76120.219813] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76122.375844] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76124.039825] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 340 ms for reset completion.
+[76126.379779] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76126.923778] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76129.083759] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76130.627770] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76132.295711] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76133.915754] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76135.991710] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76137.535687] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76139.871685] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76140.419647] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76142.467686] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76144.011618] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76145.679630] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76147.296696] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 328 ms for reset completion.
+[76149.348615] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76150.883764] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76152.639545] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76154.259757] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76157.071498] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76157.599502] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76160.043450] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76160.591532] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76162.756685] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76164.959440] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76165.515432] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 340 ms for reset completion.
+[76167.135388] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 328 ms for reset completion.
+[76169.289555] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76171.503380] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76172.683398] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76173.883387] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76174.783320] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76176.327345] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 340 ms for reset completion.
+[76178.667321] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76179.188498] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76181.327350] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76183.543273] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76184.095267] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76185.815240] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 328 ms for reset completion.
+[76188.623201] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76189.150385] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76190.816971] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76192.441170] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76194.493508] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76196.025264] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 328 ms for reset completion.
+[76197.691142] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76199.411920] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76202.123150] snd-reloop-jockey3 1-3:1.0: Timeout waiting for reset completion
+[76202.643843] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 328 ms for reset completion.
+[76204.311118] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 340 ms for reset completion.
+[76205.931145] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 332 ms for reset completion.
+[76208.001252] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 336 ms for reset completion.
+[76209.543017] snd-reloop-jockey3 1-3:1.0: jockey3_pcm_prepare waited 328 ms for reset completion.
