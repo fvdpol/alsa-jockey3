@@ -152,16 +152,38 @@ sudo apt install qemu-system-x86 qemu-system-arm qemu-system-misc opensbi \
 sudo apt install gcc-s390x-linux-gnu
 ```
 
+> If a cross build fails with something like
+> `ar: arch/x86/kernel/static_call.o: No such file or directory`, it is a
+> parallel-make race in the kernel build, not a problem with the tests. Simply
+> re-run — the second pass picks up where it left off.
+
 ### Which targets matter, and why
 
-| Target | What it exercises |
-|---|---|
-| `um` | The fast path for everyday work. x86_64, 64-bit codec. |
-| `i386` | The `lut32`/`pack32` branch as the kernel really builds it. |
-| `arm` | Strict alignment, 32-bit — the same shape as the Raspberry Pi 1B. |
-| `arm64` | Reproducible arm64 coverage without plugging in the Pi 4. |
-| `riscv` | Genuinely untested territory; no hardware here at all. |
-| `s390` | Big-endian. Not a realistic platform for this device, but the only way to exercise the `get/put_unaligned_le*` paths in anger. Opt-in via `--extra`. |
+| Target | What it exercises | Status |
+|---|---|---|
+| `um` | The fast path for everyday work. x86_64, 64-bit codec. | 75/75 |
+| `i386` | The `lut32`/`pack32` branch as the kernel really builds it. | 75/75 |
+| `arm` | Strict alignment, 32-bit — the same shape as the Raspberry Pi 1B. | 75/75 |
+| `arm64` | Reproducible arm64 coverage without plugging in the Pi 4. | 75/75 |
+| `riscv` | Genuinely untested territory; no hardware here at all. | 75/75 |
+| `s390` | Big-endian. Not a realistic platform for this device, but the only way to exercise the `get/put_unaligned_le*` paths in anger. Opt-in via `--extra`. | 75/75 |
+
+### Two per-architecture config quirks
+
+Both are handled by `run_kunit.sh`; they are recorded here because they are
+non-obvious and cost time to rediscover.
+
+**UML cannot reach `CONFIG_USB`.** It disables IOMEM by default, which makes
+`USB_SUPPORT` — and with it all of `sound/usb` — unselectable. The only
+user-selectable way in is `CONFIG_UML_PCI_OVER_VIRTIO`, which pulls in the
+IOMEM emulation. Those symbols live in `arch/um` and do not exist elsewhere,
+and kunit.py errors on any requested option it cannot satisfy, so they are in
+a separate `.kunitconfig.um` fragment rather than the main `.kunitconfig`.
+Putting them in the base file makes *every non-UML target fail to configure*.
+
+**s390 needs `CONFIG_PCI=y`.** `arch/s390/Kconfig` has
+`config HAS_IOMEM / def_bool PCI`, so without PCI there is no IOMEM, hence no
+`SOUND` and no `USB_SUPPORT` — the same failure as UML, by a different route.
 
 ### The separate worktree
 

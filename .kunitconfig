@@ -1,15 +1,5 @@
 CONFIG_KUNIT=y
 
-# UML disables IOMEM by default, which puts USB_SUPPORT - and with it the
-# whole sound/usb tree - out of reach. UML_PCI_OVER_VIRTIO selects UML_PCI,
-# which pulls in the IOMEM emulation that makes CONFIG_USB selectable, so the
-# driver builds under UML and the codec tests run without needing QEMU.
-# VIRTIO_UML is a dependency of UML_PCI_OVER_VIRTIO, not an optional extra.
-CONFIG_VIRTIO=y
-CONFIG_VIRTIO_UML=y
-CONFIG_UML_PCI_OVER_VIRTIO=y
-CONFIG_UML_PCI_OVER_VIRTIO_DEVICE_ID=1
-
 CONFIG_SOUND=y
 CONFIG_SND=y
 CONFIG_SND_PCM=y

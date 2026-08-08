@@ -565,7 +565,7 @@ static void ploytec_test_encode_batch_zero_frames(struct kunit *test)
 
 	for (size_t i = 0; i < sizeof(dest); i++)
 		KUNIT_EXPECT_EQ_MSG(test, dest[i], PLOYTEC_TEST_GUARD_BYTE,
-				    "encode of 0 frames wrote to dest[%d]", i);
+				    "encode of 0 frames wrote to dest[%zu]", i);
 }
 
 static void ploytec_test_decode_batch_zero_frames(struct kunit *test)
@@ -578,7 +578,7 @@ static void ploytec_test_decode_batch_zero_frames(struct kunit *test)
 
 	for (size_t i = 0; i < sizeof(dest); i++)
 		KUNIT_EXPECT_EQ_MSG(test, dest[i], PLOYTEC_TEST_GUARD_BYTE,
-				    "decode of 0 frames wrote to dest[%d]", i);
+				    "decode of 0 frames wrote to dest[%zu]", i);
 }
 
 static void ploytec_test_encode_batch_no_overrun(struct kunit *test)
@@ -747,7 +747,7 @@ static void ploytec_test_encode_reserved_bits_clear(struct kunit *test)
 
 		for (size_t i = 0; i < sizeof(dest); i++)
 			KUNIT_ASSERT_EQ_MSG(test, dest[i] & 0xFC, 0,
-					    "wire byte %d has reserved bits set (%#04x)",
+					    "wire byte %zu has reserved bits set (%#04x)",
 					    i, dest[i]);
 
 		ploytec_rng_fill(&rng, src, sizeof(src));
