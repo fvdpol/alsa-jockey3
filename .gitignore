@@ -12,3 +12,5 @@ modules.order
 tests/test_codec
 tests/ploytec_codec.c
 tests/ploytec_codec.h
+__pycache__/
+tests/build/
