@@ -84,3 +84,17 @@ For any active channel, bit `k` of byte `slice_offset + n` (0 <= n < 24) maps to
   - Bit 3: Unused.
 
 note that the microphone input has the output of the analog front-end connected to both the L and R inputs for the PCM 1803A ADC; so both channels will carry the same (mono) signal.
+
+
+## LED Patterns
+
+The following LED patterns have been observed and their meanings deduced:
+
+| Pattern | When it happens | What it means |
+|---------|-----------------|---------------|
+| **Vertical sweep** (bottom-top-bottom, once) | Right after powering on | Hardware self-test / lamp test completed. |
+| **Horizontal back-and-forth** (repeating) | Powered on, no USB/MIDI activity for ~1 min | Stand-alone demo / "attract mode". |
+| **Normal MIDI response** | Connected to host + first MIDI OUT event received | Standard operation. The attract mode stops as soon as ANY MIDI event is sent to the device (e.g., toggling an LED via `amidi` or a DJ application). |
+
+The "attract mode" does not stop upon a successful handshake alone; it requires at least one MIDI OUT message to transition the firmware into normal operation mode. This has been confirmed with the current driver implementation.
+
