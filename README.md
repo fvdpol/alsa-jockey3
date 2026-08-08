@@ -80,7 +80,7 @@ bench compares every variant against the others and doubles as a workbench for
 developing new ones. Both are checked against an independent model of the wire
 format, so they cannot agree on a wrong answer.
 
-See **[docs/testing.md](docs/testing.md)** for the full guide, including how to
+See **[docs/codec_testing.md](docs/codec_testing.md)** for the full guide, including how to
 develop and promote a new codec implementation.
 
 
