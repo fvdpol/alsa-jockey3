@@ -61,6 +61,7 @@ that way.
 | `actions/` | Small reusable steps (load the driver, play a tone, change rate). |
 | `checklist.py` | Renders manual cases to a checklist and reads the answers back. |
 | `ledger.py` | What has been tested, on what, how recently — and metric trends. |
+| `selftest.py` | Tests for the framework itself. No hardware, no root. |
 | `results/` | Generated; git-ignored. |
 
 ```sh
@@ -69,6 +70,7 @@ cd tests/hw
 ./runner.py --profile smoke --dry-run     # what would run here
 sudo ./runner.py --profile smoke          # run it
 ./ledger.py                               # coverage and staleness
+./selftest.py                             # check the framework itself
 ```
 
 The runner executes **on the machine with the hardware attached**, not on a
