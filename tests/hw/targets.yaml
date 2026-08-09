@@ -1,0 +1,159 @@
+# Targets: an architecture paired with a named kernel configuration.
+#
+#   <architecture>-<kernelconfig>      e.g. x86_64-debug, arm64-prod
+#
+# A target describes *what was built*, not *which box it runs on*. A debug
+# kernel is a genuinely different test environment, not the same one with extra
+# logging -- KASAN and lockdep change timing enough both to expose races that
+# production builds hide and to mask races that only appear at full speed. So
+# each configuration is its own target with its own coverage record, and it
+# does not matter whether a given run happened on one EliteDesk or another.
+#
+# Which machine it was is environment context -- hostname, CPU, memory, the
+# exact kernel build -- recorded in the run, never part of the target identity.
+#
+# Identity comes from LOCALVERSION
+# -------------------------------
+# Each configuration sets a distinctive LOCALVERSION, so the kernel names its
+# own target and `uname -r` is enough to know what you are running:
+#
+#     7.2.0-rc5-alsa-debug        ->  x86_64-debug
+#     6.12.0-alsa-prod            ->  arm64-prod   (on aarch64)
+#
+# Put it in the config as CONFIG_LOCALVERSION="-alsa-debug" rather than passing
+# LOCALVERSION= on the make command line: in the config it travels with the
+# configuration, survives `make bindeb-pkg` for the Pis, and shows up in
+# `uname -r` on the booted machine. Matching is by substring, so the trailing
+# "+" that setlocalversion adds for an untagged git tree does not matter.
+#
+# Probing for KASAN instead would be guesswork: it cannot tell a deliberate
+# debug kernel from a distribution kernel that happens to enable lockdep, and
+# it says nothing at all about the many other options that make these
+# configurations different. The kconfig entries below are therefore a
+# CONSISTENCY CHECK -- a kernel calling itself -alsa-prod with KASAN enabled is
+# a mislabeled build, and the runner says so -- not the identity test.
+#
+# `capabilities` are the tokens a case's `requires` list is checked against; a
+# case whose requirements are not met is recorded as blocked, never silently
+# dropped.
+
+version: 1
+
+capabilities:
+  device:           A Reloop Jockey 3 is attached and enumerated
+  root:             The runner can load and unload modules
+  kernel-tree:      A kernel source tree is available for L1/L2 gates
+  cross-toolchains: Cross compilers for the other target architectures
+  qemu:             QEMU system emulation for cross-architecture KUnit
+  sox:              sox is installed, for tone generation
+  speakers:         Monitoring is connected and audible
+  human:            An operator is present to observe and answer
+  mixxx:            Mixxx is installed and configured for the device
+  rtc-wake:         rtcwake can suspend and wake the machine
+  python-mido:      mido and python-rtmidi are available
+  loopback-cable:   Outputs are cabled back into the device's own inputs
+  signal-source:    A signal source is connected to the device's inputs
+  two-devices:      Both Jockey 3 units are available to swap between
+  usb-switch:       Programmable USB port power/data switching
+  relay:            Programmable mains relay for power cycling
+  gadget-emulation: USB gadget or dummy_hcd for malformed-descriptor tests
+  quiet-machine:    The machine is otherwise idle, for trustworthy benchmarks
+
+# Canonical architecture tokens: x86_64, i386, armhf, arm64.
+# uname -m values are normalized onto these (armv6l/armv7l -> armhf,
+# aarch64 -> arm64, i686/i586 -> i386), as are the kernel config symbols
+# (CONFIG_X86_64, CONFIG_X86_32, CONFIG_ARM64, CONFIG_ARM).
+
+targets:
+
+  x86_64-debug:
+    arch: x86_64
+    flavor: debug
+    localversion: '-alsa-debug'
+    config: tests/configs/x86_64-debug.config
+    typical_machine: HP EliteDesk 800 G2 (tiny), i5, 64 GB RAM, 1 TB NVMe
+    verify:
+      kconfig_any: [KASAN, KASAN_GENERIC, PROVE_LOCKING]
+    capabilities:
+      [device, root, kernel-tree, sox, speakers, human, mixxx, rtc-wake,
+       python-mido]
+    role: >
+      Primary target. Memory errors and lock inversions surface here or
+      nowhere, so anything touching URB lifetime, locking or the reset path
+      must be run here before it is believed.
+
+  x86_64-prod:
+    arch: x86_64
+    flavor: prod
+    localversion: '-alsa-prod'
+    config: tests/configs/x86_64-prod.config
+    typical_machine: HP EliteDesk 800 G2 (tiny), i5, 64 GB RAM, 1 TB NVMe
+    verify:
+      kconfig_none: [KASAN, KASAN_GENERIC, PROVE_LOCKING]
+    capabilities:
+      [device, root, kernel-tree, sox, speakers, human, mixxx, rtc-wake,
+       python-mido, quiet-machine]
+    role: >
+      Realistic timing. Latency figures, throughput metrics and long soaks
+      belong here, because KASAN distorts every number worth recording.
+
+  arm64-prod:
+    arch: arm64
+    flavor: prod
+    localversion: '-alsa-prod'
+    config: tests/configs/arm64-prod.config      # not created yet
+    typical_machine: Raspberry Pi 4B, 2 GB
+    verify:
+      kconfig_none: [KASAN, KASAN_GENERIC, PROVE_LOCKING]
+    capabilities: [device, root, sox, speakers, human, python-mido, mixxx]
+    role: >
+      Second architecture, and more importantly a second USB host controller.
+      The Pi 4 uses dwc2 rather than xhci, which behaves differently under load
+      and on disconnect -- a behavioral difference, not a detail.
+
+  arm64-debug:
+    arch: arm64
+    flavor: debug
+    localversion: '-alsa-debug'
+    config: tests/configs/arm64-debug.config     # not created yet
+    typical_machine: Raspberry Pi 4B, 2 GB
+    verify:
+      kconfig_any: [KASAN, KASAN_GENERIC, PROVE_LOCKING]
+    capabilities: [device, root, sox, speakers, human, python-mido]
+    role: >
+      Lock and memory checking on the dwc2 host controller. Slow on a Pi 4, so
+      reserved for changes to URB lifetime or the reset path.
+
+  armhf-prod:
+    arch: armhf
+    flavor: prod
+    localversion: '-alsa-prod'
+    config: tests/configs/armhf-prod.config      # not created yet
+    typical_machine: Raspberry Pi 1B, 512 MB
+    verify:
+      kconfig_none: [KASAN, KASAN_GENERIC, PROVE_LOCKING]
+    capabilities: [device, root, sox, speakers, human]
+    role: >
+      The 32-bit codec path on real hardware, uniprocessor and without
+      preemption -- which makes sleeping in atomic context fatal here and
+      benign everywhere else. Slow, and switching kernels on it is painful, so
+      it earns a bounded smoke pass rather than a scaled-down full suite.
+    constraints:
+      - Very slow; keep total runtime under ~20 minutes.
+      - High sample rates are unreliable; run 44.1 and 48 kHz only.
+      - No Mixxx, no benchmarking.
+
+  i386-prod:
+    arch: i386
+    flavor: prod
+    localversion: '-alsa-prod'
+    config: tests/configs/i386-prod.config       # not created yet
+    typical_machine: Not yet set up -- planned as multi-boot on the EliteDesk
+    verify:
+      kconfig_none: [KASAN, KASAN_GENERIC, PROVE_LOCKING]
+    capabilities: []
+    role: >
+      The 32-bit codec on a fast machine. Currently covered only by L1 and L2;
+      hardware bring-up is planned before submission, not before it is
+      convenient.
+    status: not-yet-available

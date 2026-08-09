@@ -1,0 +1,116 @@
+# Global kernel-message classification rules.
+#
+# Per-case expectations live in catalog.yaml under `expect_dmesg`; this file
+# holds what is true regardless of which case is running.
+#
+# The important thing this file encodes: "no warnings" is NOT a pass criterion
+# for this driver. Capture stall after a rate change is expected on a healthy
+# build, and the driver logs it deliberately on every occurrence so that stall
+# frequency can be tracked. A rule set that failed on warnings would fail every
+# run on a perfectly good driver.
+
+version: 1
+
+# Messages from our driver that are normal anywhere. Counted and reported as
+# metrics, never failures.
+benign:
+  - pattern: 'Playback URB has stalled\.'
+    metric: stalls_playback
+    why: >
+      Logged on every stall regardless of whether recovery follows, so that
+      frequency can be tracked. Recovery is what matters, not occurrence.
+  - pattern: 'Capture URB has stalled\.'
+    metric: stalls_capture
+    why: Same as playback -- expected, tracked, not a failure.
+  - pattern: 'Resetting device to recover from stall after rate change'
+    metric: resets_full
+    why: The documented mitigation working as designed.
+  - pattern: 'waited (\d+) ms for reset completion'
+    metric: reset_wait_ms
+    capture: 1
+    why: >
+      The value is the metric. Its distribution is the early-warning signal for
+      the rate-change path, more useful than any single verdict.
+  - pattern: 'stopped after \d+ consecutive URB errors; deferring recovery'
+    metric: urb_error_giveup
+    why: >
+      Routine on unplug -- all eight in-flight URBs error at once -- so this is
+      the normal path into disconnect, not an exotic one.
+  # KUnit TAP scaffolding around the codec suite at module load. It is our
+  # output, so it is classified here rather than as unrelated noise -- the
+  # unrelated list is only consulted for lines that are not ours at all.
+  # The verdicts are handled elsewhere: passes are counted from the summary
+  # line below, failures are in driver_fail.
+  - pattern: '^\s*# Subtest: ploytec'
+  - pattern: '^\s*ok \d+ ploytec'
+  - pattern: '# ploytec-codec: pass:(\d+)'
+    metric: kunit_passed_on_target
+    capture: 1
+    why: >
+      With CONFIG_SND_USB_JOCKEY3_CODEC_KUNIT_TEST the codec suite runs at
+      every module load, so the driver validates its own codec on the real
+      hardware and real toolchain -- not just under QEMU. The pass count is
+      worth recording; a drop from 75 means the build regressed.
+
+# Messages from our driver that are never acceptable, whatever the case.
+driver_fail:
+  - pattern: 'not ok \d+ .*ploytec'
+    why: >
+      A codec KUnit case failed on the target. The codec is the one part of
+      this driver that is provably correct or provably not, so this is never
+      ambiguous.
+  - pattern: 'Inconsistent URB in-flight count'
+    why: A self-check assertion in the driver. If it fires, accounting is wrong.
+  - pattern: 'Timeout draining .* URB callbacks'
+    why: >
+      sync_stop gave up waiting. The next thing to happen is a use-after-free.
+  - pattern: 'Rate mismatch'
+    why: The hardware is not at the rate the driver believes it is at.
+  - pattern: 'Capture URB too small'
+    why: Endpoint delivered less than a packet; the format assumption is broken.
+  - pattern: 'hardware may need power-cycling'
+    why: >
+      The give-up path. Recovery escalated all the way through a full USB reset
+      and the stream is still dead.
+
+# Anything matching these is a defect, not a test failure. The run is marked
+# INVESTIGATE and the remaining profile is abandoned: the machine needs manual
+# attention, and the right response is to open an issue and look at it -- not
+# to retry, and not to record a count and carry on.
+investigate:
+  - pattern: 'BUG:'
+  - pattern: 'WARNING:'
+  - pattern: 'Call Trace:'
+  - pattern: 'KASAN:'
+  - pattern: 'UBSAN:'
+  - pattern: 'possible circular locking dependency'
+  - pattern: 'possible recursive locking'
+  - pattern: 'INFO: task .* blocked for more than'
+  - pattern: 'general protection fault'
+  - pattern: 'unable to handle (kernel )?(page fault|NULL pointer)'
+  - pattern: 'Oops'
+  - pattern: 'kernel panic'
+  - pattern: 'list_add corruption'
+  - pattern: 'refcount_t:'
+
+# Known-unrelated noise from the rest of the system. Ignored entirely.
+#
+# Keep this list short and justified. The temptation is to add anything that
+# shows up twice; the cost is that a real message eventually matches one of
+# these patterns and disappears. Prefer leaving something unclassified -- an
+# unclassified line costs one glance, a wrongly ignored line costs a bug.
+unrelated:
+  # Generic KUnit/TAP framing. Unlike the ploytec-named lines above these
+  # carry nothing identifying them as ours, and any suite in the kernel emits
+  # them, so they are framework noise rather than driver output.
+  - pattern: '^\s*(KTAP|TAP) version \d'
+  - pattern: '^\s*1\.\.\d+$'
+  - pattern: 'usb \d+-[\d.]+: new (high|full|super)-speed USB device'
+  - pattern: 'usb \d+-[\d.]+: New USB device (found|strings)'
+  - pattern: 'usb \d+-[\d.]+: (Product|Manufacturer|SerialNumber):'
+  - pattern: 'usb \d+-[\d.]+: USB disconnect'
+  - pattern: 'input: .* as /devices/'
+  - pattern: 'systemd\['
+  - pattern: 'audit:'
+  - pattern: 'perf: interrupt took too long'
+  - pattern: 'pipewire|wireplumber|pulseaudio'

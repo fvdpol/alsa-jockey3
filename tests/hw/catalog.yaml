@@ -1,0 +1,732 @@
+# Test catalog for the Reloop Jockey 3 driver.
+#
+# The register of every test case, whether or not it is implemented yet. A
+# catalog that lists only what already works cannot show a gap, and showing
+# gaps is half the point -- so unimplemented cases are listed with
+# `status: planned` and appear in coverage reports as untested.
+#
+# See ../../docs/test_strategy.md for what the levels and areas mean.
+#
+# Fields
+#   id            JT-<AREA>-<nnn>. Stable forever. Never encodes level or mode.
+#   title         One line, imperative or descriptive.
+#   area          BUILD CODEC PROBE PCM RATE AUDIO MIDI PM HOTPLUG SOAK
+#   level         L1..L5 -- scope of what is exercised, not who runs it.
+#   mode          automated | manual | semi-automated
+#   status        implemented | planned
+#   requires      capability tokens the target must provide (see targets.yaml)
+#   exec          automated only: script under cases/, relative to tests/hw
+#   args          automated only: fixed arguments appended to exec
+#   params        default parameters; profiles may override per target
+#   metrics       names of values this case records beyond pass/fail
+#   pass          what counts as a pass
+#   expect_dmesg  driver messages that are NORMAL for this case (regexes)
+#   steps         manual only: what the operator does
+#   notes         anything worth knowing before running or changing it
+
+version: 1
+
+areas:
+  BUILD:   Source as text and as a compilation unit
+  CODEC:   The Ploytec bit-plane codec in isolation
+  PROBE:   Enumeration, binding, module lifecycle
+  PCM:     PCM substream lifecycle, formats, limits
+  RATE:    Sample-rate switching and its recovery paths
+  AUDIO:   Audio actually produced and captured
+  MIDI:    Control surface in, LEDs out, running status
+  PM:      Suspend, resume, reset
+  HOTPLUG: Disconnect, replug, power loss
+  SOAK:    Endurance and high repetition
+
+cases:
+
+  # ------------------------------------------------------------------ BUILD
+
+  - id: JT-BUILD-001
+    title: checkpatch --strict against the upstream base
+    area: BUILD
+    level: L1
+    mode: automated
+    status: implemented
+    requires: [kernel-tree]
+    exec: cases/build_gate.py
+    args: [checkpatch]
+    metrics: [checkpatch_warnings]
+    pass: No checkpatch errors or warnings on the diff against origin/for-next.
+    notes: >
+      FILE_PATH_CHANGES is ignored -- checkpatch raises it on the first added
+      file of any patch without checking whether MAINTAINERS was touched, and
+      this series does update MAINTAINERS.
+
+  - id: JT-BUILD-002
+    title: Build clean at W=12
+    area: BUILD
+    level: L1
+    mode: automated
+    status: implemented
+    requires: [kernel-tree]
+    exec: cases/build_gate.py
+    args: [build]
+    metrics: [build_warnings]
+    pass: Module builds with zero warnings at W=12.
+    notes: >
+      Two -Wshadow warnings are expected and are not defects: 'index' in
+      jockey3.c is the standard ALSA module-param idiom, and '__ret' comes from
+      the wait_event_lock_irq_timeout() macro. Both are filtered, not silenced.
+
+  - id: JT-BUILD-003
+    title: Documentation gates -- kernel-doc, codespell, rst
+    area: BUILD
+    level: L1
+    mode: automated
+    status: implemented
+    requires: [kernel-tree]
+    exec: cases/build_gate.py
+    args: [docs]
+    metrics: []
+    pass: kernel-doc -Wall -Werror, codespell and rst2html --strict all clean.
+
+  - id: JT-BUILD-004
+    title: Module size
+    area: BUILD
+    level: L1
+    mode: automated
+    status: implemented
+    requires: [kernel-tree]
+    exec: cases/build_gate.py
+    args: [size]
+    metrics: [ko_bytes, text_bytes, data_bytes, bss_bytes]
+    pass: Metric-only. Records size; never fails.
+    notes: >
+      Answers "why did it grow fat?". Deliberately has no threshold -- a
+      threshold would either be too loose to catch anything or would fail the
+      build for a legitimate feature.
+
+  - id: JT-BUILD-005
+    title: Cross-compile for every target architecture
+    area: BUILD
+    level: L1
+    mode: automated
+    status: planned
+    requires: [kernel-tree, cross-toolchains]
+    metrics: [arches_built]
+    pass: The module builds for x86_64, i386, arm64 and armhf.
+    notes: >
+      Catches arch-specific breakage without hardware. Partly covered today by
+      the KUnit cross matrix, which builds the driver for six architectures as
+      a side effect.
+
+  # ------------------------------------------------------------------ CODEC
+
+  - id: JT-CODEC-001
+    title: KUnit codec suite under UML
+    area: CODEC
+    level: L2
+    mode: automated
+    status: implemented
+    requires: [kernel-tree]
+    exec: cases/codec_kunit.py
+    args: [um]
+    metrics: [tests_run, tests_passed]
+    pass: All 75 tests pass.
+
+  - id: JT-CODEC-002
+    title: User-space bench correctness, all codec variants
+    area: CODEC
+    level: L2
+    mode: automated
+    status: implemented
+    requires: []
+    exec: cases/codec_bench.py
+    args: [test]
+    metrics: [variants_tested]
+    pass: reference, opt64, opt32 and every candidate agree with the golden vectors.
+    notes: >
+      Also fails if build/src has drifted from the driver source, so a result
+      cannot be attributed to the wrong revision.
+
+  - id: JT-CODEC-003
+    title: KUnit codec suite across the full architecture matrix
+    area: CODEC
+    level: L2
+    mode: automated
+    status: planned
+    requires: [kernel-tree, cross-toolchains, qemu]
+    params:
+      targets: [um, i386, arm64, arm, riscv]
+    metrics: [tests_run, tests_passed, arches_run]
+    pass: 75/75 on every architecture.
+    notes: >
+      Slow (minutes per architecture). Belongs in regression, not smoke.
+      s390 is opt-in via --extra and exists purely as a big-endian proof.
+
+  - id: JT-CODEC-004
+    title: KUnit codec suite against the portable reference codec
+    area: CODEC
+    level: L2
+    mode: automated
+    status: planned
+    requires: [kernel-tree]
+    metrics: [tests_run, tests_passed]
+    pass: 75/75 with CONFIG_SND_USB_JOCKEY3_REFERENCE_CODEC=y.
+    notes: >
+      The reference codec is what the optimized variants are validated against,
+      so it must itself be validated against the golden vectors.
+
+  - id: JT-CODEC-005
+    title: Codec throughput benchmark
+    area: CODEC
+    level: L2
+    mode: automated
+    status: planned
+    requires: [quiet-machine]
+    metrics: [encode_mbps, decode_mbps, encode_speedup, decode_speedup]
+    pass: Metric-only.
+    notes: >
+      Must run natively -- QEMU timings are meaningless. Needs a machine that
+      is otherwise idle, so it is not part of any routine profile.
+
+  # ------------------------------------------------------------------ PROBE
+
+  - id: JT-PROBE-001
+    title: Module load and unload cycle
+    area: PROBE
+    level: L3
+    mode: automated
+    status: implemented
+    requires: [device, root]
+    exec: cases/probe_cycle.py
+    params:
+      iterations_per_run: 3
+    metrics: [probe_ms, load_ms, unload_ms]
+    pass: >
+      The card appears with a playback and a capture substream and one rawmidi
+      device after every load, and unloads cleanly every time.
+    expect_dmesg:
+      - 'Firmware 0x[0-9a-f]{2} v\d+\.\d+\.\d+'
+    notes: >
+      Also the case that captures srcversion and firmware revision for the run,
+      so it should run early in every profile.
+
+  - id: JT-PROBE-002
+    title: Unbind and rebind stress
+    area: PROBE
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, root]
+    params:
+      iterations_per_run: 50
+    metrics: [bind_ms, unbind_ms]
+    pass: No memory errors, no double free, no leak across the cycles.
+    notes: >
+      Derived from scripts-alsa-dev/bind_unbind_test.sh. The reason it exists:
+      devres was replaced with manual devm actions (jockey3_kfree_action), so
+      the plausible regression is a leak or double free on the init-failure and
+      disconnect paths. Only meaningful on a KASAN kernel.
+
+  - id: JT-PROBE-003
+    title: Card slot reuse across repeated unplug and replug
+    area: PROBE
+    level: L3
+    mode: semi-automated
+    status: planned
+    requires: [device, root, usb-switch]
+    metrics: [slots_used]
+    pass: The card index is released and reused; no slot leak after many cycles.
+    notes: >
+      Slot allocation is a bitmap under a mutex. Needs programmable USB port
+      switching to be worth automating; until then it is a manual spot check.
+
+  - id: JT-PROBE-004
+    title: Reject a device with missing or malformed endpoints
+    area: PROBE
+    level: L3
+    mode: automated
+    status: planned
+    requires: [gadget-emulation]
+    pass: probe() fails cleanly with no resource leak.
+    notes: >
+      jockey3_validate_endpoints() is an error path that real hardware can
+      never exercise. Would need a USB gadget or dummy_hcd emulating a
+      malformed descriptor. Low priority, high novelty.
+
+  # -------------------------------------------------------------------- PCM
+
+  - id: JT-PCM-001
+    title: PCM open and close cycling
+    area: PCM
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device]
+    params:
+      iterations_per_run: 100
+    metrics: [open_ms]
+    pass: Every open succeeds and every close releases the substream.
+    notes: Derived from scripts-alsa-dev/test_open_close.sh.
+
+  - id: JT-PCM-002
+    title: Playback at each supported rate
+    area: PCM
+    level: L3
+    mode: automated
+    status: implemented
+    requires: [device, sox]
+    exec: cases/pcm_playback.py
+    params:
+      rates: [44100, 48000, 88200, 96000]
+      seconds: 3
+    metrics: [xruns, first_audio_ms]
+    pass: >
+      Playback runs to completion at every requested rate with no xruns
+      reported by the PCM status.
+    expect_dmesg:
+      - 'Playback URB has stalled\.'
+
+  - id: JT-PCM-003
+    title: Period and buffer size boundary matrix
+    area: PCM
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, sox]
+    params:
+      period_sizes: [minimum, 120, 144, 1024, maximum]
+      period_counts: [2, 4, 1024]
+    metrics: [xruns, configs_accepted, configs_rejected]
+    pass: >
+      Every configuration inside the advertised limits works; every one outside
+      is refused rather than accepted and then failing.
+    notes: >
+      From buffer_limits_validation.md. period_bytes_min is 120 for playback
+      and 144 for capture, matching one URB payload. The interesting inputs are
+      sizes that are not multiples of the frame size (12 bytes playback,
+      18 capture), because the packet loop's wrap-around arithmetic depends on
+      that division.
+
+  - id: JT-PCM-004
+    title: Capture at each supported rate
+    area: PCM
+    level: L3
+    mode: automated
+    status: implemented
+    requires: [device]
+    exec: cases/pcm_capture.py
+    params:
+      rates: [44100, 48000, 88200, 96000]
+      seconds: 3
+    metrics: [xruns, captured_bytes, nonzero_channels]
+    pass: >
+      Capture produces the expected byte count at every rate. With nothing
+      connected to the inputs the data may be silent, so silence is not a
+      failure here -- JT-AUDIO-004 is what checks signal presence.
+    expect_dmesg:
+      - 'Capture URB has stalled\.'
+
+  - id: JT-PCM-005
+    title: Simultaneous playback and capture
+    area: PCM
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, sox]
+    params:
+      rates: [44100, 96000]
+    metrics: [xruns_playback, xruns_capture]
+    pass: Both directions run concurrently without xruns.
+    notes: >
+      Full duplex is the normal DJ case and stresses both URB rings and the
+      lock ordering at once.
+
+  - id: JT-PCM-006
+    title: Unsupported hw_params are refused
+    area: PCM
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device]
+    pass: >
+      Wrong channel counts, unsupported formats and unsupported rates are
+      rejected at hw_params rather than accepted and then misbehaving.
+    notes: >
+      Channels are fixed (4 playback, 6 capture) and the only format is
+      S24_3LE, so this is a short, cheap and genuinely useful case.
+
+  - id: JT-PCM-007
+    title: Achievable latency sweep
+    area: PCM
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, sox]
+    metrics: [min_clean_period_bytes, min_clean_latency_ms]
+    pass: Metric-only. Records the smallest period size that runs clean.
+    notes: >
+      A better latency number than any single measurement, and directly
+      comparable across builds -- provided the machine profile matches.
+
+  # ------------------------------------------------------------------- RATE
+
+  - id: JT-RATE-001
+    title: Sample-rate change loop
+    area: RATE
+    level: L3
+    mode: automated
+    status: implemented
+    requires: [device, sox]
+    exec: cases/rate_change.py
+    params:
+      rates: [44100, 48000, 88200, 96000]
+      seconds_per_rate: 1
+      iterations_per_run: 10
+    metrics:
+      [stalls, stalls_recovered, resets_full, reset_wait_ms_histogram, failures]
+    pass: >
+      Every rate change ends with a working stream. A stall that recovers is a
+      PASS and is counted; a stall that survives a full USB reset is a FAIL.
+    expect_dmesg:
+      - 'Playback URB has stalled\.'
+      - 'Capture URB has stalled\.'
+      - 'Resetting device to recover from stall after rate change'
+      - 'waited \d+ ms for reset completion'
+    notes: >
+      THE most important case in this catalog, and the one with the least
+      obvious criterion. Capture stall after a rate change is expected on a
+      healthy build -- the driver logs it deliberately so frequency can be
+      tracked. "No warnings" would fail every run on a perfectly good driver.
+      Worst case is a downward switch, so the rate list should not be sorted.
+
+  - id: JT-RATE-002
+    title: Sample-rate change under full duplex
+    area: RATE
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, sox]
+    metrics: [stalls, stalls_recovered, resets_full, failures]
+    pass: Same criterion as JT-RATE-001, with capture open throughout.
+    notes: >
+      From scripts-alsa-dev/test_rate_change_fdx.sh. Materially different from
+      JT-RATE-001 because the recovery path is direction-aware: a capture stall
+      triggers a reset only when a capture substream is open, and defers
+      otherwise.
+
+  - id: JT-RATE-003
+    title: Rate change endurance
+    area: RATE
+    level: L5
+    mode: automated
+    status: planned
+    requires: [device, sox]
+    params:
+      iterations_per_run: 5000
+    metrics: [stalls_per_1000, resets_full, reset_wait_ms_histogram, failures]
+    pass: Stall rate stable, every stall recovered, no escalation to give-up.
+    notes: >
+      The long-running version of JT-RATE-001, historically run for ten hours
+      at a time. The metric that matters is whether the stall rate drifts.
+
+  # ------------------------------------------------------------------ AUDIO
+
+  - id: JT-AUDIO-001
+    title: Channel map sweep -- each output in turn
+    area: AUDIO
+    level: L3
+    mode: manual
+    status: implemented
+    requires: [device, speakers, human]
+    params:
+      rates: [44100, 48000, 88200, 96000]
+    pass: >
+      Each of the four playback channels produces a tone from the correct
+      physical output, at the correct pitch, one at a time.
+    steps:
+      - Run actions/play_channel_sweep.sh <rate>.
+      - >
+        Confirm four tones in order: Master L (E3), Master R (A3),
+        Headphone L (D4), Headphone R (G4).
+      - Confirm each sounds from one output only, and at the expected pitch.
+      - Repeat for each rate under test.
+    notes: >
+      Pitch matters as much as presence: a wrong pitch at the right channel
+      means the rate was not actually applied. From the test_channels_*.sh
+      family.
+
+  - id: JT-AUDIO-002
+    title: Output presence and channel map via loopback
+    area: AUDIO
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, loopback-cable]
+    params:
+      rates: [44100, 48000, 88200, 96000]
+    metrics: [rms_per_channel, crosstalk_db]
+    pass: >
+      A tone played to one channel appears above threshold on the corresponding
+      capture channel and below threshold on the others.
+    notes: >
+      Uses the device's own I/O -- master out into In 1, headphone out into
+      In 2 -- so no second sound card is needed. RMS presence only. Artifacts
+      and distortion are left to the ear, which is better at it.
+
+  - id: JT-AUDIO-003
+    title: Real content playback, listened to
+    area: AUDIO
+    level: L4
+    mode: manual
+    status: implemented
+    requires: [device, speakers, human]
+    pass: >
+      Music plays cleanly: no clicks, dropouts, distortion, or channel
+      swapping, at each rate tried.
+    steps:
+      - Play a known-good FLAC or WAV to the device (actions/play_file.sh).
+      - Listen on Master and on Headphones.
+      - Note anything audible, however minor, in the comment field.
+    notes: >
+      The only test that can catch codec packing errors as they actually
+      manifest. Worth doing at 44.1 and 96 kHz at minimum.
+
+  - id: JT-AUDIO-004
+    title: Capture signal presence
+    area: AUDIO
+    level: L3
+    mode: semi-automated
+    status: planned
+    requires: [device, signal-source]
+    metrics: [rms_per_channel]
+    pass: All six capture channels carry signal when driven.
+    notes: >
+      In1 L/R, In2 L/R and the microphone, which is mono duplicated across
+      channels 5 and 6. Mic level is known to be lower than under Windows --
+      Windows applies software gain -- so this is not a defect.
+
+  # ------------------------------------------------------------------- MIDI
+
+  - id: JT-MIDI-001
+    title: Control surface events reach userspace
+    area: MIDI
+    level: L3
+    mode: manual
+    status: implemented
+    requires: [device, human]
+    pass: >
+      Button presses, fader and knob movements, and jog wheel rotation all
+      produce MIDI events.
+    steps:
+      - Run scripts-alsa-dev/miditest/miditest.py and press 'd' for hexdump.
+      - Press several buttons; confirm note events appear.
+      - Move a fader and a knob; confirm continuous controller events appear.
+      - Rotate both jog wheels; confirm a stream of events appears.
+    notes: >
+      Verifying every individual control is out of scope -- that tests Reloop's
+      firmware. If the driver delivers one button and one jog movement it
+      delivers all of them; the code path does not know which control moved.
+
+  - id: JT-MIDI-002
+    title: LEDs respond to MIDI OUT
+    area: MIDI
+    level: L3
+    mode: manual
+    status: implemented
+    requires: [device, human]
+    pass: The commanded LEDs light, and the startup attract pattern stops.
+    steps:
+      - Run actions/blink_leds.sh.
+      - Confirm the expected LEDs blink.
+      - Confirm the device's attract-mode animation has stopped.
+    notes: >
+      Attract mode stops only after the first MIDI OUT message, so it doubles
+      as confirmation that MIDI OUT reached the device at all.
+
+  - id: JT-MIDI-003
+    title: MIDI flood and running status expansion
+    area: MIDI
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, python-mido]
+    metrics: [tx_bytes_per_sec, tx_peak_bytes_per_sec, rx_bytes_per_sec, dropped]
+    pass: >
+      Sustained transmission holds up under increasing load without dropping or
+      corrupting messages, and running status is expanded correctly.
+    notes: >
+      miditest.py already measures this but is interactive; it needs a scripted
+      mode that runs a fixed ramp. Baselines from the Windows vendor driver
+      (miditest/README.md): RX peak 1695 B/s, TX 330 B/s sustained and 862 B/s
+      peak, 515 B/s sustained while flooding.
+
+  - id: JT-MIDI-004
+    title: MIDI OUT throughput at each sample rate
+    area: MIDI
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, python-mido]
+    params:
+      rates: [44100, 48000, 88200, 96000]
+    metrics: [tx_bytes_per_sec]
+    pass: Sustained MIDI OUT rate stays within the 3125 B/s limit at every rate.
+    notes: >
+      Not redundant with JT-MIDI-003. The rate limiter is a leaky bucket whose
+      divisor is derived from the sample rate, so throughput is rate-dependent
+      by construction and each rate is a separate arithmetic path.
+
+  - id: JT-MIDI-005
+    title: Firmware padding bytes are stripped from MIDI IN
+    area: MIDI
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, python-mido, two-devices]
+    pass: No spurious 0xF8-0xFF bytes reach the rawmidi stream on either unit.
+    notes: >
+      Different firmware revisions emit different padding (0xF9, 0xFB, 0xFD,
+      0xFF have all been observed). The one case where testing both units is
+      genuinely worth the cable swap.
+
+  # --------------------------------------------------------------------- PM
+
+  - id: JT-PM-001
+    title: Suspend and resume while idle
+    area: PM
+    level: L3
+    mode: automated
+    status: implemented
+    requires: [device, root, rtc-wake]
+    exec: cases/pm_suspend.py
+    params:
+      sleep_seconds: 10
+    metrics: [suspend_ms, resume_ms]
+    pass: >
+      The system suspends and resumes, and the device is usable afterwards
+      without reloading the driver.
+    notes: From suspend_resume_test_plan.md.
+
+  - id: JT-PM-002
+    title: Suspend during playback
+    area: PM
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, root, rtc-wake]
+    metrics: [recovery_ms]
+    pass: >
+      Playback stops with -ESTRPIPE and can be restarted after re-preparing the
+      stream.
+    expect_dmesg:
+      - 'PCM trigger.*cmd 5'
+    notes: >
+      SNDRV_PCM_INFO_RESUME is deliberately not advertised because the device
+      loses stream sync, so aplay dying here is the CORRECT outcome. The
+      failure would be a hang, a crash, or a stream that cannot be restarted.
+
+  # ---------------------------------------------------------------- HOTPLUG
+
+  - id: JT-HOTPLUG-001
+    title: Disconnect during playback
+    area: HOTPLUG
+    level: L3
+    mode: manual
+    status: planned
+    requires: [device, human]
+    pass: >
+      Playback terminates with an error, the card disappears, and the module
+      can still be unloaded cleanly afterwards.
+    steps:
+      - Start playback.
+      - Unplug the USB cable.
+      - Confirm the application exits with an error rather than hanging.
+      - Confirm the card is gone and the module unloads.
+    notes: >
+      All eight in-flight URBs error at once here, so this is the routine way
+      into the error give-up path rather than an exotic one.
+
+  - id: JT-HOTPLUG-002
+    title: Replug and reuse
+    area: HOTPLUG
+    level: L3
+    mode: manual
+    status: planned
+    requires: [device, human]
+    pass: The device re-enumerates and is immediately usable.
+
+  - id: JT-HOTPLUG-003
+    title: Power cycle during playback
+    area: HOTPLUG
+    level: L3
+    mode: manual
+    status: planned
+    requires: [device, human]
+    pass: >
+      The driver recovers or fails cleanly; no crash, no hang, no stuck module
+      reference.
+    notes: >
+      Becomes automated once a mains relay is wired up, which is also the only
+      way to reach the give-up path where the driver reports that the hardware
+      needs a power cycle.
+
+  - id: JT-HOTPLUG-004
+    title: USB reset recovery
+    area: HOTPLUG
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, root]
+    metrics: [reset_ms, resets_attempted, resets_failed]
+    pass: The device recovers after a queued reset and audio resumes.
+    notes: >
+      The reset must be queued, never called synchronously from an ALSA ioctl:
+      usb_reset_device() from ioctl context can reach disconnect() and then
+      snd_card_free() on the same thread, which blocks on the file descriptor
+      the ioctl still holds. post_reset() is also not guaranteed to run, since
+      a failed reset unbinds instead. Both are the interesting cases here.
+
+  # ------------------------------------------------------------------- SOAK
+
+  - id: JT-SOAK-001
+    title: Sustained playback
+    area: SOAK
+    level: L5
+    mode: automated
+    status: planned
+    requires: [device, sox]
+    params:
+      hours: 8
+      rate: 44100
+    metrics: [xruns_per_hour, stalls, memory_growth_kb]
+    pass: No xrun accumulation, no memory growth, no degradation over the run.
+    notes: From test_44100_long.sh and test_96000_long.sh.
+
+  - id: JT-SOAK-002
+    title: Mixxx session
+    area: SOAK
+    level: L5
+    mode: manual
+    status: implemented
+    requires: [device, speakers, human, mixxx]
+    pass: >
+      A real DJ session runs without dropouts, drift, audible degradation or
+      loss of control-surface response.
+    steps:
+      - Start Mixxx with the device selected for output.
+      - Play for at least an hour, using both decks and the control surface.
+      - Note the duration and anything audible or tactile that was off.
+    notes: >
+      Never automated, and never should be. This is the workload the driver
+      exists for, and the ear catches degradation that no metric here would.
+
+  - id: JT-SOAK-003
+    title: Bind and unbind endurance
+    area: SOAK
+    level: L5
+    mode: automated
+    status: planned
+    requires: [device, root]
+    params:
+      iterations_per_run: 5000
+    metrics: [memory_growth_kb, failures]
+    pass: No leak and no failure across thousands of cycles.
+    notes: Only meaningful on a KASAN kernel. The long form of JT-PROBE-002.

@@ -1,0 +1,183 @@
+# Profiles: which cases run, how many times, with what parameters.
+#
+# There is ONE definition of each profile, not a separate variant per machine.
+# What differs per target lives in `overrides`, and carries both iteration
+# counts and parameters -- because scaling a test down is not always a matter
+# of running it fewer times. On the Pi 1B the audio cases run at 44.1 and
+# 48 kHz only; the high rates are skipped, not merely reduced.
+#
+#   iterations: 0   disables the case on that target
+#   params:         merged over the case's defaults from catalog.yaml
+#
+# Cases listed in a profile but not runnable on the current target -- because
+# a required capability is missing -- are recorded as skipped with the reason.
+# They are never silently omitted, because a silently omitted case looks
+# identical to a passing one in a summary.
+
+version: 1
+
+profiles:
+
+  build:
+    description: >
+      Static gates and codec validation only. Needs no hardware, so it runs on
+      the build host -- and identifies its target from the kernel tree being
+      built, not from the machine it happens to run on.
+    cases:
+      - {id: JT-BUILD-001, iterations: 1}
+      - {id: JT-BUILD-002, iterations: 1}
+      - {id: JT-BUILD-003, iterations: 1}
+      - {id: JT-BUILD-004, iterations: 1}
+      - {id: JT-BUILD-005, iterations: 1}
+      - {id: JT-CODEC-001, iterations: 1}
+      - {id: JT-CODEC-002, iterations: 1}
+      - {id: JT-CODEC-003, iterations: 1}
+      - {id: JT-CODEC-004, iterations: 1}
+
+  smoke:
+    description: >
+      Does this build work at all? Run after every deploy. Minutes, not hours.
+    cases:
+      - {id: JT-PROBE-001, iterations: 3}
+      - {id: JT-PCM-002,   iterations: 1, params: {rates: [44100, 96000], seconds: 2}}
+      - {id: JT-PCM-004,   iterations: 1, params: {rates: [44100], seconds: 2}}
+      - {id: JT-RATE-001,  iterations: 1, params: {iterations_per_run: 5}}
+      - {id: JT-MIDI-002,  iterations: 1}
+    overrides:
+      armhf-prod:
+        JT-PCM-002: {params: {rates: [44100], seconds: 2}}
+        JT-RATE-001: {params: {rates: [44100, 48000], iterations_per_run: 3}}
+      x86_64-debug:
+        JT-PROBE-001: {iterations: 5}
+
+  functional:
+    description: >
+      Every behavior exercised at least once. Run before calling a change done.
+    cases:
+      - {id: JT-BUILD-001, iterations: 1}
+      - {id: JT-BUILD-002, iterations: 1}
+      - {id: JT-BUILD-003, iterations: 1}
+      - {id: JT-BUILD-004, iterations: 1}
+      - {id: JT-CODEC-001, iterations: 1}
+      - {id: JT-CODEC-002, iterations: 1}
+      - {id: JT-PROBE-001, iterations: 5}
+      - {id: JT-PROBE-002, iterations: 1}
+      - {id: JT-PCM-001,   iterations: 1}
+      - {id: JT-PCM-002,   iterations: 1}
+      - {id: JT-PCM-004,   iterations: 1}
+      - {id: JT-PCM-005,   iterations: 1}
+      - {id: JT-PCM-006,   iterations: 1}
+      - {id: JT-RATE-001,  iterations: 1, params: {iterations_per_run: 25}}
+      - {id: JT-RATE-002,  iterations: 1}
+      - {id: JT-AUDIO-001, iterations: 1, params: {rates: [44100, 96000]}}
+      - {id: JT-AUDIO-002, iterations: 1}
+      - {id: JT-AUDIO-003, iterations: 1}
+      - {id: JT-MIDI-001,  iterations: 1}
+      - {id: JT-MIDI-002,  iterations: 1}
+      - {id: JT-MIDI-003,  iterations: 1}
+      - {id: JT-PM-001,    iterations: 1}
+      - {id: JT-PM-002,    iterations: 1}
+      - {id: JT-HOTPLUG-001, iterations: 1}
+      - {id: JT-HOTPLUG-002, iterations: 1}
+    overrides:
+      armhf-prod:
+        # A bounded pass: does it load, play, capture, respond to MIDI, and
+        # survive a power cycle? Everything else is somebody else's target.
+        JT-BUILD-001: {iterations: 0}
+        JT-BUILD-002: {iterations: 0}
+        JT-BUILD-003: {iterations: 0}
+        JT-BUILD-004: {iterations: 0}
+        JT-CODEC-001: {iterations: 0}
+        JT-CODEC-002: {iterations: 0}
+        JT-PROBE-002: {iterations: 0}
+        JT-PCM-001:   {params: {iterations_per_run: 20}}
+        JT-PCM-002:   {params: {rates: [44100, 48000], seconds: 2}}
+        JT-PCM-004:   {params: {rates: [44100, 48000], seconds: 2}}
+        JT-PCM-005:   {params: {rates: [44100]}}
+        JT-RATE-001:  {params: {rates: [44100, 48000], iterations_per_run: 10}}
+        JT-RATE-002:  {iterations: 0}
+        JT-AUDIO-001: {params: {rates: [44100, 48000]}}
+        JT-PM-001:    {iterations: 0}
+        JT-PM-002:    {iterations: 0}
+        JT-MIDI-003:  {iterations: 0}
+      arm64-prod:
+        JT-BUILD-001: {iterations: 0}
+        JT-BUILD-002: {iterations: 0}
+        JT-BUILD-003: {iterations: 0}
+        JT-BUILD-004: {iterations: 0}
+        JT-PROBE-002: {iterations: 0}
+        JT-RATE-001:  {params: {iterations_per_run: 15}}
+
+  regression:
+    description: >
+      Everything, with enough repetition to catch intermittent faults. A few
+      hours. Run before a submission, and after anything touching URB
+      lifetime, locking or the reset path.
+    cases:
+      - {id: JT-BUILD-001, iterations: 1}
+      - {id: JT-BUILD-002, iterations: 1}
+      - {id: JT-BUILD-003, iterations: 1}
+      - {id: JT-BUILD-004, iterations: 1}
+      - {id: JT-BUILD-005, iterations: 1}
+      - {id: JT-CODEC-001, iterations: 1}
+      - {id: JT-CODEC-002, iterations: 1}
+      - {id: JT-CODEC-003, iterations: 1}
+      - {id: JT-CODEC-004, iterations: 1}
+      - {id: JT-PROBE-001, iterations: 20}
+      - {id: JT-PROBE-002, iterations: 1, params: {iterations_per_run: 200}}
+      - {id: JT-PROBE-003, iterations: 1}
+      - {id: JT-PCM-001,   iterations: 1, params: {iterations_per_run: 500}}
+      - {id: JT-PCM-002,   iterations: 3}
+      - {id: JT-PCM-003,   iterations: 1}
+      - {id: JT-PCM-004,   iterations: 3}
+      - {id: JT-PCM-005,   iterations: 3}
+      - {id: JT-PCM-006,   iterations: 1}
+      - {id: JT-PCM-007,   iterations: 1}
+      - {id: JT-RATE-001,  iterations: 1, params: {iterations_per_run: 250}}
+      - {id: JT-RATE-002,  iterations: 1, params: {iterations_per_run: 100}}
+      - {id: JT-AUDIO-001, iterations: 1}
+      - {id: JT-AUDIO-002, iterations: 1}
+      - {id: JT-AUDIO-003, iterations: 1}
+      - {id: JT-AUDIO-004, iterations: 1}
+      - {id: JT-MIDI-001,  iterations: 1}
+      - {id: JT-MIDI-002,  iterations: 1}
+      - {id: JT-MIDI-003,  iterations: 1}
+      - {id: JT-MIDI-004,  iterations: 1}
+      - {id: JT-MIDI-005,  iterations: 1}
+      - {id: JT-PM-001,    iterations: 3}
+      - {id: JT-PM-002,    iterations: 3}
+      - {id: JT-HOTPLUG-001, iterations: 1}
+      - {id: JT-HOTPLUG-002, iterations: 1}
+      - {id: JT-HOTPLUG-003, iterations: 1}
+      - {id: JT-HOTPLUG-004, iterations: 1}
+    overrides:
+      armhf-prod:
+        # The Pi 1B does not get a regression pass. Use `functional`.
+        JT-RATE-001: {iterations: 0}
+        JT-PCM-001:  {iterations: 0}
+        JT-PROBE-002: {iterations: 0}
+
+  soak:
+    description: >
+      Endurance only. Run overnight, on one target at a time. The metric that
+      matters is drift, not the final verdict.
+    cases:
+      - {id: JT-PROBE-001, iterations: 1}
+      - {id: JT-SOAK-001,  iterations: 1}
+      - {id: JT-RATE-003,  iterations: 1}
+      - {id: JT-SOAK-003,  iterations: 1}
+      - {id: JT-SOAK-002,  iterations: 1}
+    overrides:
+      armhf-prod:
+        JT-SOAK-001: {params: {hours: 2, rate: 44100}}
+        JT-RATE-003: {params: {iterations_per_run: 500}}
+        JT-SOAK-003: {iterations: 0}
+        JT-SOAK-002: {iterations: 0}
+      arm64-prod:
+        JT-SOAK-001: {params: {hours: 4}}
+        JT-RATE-003: {params: {iterations_per_run: 2000}}
+      x86_64-debug:
+        # KASAN makes the machine slow enough that an 8-hour soak covers much
+        # less ground; the point here is the memory checking, not the mileage.
+        JT-SOAK-001: {params: {hours: 4}}
+        JT-SOAK-002: {iterations: 0}
