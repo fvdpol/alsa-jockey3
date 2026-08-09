@@ -189,6 +189,14 @@ elapsed=$(( $(date +%s) - start ))
 echo
 echo "built $TARGET ($release) in $((elapsed / 60))m $((elapsed % 60))s"
 
+# Record which driver revision is inside this kernel. Without it, loading the
+# module that ships in the package gives a build-id the runner cannot resolve,
+# and every result from that kernel says "git revision unknown".
+KO=$O/sound/usb/jockey3/snd-reloop-jockey3.ko
+if [ -f "$KO" ]; then
+	"$HERE/write-manifest.sh" "$KO" "$BUILD_TREE" "$release" || true
+fi
+
 if [ "$PACKAGE" -eq 1 ]; then
 	echo
 	echo "packages:"
