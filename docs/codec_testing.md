@@ -21,7 +21,7 @@ Two tools cover it:
 - **KUnit** (`ploytec_codec_kunit.c`) proves the *compiled-in* variant correct,
   inside the kernel, on architectures you don't physically own. This ships
   upstream with the driver.
-- **The user-space bench** (`tests/codecbench.py`) compares *all three*
+- **The user-space bench** (`tests/codec/codecbench.py`) compares *all three*
   variants against each other and against experimental candidates, and
   measures them. This stays out of tree.
 
@@ -33,7 +33,7 @@ the format, so they cannot quietly disagree about what "correct" means.
 ## Quick reference
 
 ```sh
-cd tests
+cd tests/codec
 
 ./run_kunit.sh                     # KUnit under UML, a few seconds
 ./run_kunit.sh --all               # um, i386, arm64, arm, riscv
@@ -56,7 +56,7 @@ together and the test passes.
 
 So correctness rests on three independent legs:
 
-1. **A structural model** (`tests/ploytec_model.py`). It derives the bit
+1. **A structural model** (`tests/codec/ploytec_model.py`). It derives the bit
    mapping from a description of the format — channel pairing, plane ordering
    by significance, bit assignment within a wire byte — rather than
    transcribing the C. It is cross-checked against a literal transcription of
@@ -124,7 +124,7 @@ fail. A suite that has never failed has not been tested.
 each target needs.
 
 ```sh
-cd tests
+cd tests/codec
 ./run_kunit.sh                  # UML only (default, fastest)
 ./run_kunit.sh arm64 riscv      # specific targets
 ./run_kunit.sh --all            # um i386 arm64 arm riscv
@@ -442,9 +442,9 @@ the next algorithm has something to be measured against.
 tree cannot run the generator:
 
 ```sh
-cd tests
+cd tests/codec
 ./genvectors.py
-git diff ../ploytec_codec_test_vectors.h
+git diff ../../ploytec_codec_test_vectors.h
 ```
 
 Regenerate only when `ploytec_model.py` changes. A diff appearing when you did

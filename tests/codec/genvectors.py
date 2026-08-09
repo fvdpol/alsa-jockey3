@@ -159,10 +159,10 @@ def generate():
         " *",
         " * GENERATED FILE - DO NOT EDIT.",
         " *",
-        " * Produced by tests/genvectors.py from tests/ploytec_model.py, an",
+        " * Produced by tests/codec/genvectors.py from tests/codec/ploytec_model.py, an",
         " * independent model of the wire format. Regenerate with:",
         " *",
-        " *     cd tests && ./genvectors.py",
+        " *     cd tests/codec && ./genvectors.py",
         " *",
         f" * ploytec_model.py sha256: {model_hash}",
         " *",
@@ -207,7 +207,7 @@ def generate():
 def main():
     text, n_enc, n_dec = generate()
 
-    target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+    target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
                           OUTPUT_NAME)
     target = os.path.normpath(target)
 

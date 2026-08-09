@@ -8,7 +8,7 @@
  *
  * Correctness is layered:
  *
- *   1. Golden vectors produced by tests/ploytec_model.py, an independent
+ *   1. Golden vectors produced by tests/codec/ploytec_model.py, an independent
  *      model of the wire format. This is the only layer that can catch the
  *      whole family being wrong together.
  *   2. Agreement with the driver's own portable reference codec over random
@@ -61,7 +61,7 @@
 /* Stop the compiler from optimizing away work whose result is unused. */
 #define CONSUME(p)	__asm__ __volatile__("" :: "r"(p) : "memory")
 
-/* --- deterministic PRNG, mirroring tests/ploytec_model.py ----------------- */
+/* --- deterministic PRNG, mirroring tests/codec/ploytec_model.py ----------- */
 
 struct rng {
 	u64 state;

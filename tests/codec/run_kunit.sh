@@ -35,7 +35,7 @@
 
 set -u
 
-SRC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+SRC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 KERNEL_SRC=${KERNEL_SRC:-$HOME/sound}
 KUNIT_TREE=${KUNIT_TREE:-$HOME/sound-kunit}
 KUNIT_REF=${KUNIT_REF:-feature/jockey3}

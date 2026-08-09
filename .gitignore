@@ -10,4 +10,8 @@ modules.order
 *.cmd
 *~
 __pycache__/
-tests/build/
+tests/codec/build/
+tests/hw/results/
+*.wav
+*.log
+*.config.old

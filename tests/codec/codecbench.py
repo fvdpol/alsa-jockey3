@@ -36,7 +36,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DRIVER_DIR = os.path.normpath(os.path.join(HERE, ".."))
+DRIVER_DIR = os.path.normpath(os.path.join(HERE, "..", ".."))
 BUILD_DIR = os.path.join(HERE, "build")
 SRC_COPY_DIR = os.path.join(BUILD_DIR, "src")
 MANIFEST = os.path.join(SRC_COPY_DIR, "MANIFEST.json")

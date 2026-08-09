@@ -4,10 +4,10 @@
  *
  * GENERATED FILE - DO NOT EDIT.
  *
- * Produced by tests/genvectors.py from tests/ploytec_model.py, an
+ * Produced by tests/codec/genvectors.py from tests/codec/ploytec_model.py, an
  * independent model of the wire format. Regenerate with:
  *
- *     cd tests && ./genvectors.py
+ *     cd tests/codec && ./genvectors.py
  *
  * ploytec_model.py sha256: 09fdf2831f9de572ee3a0e06b20807ee6235fc67ac79481469d616e965e8f0f3
  *
