@@ -68,10 +68,9 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * copied to) an ALSA buffer.
  *
  * A sample-rate change requires tearing the URBs down, reprogramming the
- * device over EP0, and starting them again. The firmware does not always
- * restart the capture endpoint afterwards; jockey3_pcm_hw_params() detects
- * this and either resets the device or defers recovery to the next capture
- * open. See Documentation/sound/cards/jockey3.rst.
+ * device over EP0, and starting them again. jockey3_pcm_hw_params() checks
+ * URB liveness on both directions afterward and recovers if either did not
+ * restart; see the comment there for what that covers and why.
  */
 
 /**
@@ -380,6 +379,17 @@ static int jockey3_wait_for_reset_completion(struct jockey3_chip *chip)
 		return -ENODEV;
 
 	return 0;
+}
+
+/*
+ * Queue a full USB reset and arm chip->reset_done for a waiter. Does not
+ * wait; pair with jockey3_wait_for_reset_completion() for that.
+ */
+static void jockey3_queue_reset(struct jockey3_chip *chip)
+{
+	reinit_completion(&chip->reset_done);
+	set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
+	usb_queue_reset_device(chip->intf0);
 }
 
 static inline struct jockey3_pcm_urb_stream *jockey3_get_pcm_urb_stream(struct jockey3_chip *chip,
@@ -1609,9 +1619,7 @@ static int jockey3_recover_capture_stream(struct jockey3_chip *chip)
 
 	dev_warn(&chip->intf0->dev,
 		 "Capture stream still stalled after URB restart; queuing full USB reset\n");
-	reinit_completion(&chip->reset_done);
-	set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
-	usb_queue_reset_device(chip->intf0);
+	jockey3_queue_reset(chip);
 
 	ret = jockey3_wait_for_reset_completion(chip);
 	if (ret < 0)
@@ -2029,15 +2037,10 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 
 	/*
 	 * Ploytec firmware re-synchronization:
-	 * In some cases the sample rate change process can fail to restart the
-	 * Capture EP (0x86): resulting in the device not transmitting data.
-	 * When this happens the Ploytec firmware requires a full USB reset to
-	 * re-synchronize the internal engine and restart sending packets.
-	 * The stalled flow would otherwise lead to EIO errors in ALSA.
-	 *
-	 * The exact firmware trigger for this failure is still not fully
-	 * understood; as mitigation we check URB liveness on both directions
-	 * after every rate change:
+	 * During validation some edge cases have been observed where the
+	 * device's firmware does not start USB streaming after a rate change.
+	 * A USB device reset forces the Ploytec firmware to re-synchronize, so
+	 * URB liveness is checked on both directions after every change:
 	 *
 	 *  - Playback always carries the MIDI OUT channel, so it must come
 	 *    back alive unconditionally, or MIDI control of the device breaks.
@@ -2061,9 +2064,7 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 		dev_warn(&chip->intf0->dev,
 			 "Resetting device to recover from stall after rate change to %u Hz (playback_alive=%d, capture_alive=%d, capture_open=%d)\n",
 			 rate, playback_alive, capture_alive, capture_open);
-		reinit_completion(&chip->reset_done);
-		set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
-		usb_queue_reset_device(chip->intf0);
+		jockey3_queue_reset(chip);
 	} else {
 		if (!capture_alive)
 			dev_dbg(&chip->intf0->dev,
