@@ -72,6 +72,32 @@ def control_is_live(index):
     return True
 
 
+def wait_for_card_live(index, timeout=10.0, poll=0.5):
+    """Block until control_is_live(index), or timeout expires.
+
+    For long endurance sweeps (JT-RATE-003 and friends) that open a fresh
+    aplay/arecord per iteration for hours. A driver-triggered stall-and-reset
+    recovers in about a second and control_is_live() stays true throughout it
+    -- that case does not need this and pays only one cheap open() per
+    change. What this exists for is the device actually disappearing from the
+    bus: 2026-08-20 found an arm64 rig stay unresponsive for 18 minutes after
+    one, needing a physical power-cycle, while the sweep kept spawning
+    arecord/aplay against nothing the whole time and every failure it logged
+    for that stretch was noise. A bounded wait here turns that into "recovers
+    within timeout, keep going" or "still gone, the caller should give up
+    early" instead of a run that discovers hours later it learned nothing.
+
+    Returns True if the card was (or became) live, False on timeout.
+    """
+    deadline = time.time() + timeout
+    while True:
+        if control_is_live(index):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(poll)
+
+
 def substreams(index):
     """What the card actually exposes -- the shape probe should have created."""
     base = f"/proc/asound/card{index}"

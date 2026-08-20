@@ -811,7 +811,11 @@ cases:
        pointer_plateau_changes_playback, pointer_plateau_changes_capture,
        pointer_quantum_max, xruns,
        buffer_size_playback, period_size_playback,
-       buffer_size_capture, period_size_capture]
+       buffer_size_capture, period_size_capture,
+       # Set when the sweep gave up early because the card did not come back
+       # within device_wait_seconds -- see alsa.wait_for_card_live(). A short
+       # run under this is a real fail, not merely fewer changes than asked.
+       aborted_device_unavailable]
     pass: >
       Every rate change ends with working streams in BOTH directions. A stall
       that recovers is a PASS and is counted; a stall that survives a full USB
@@ -1021,7 +1025,11 @@ cases:
        pointer_plateau_changes_playback, pointer_plateau_changes_capture,
        pointer_quantum_max, xruns,
        buffer_size_playback, period_size_playback,
-       buffer_size_capture, period_size_capture]
+       buffer_size_capture, period_size_capture,
+       # Set when the sweep gave up early because the card did not come back
+       # within device_wait_seconds -- see alsa.wait_for_card_live(). A short
+       # run under this is a real fail, not merely fewer changes than asked.
+       aborted_device_unavailable]
     pass: >
       Same per-change criterion as JT-RATE-001 -- a stall that recovers is a
       pass, a stall that survives a full USB reset or a capture that comes

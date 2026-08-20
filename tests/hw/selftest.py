@@ -1109,8 +1109,10 @@ def test_rate_change_case_runs():
     def run(params, mode):
         case = FakeCase(params)
         m.Case = lambda: case
-        m.alsa = types.SimpleNamespace(xruns=lambda *a: 0,
-                                       device_name=lambda *a: "hw:9,0")
+        m.alsa = types.SimpleNamespace(
+            xruns=lambda *a: 0,
+            device_name=lambda *a: "hw:9,0",
+            wait_for_card_live=lambda *a, **k: mode != "dead_device")
         # A kernel log that carries each change's marker, plus a capture stall
         # and a capture-triggered reset after the marker for change 3. The
         # case must attribute those to change 3 and to no other.
@@ -1198,6 +1200,19 @@ def test_rate_change_case_runs():
     long_run = run({"iterations_per_run": 1, "seconds_per_rate": 5}, "live")
     check(long_run.metrics.get("timing_check_enforced") is True,
           "and is enforced at 5 s")
+
+    # A card that never comes back must stop the sweep instead of retrying
+    # against nothing for the rest of the run -- see alsa.wait_for_card_live().
+    dead = run({"iterations_per_run": 5, "seconds_per_rate": 1}, "dead_device")
+    check(dead.metrics.get("aborted_device_unavailable") is True,
+          "a dead card aborts the sweep and says so",
+          str(dead.metrics.get("aborted_device_unavailable")))
+    check(dead.metrics.get("rate_changes") == 1,
+          "aborting on the first change costs exactly one change, not the "
+          "whole run", str(dead.metrics.get("rate_changes")))
+    check(any("did not come back" in f for f in dead.fails),
+          "the failure names the reason, not just a symptom",
+          str(dead.fails[:1]))
 
     # 44.1 against 48 kHz is 8.1%. The elapsed-time check could not resolve it
     # at a 20% tolerance and the case warned about it on every run; the

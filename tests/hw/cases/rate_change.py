@@ -635,6 +635,11 @@ def main():
     # instrument can do, because the question is a rate change, not clock
     # metrology, and a tight bound would start reporting the device's crystal.
     steady_tol = float(c.params.get("steady_tolerance", 0.05))
+    # How long to wait for the card to come back before giving up on it. A
+    # driver-triggered stall-and-reset recovers well inside this; it exists
+    # for the device actually disappearing from the bus, which does not
+    # self-heal on the timescale of a sweep. See alsa.wait_for_card_live().
+    device_wait_s = float(c.params.get("device_wait_seconds", 10.0))
     changer = str(c.params.get("rate_change_stream", "capture"))
     if changer not in ("capture", "playback", "race"):
         c.blocked(f"rate_change_stream must be capture, playback or race, "
@@ -712,6 +717,7 @@ def main():
     kept_bad_captures = 0
     prev_rate = None
     t0 = time.time()
+    aborted = False
 
     c.progress(f"    sweep {' -> '.join(rate_pretty(r) for r in rates)}"
                f", {seconds:g}s per rate, gap {gap_s:g}s"
@@ -729,6 +735,15 @@ def main():
             changes += 1
             c.status(f"    loop {loop}/{loops}  ....  {rate} Hz "
                      f"({changes}/{total} changes)")
+
+            if not alsa.wait_for_card_live(c.card, timeout=device_wait_s):
+                c.fail(f"loop {loop}, {rate} Hz: card hw:{c.card} did not "
+                       f"come back within {device_wait_s:g}s -- aborting the "
+                       f"sweep rather than keep spawning aplay/arecord "
+                       f"against a device that is not there")
+                aborted = True
+                break
+
             # A marker per change, so a stall in the kernel log can be
             # attributed to the change that caused it rather than to the run
             # as a whole -- "when did it start" was previously unanswerable.
@@ -962,6 +977,10 @@ def main():
                    f"change (exit {rc}) "
                    f"{(err or '').strip().splitlines()[-1][:100] if err else ''}")
 
+        if aborted:
+            break
+
+    c.metric("aborted_device_unavailable", aborted)
     c.metric("rate_changes", changes)
     c.metric("failures", failures)
     c.metric("rate_check_blind_steps", len(blind))
