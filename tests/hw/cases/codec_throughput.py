@@ -28,6 +28,7 @@ codec a real user runs, not just whichever variant happened to be built.
 import ctypes
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -39,6 +40,7 @@ from lib.case import Case          # noqa: E402
 
 REFERENCE_VARIANT = "reference"
 NOISY_RSD_PERCENT = 5.0
+STATUS_INTERVAL_S = 5
 
 # ploytec_codec.h: PLAYBACK_PCM_FRAME_SIZE (4ch * 3B) / CAPTURE_PCM_FRAME_SIZE (6ch * 3B)
 ENC_PCM_BYTES = 12
@@ -76,17 +78,25 @@ def main():
          "--json", json_path],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
+    # codecbench.py prints a line per (variant, direction, repeat) -- with 4
+    # variants x 2 directions x 'repeats' measurements of 'duration' seconds
+    # each, a line can be minutes apart. A plain readline() blocks across
+    # that whole gap, so the c.status() below it never ran and this case sat
+    # silent for most of a 20-minute run. Bounding the wait with select()
+    # instead means a status line is guaranteed every STATUS_INTERVAL_S
+    # regardless of how quiet codecbench.py itself is.
     lines = []
     while True:
-        line = proc.stdout.readline()
-        if line:
-            lines.append(line)
-            continue
+        ready, _w, _x = select.select([proc.stdout], [], [], STATUS_INTERVAL_S)
+        if ready:
+            line = proc.stdout.readline()
+            if line:
+                lines.append(line)
+                continue
         if proc.poll() is not None:
             break
         elapsed = time.monotonic() - start
         c.status(f"benchmarking  {elapsed:.0f}s / ~{eta:.0f}s")
-        time.sleep(5)
     proc.wait()
 
     log_path = os.path.join(c.workdir, "codecbench.log")
