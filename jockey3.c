@@ -130,17 +130,18 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  */
 #define JOCKEY3_WATCHDOG_POLL_MS	1000
 #define JOCKEY3_WATCHDOG_STALL_MS	500
-#define JOCKEY3_WATCHDOG_HEARTBEAT_MS	60000
 
 /*
- * Heartbeats stop after this many, so a stall nobody clears -- most commonly
- * the deferred-idle-capture case, which is expected to persist for as long as
- * nothing reopens capture -- cannot spam dmesg for the remaining life of the
- * device. The onset line already recorded when the stall began, and the
- * eventual recovery line still fires whenever the stream comes back; this
- * only bounds the "still stalled" reminders in between.
+ * Bounded-retry budget for jockey3_recover_urb_stream(), chip-wide because the
+ * remedy it escalates to (a full usb_reset_device()) is shared by both
+ * directions -- a per-direction counter would double the effective rate for
+ * no reason. A window re-opens (and the counter resets) the first time the
+ * budget is consulted after JOCKEY3_RECOVERY_WINDOW_MS has passed since the
+ * current one started, so a chip that stops stalling is never left refusing
+ * to recover for the rest of its life.
  */
-#define JOCKEY3_WATCHDOG_HEARTBEAT_MAX	3
+#define JOCKEY3_RECOVERY_MAX_ATTEMPTS	3
+#define JOCKEY3_RECOVERY_WINDOW_MS	60000
 
 /*
  * How long jockey3_pcm_prepare() polls before believing a stream has stalled.
@@ -199,12 +200,6 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * @stall_since: ktime the current stall was measured from; @lock. Only
  *	meaningful while @stall_reported is set, and used to report how long the
  *	outage lasted once the stream comes back.
- * @stall_warned_at: ktime of the last stall message emitted for the current
- *	stall; @lock. Paces the still-stalled heartbeat to one line a minute
- *	rather than one per tick, up to JOCKEY3_WATCHDOG_HEARTBEAT_MAX.
- * @stall_heartbeats: still-stalled reminders emitted for the current stall;
- *	@lock. Capped at JOCKEY3_WATCHDOG_HEARTBEAT_MAX so a stall that never
- *	clears cannot spam dmesg indefinitely; reset with @stall_reported.
  */
 struct jockey3_pcm_urb_stream {
 	struct snd_pcm_substream *substream;
@@ -224,8 +219,6 @@ struct jockey3_pcm_urb_stream {
 	unsigned int consec_errors;
 	bool stall_reported;
 	u64 stall_since;
-	u64 stall_warned_at;
-	unsigned int stall_heartbeats;
 };
 
 /**
@@ -249,6 +242,14 @@ struct jockey3_pcm_urb_stream {
  *	Armed by jockey3_start_urbs() and disarmed by jockey3_stop_urbs(), so it
  *	runs exactly when the URBs are supposed to be flowing -- which, for this
  *	device, is its whole lifetime rather than only while a PCM stream is open.
+ * @recovery_attempts: resets taken from the current window by
+ *	jockey3_recovery_budget_take(); not mutex-protected, since
+ *	jockey3_pcm_hw_params()'s post-rate-change liveness check runs outside
+ *	@rate_mutex by design. The two-atomic race with @recovery_window_start is
+ *	benign: the worst case is a handful of extra resets in one window, not a
+ *	stuck or negative budget.
+ * @recovery_window_start: ktime the current budget window opened; 0 before
+ *	the first attempt. See JOCKEY3_RECOVERY_WINDOW_MS.
  * @midi_in_substream: open MIDI IN substream, or NULL; @midi_lock
  * @midi_out_substream: open MIDI OUT substream, or NULL; @midi_lock
  * @midi_in_urb: the single MIDI IN URB; not anchored, killed directly
@@ -278,6 +279,8 @@ struct jockey3_chip {
 	unsigned int dev_idx;
 	struct completion reset_done;
 	struct delayed_work watchdog_work;
+	atomic_t recovery_attempts;
+	atomic64_t recovery_window_start;
 
 	/* MIDI Path */
 	struct snd_rawmidi_substream *midi_in_substream;
@@ -390,6 +393,30 @@ static void jockey3_queue_reset(struct jockey3_chip *chip)
 	reinit_completion(&chip->reset_done);
 	set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 	usb_queue_reset_device(chip->intf0);
+}
+
+/*
+ * Chip-wide bounded-retry budget consulted by jockey3_recover_urb_stream()
+ * before it escalates to a full USB reset. Returns true if the caller may go
+ * ahead. A window older than JOCKEY3_RECOVERY_WINDOW_MS (or none opened yet)
+ * is replaced with a fresh one, so a chip that stops stalling is never left
+ * permanently refusing to recover; within a live window, up to
+ * JOCKEY3_RECOVERY_MAX_ATTEMPTS resets are allowed before further attempts
+ * are declined and reported instead.
+ */
+static bool jockey3_recovery_budget_take(struct jockey3_chip *chip)
+{
+	u64 now = ktime_get_mono_fast_ns();
+	u64 window_start = atomic64_read(&chip->recovery_window_start);
+
+	if (!window_start ||
+	    now - window_start > (u64)JOCKEY3_RECOVERY_WINDOW_MS * NSEC_PER_MSEC) {
+		atomic64_set(&chip->recovery_window_start, now);
+		atomic_set(&chip->recovery_attempts, 1);
+		return true;
+	}
+
+	return atomic_inc_return(&chip->recovery_attempts) <= JOCKEY3_RECOVERY_MAX_ATTEMPTS;
 }
 
 static inline struct jockey3_pcm_urb_stream *jockey3_get_pcm_urb_stream(struct jockey3_chip *chip,
@@ -1389,17 +1416,14 @@ static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *
  *
  * Reports, but does not act on, a direction that has stopped completing URBs.
  *
- * Logging is edge-triggered: one line when a stall starts, one when it ends,
- * and a slow heartbeat in between. The measured age is reported rather than the
- * threshold, because the onset timestamp is the point of the exercise and the
- * poll interval alone would only bound it to the width of one tick.
- *
- * The heartbeat distinguishes the one stall this driver deliberately tolerates
- * -- capture stalled while nothing is recording, whose recovery is deferred to
- * the next capture open -- from every other, which means nothing is dealing
- * with it. The distinction is drawn from the direction and whether a substream
- * is open, both of which are already read here, rather than from a flag the
- * rate-change path would have to keep in step.
+ * Logging is edge-triggered: one line when a stall starts, one when it ends.
+ * No periodic heartbeat in between -- jockey3_recover_urb_stream() now runs
+ * from both jockey3_pcm_hw_params() and jockey3_pcm_prepare(), so a stall is
+ * expected to be either short-lived or, if the recovery budget is exhausted,
+ * reported loudly from there instead of by this watchdog going quiet. The
+ * measured age is reported rather than the threshold, because the onset
+ * timestamp is the point of the exercise and the poll interval alone would
+ * only bound it to the width of one tick.
  *
  * Deliberately does not gate on urbs_in_flight: when the endpoints have been
  * disabled underneath the driver every submit fails and nothing is in flight,
@@ -1411,9 +1435,9 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 {
 	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
 	const char *type = direction == SNDRV_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
-	bool log_onset = false, log_heartbeat = false, log_recovery = false;
+	bool log_onset = false, log_recovery = false;
 	u64 now, last, age_ns, outage_ns = 0;
-	bool open = false, heartbeats_exhausted = false;
+	bool open = false;
 
 	/*
 	 * Fall back to the start timestamp until the first completion arrives:
@@ -1453,18 +1477,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 			if (!urb_stream->stall_reported) {
 				urb_stream->stall_reported = true;
 				urb_stream->stall_since = last;
-				urb_stream->stall_warned_at = now;
-				urb_stream->stall_heartbeats = 0;
 				log_onset = true;
-			} else if (urb_stream->stall_heartbeats >= JOCKEY3_WATCHDOG_HEARTBEAT_MAX) {
-				/* already said its piece; wait for recovery in silence */
-			} else if (now - urb_stream->stall_warned_at >=
-				   (u64)JOCKEY3_WATCHDOG_HEARTBEAT_MS * NSEC_PER_MSEC) {
-				urb_stream->stall_warned_at = now;
-				urb_stream->stall_heartbeats++;
-				log_heartbeat = true;
-				heartbeats_exhausted = urb_stream->stall_heartbeats >=
-							JOCKEY3_WATCHDOG_HEARTBEAT_MAX;
 			}
 		} else if (urb_stream->stall_reported) {
 			urb_stream->stall_reported = false;
@@ -1485,32 +1498,6 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 			 type, div_u64(age_ns, NSEC_PER_MSEC),
 			 atomic_read(&urb_stream->urbs_in_flight),
 			 open ? "open" : "idle");
-	else if (log_heartbeat && direction == SNDRV_PCM_STREAM_CAPTURE && !open)
-		/*
-		 * The one stall this driver decides to live with, so it says so
-		 * rather than repeating an alarm about a state it chose. Capture
-		 * stalling while nothing is recording is left alone deliberately
-		 * -- resetting the device would glitch whatever playback is
-		 * running for the sake of a direction nobody is using -- and
-		 * jockey3_pcm_prepare() picks it up at the next capture open. It
-		 * can therefore persist indefinitely without anything being
-		 * wrong. See jockey3_pcm_hw_params().
-		 */
-		dev_warn(&chip->intf0->dev,
-			 "%s URB stream still stalled while idle: no completion for %llu ms; recovery deferred to next capture open%s\n",
-			 type, div_u64(age_ns, NSEC_PER_MSEC),
-			 heartbeats_exhausted ? "; no further reports until it clears" : "");
-	else if (log_heartbeat)
-		/*
-		 * Everything else. Playback always carries MIDI OUT and is never
-		 * deferred, and a capture stall with a stream open should already
-		 * have been reset, so a stall that survives this long means
-		 * nothing is dealing with it.
-		 */
-		dev_warn(&chip->intf0->dev,
-			 "%s URB stream still stalled: no completion for %llu ms%s\n",
-			 type, div_u64(age_ns, NSEC_PER_MSEC),
-			 heartbeats_exhausted ? "; no further reports until it clears" : "");
 	else if (log_recovery)
 		dev_warn(&chip->intf0->dev, "%s URB stream recovered after %llu ms\n",
 			 type, div_u64(outage_ns, NSEC_PER_MSEC));
@@ -1582,52 +1569,88 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
 	return false;
 }
 
-/*
- * Attempt to recover a stalled Capture URB stream outside of a sample-rate
- * change.
+/**
+ * jockey3_recover_urb_stream() - bring a stalled direction back
+ * @chip: driver state
+ * @direction: SNDRV_PCM_STREAM_PLAYBACK or SNDRV_PCM_STREAM_CAPTURE
+ * @context: short description of what found the stall, for the log
  *
- * This is the deferred counterpart to the post-rate-change check in
- * jockey3_pcm_hw_params(): if Capture stalled while no capture stream was
- * open there, we don't force a disruptive device reset on the spot (it would
- * interrupt any in-progress Playback audio for the sake of a direction
- * nobody is using yet).
+ * Shared by jockey3_pcm_hw_params()'s post-rate-change check and
+ * jockey3_pcm_prepare()'s liveness check, replacing what used to be an
+ * unconditional reset from the former and a dedicated deferred-recovery
+ * function reached only from the latter. Both call sites confirm the
+ * direction is actually stalled (over JOCKEY3_PREPARE_CONFIRM_MS) before
+ * calling this, but the two-step ladder below is idempotent: a direction
+ * found alive here -- for instance because a sibling call already restarted
+ * the shared URB ring -- returns immediately, at no cost beyond one 1 ms
+ * sample and without a second light retry glitching a stream that just came
+ * back.
  *
- * Instead, the next time a capture stream is opened, jockey3_pcm_prepare()
- * calls this to first retry a lightweight URB stop/start; if Capture still
- * doesn't come back, escalate to a full USB device reset, queued via
+ * Ladder: a lightweight URB stop/start first; if that alone did not bring
+ * the direction back, escalate to a full USB device reset, queued via
  * usb_queue_reset_device() and awaited with jockey3_wait_for_reset_completion()
  * (bounded at 1000 ms; the reset itself measures ~334 ms) rather than calling
  * usb_reset_device() directly from this ioctl context — see
- * jockey3_wait_for_reset_completion() for why.
+ * jockey3_wait_for_reset_completion() for why. The reset step is gated on
+ * jockey3_recovery_budget_take(): a chip that keeps stalling stops being
+ * reset in a tight loop once the budget for the current window is spent, and
+ * says so via dev_err instead.
+ *
+ * The onset line is ratelimited: jockey3_pcm_prepare() runs on every xrun
+ * recovery, so a client looping on a wedged stream can re-enter here several
+ * times a second, and the budget above bounds resets, not log lines -- a
+ * light retry that keeps working never spends any budget but would otherwise
+ * log on every call.
+ *
+ * Return: 0 if the direction is confirmed alive, or recovery gave up and
+ * logged why (still non-fatal to the caller); -ENODEV if the device is gone,
+ * or -EAGAIN if a reset was queued but did not complete in time.
  */
-static int jockey3_recover_capture_stream(struct jockey3_chip *chip)
+static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direction,
+				      const char *context)
 {
+	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
+	const char *type = direction == SNDRV_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
 	int ret;
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	scoped_guard(mutex, &chip->rate_mutex) {
-		dev_warn(&chip->intf0->dev, "Restarting URBs to recover stalled Capture stream\n");
-		jockey3_stop_urbs(chip);
-		jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip),
-					  "restarting URBs to recover Capture");
-	}
-
-	if (jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE, 50))
+	if (jockey3_check_urb_stream_alive(urb_stream))
 		return 0;
 
+	dev_warn_ratelimited(&chip->intf0->dev,
+			     "%s stream stalled (%s); restarting URBs to recover\n",
+			     type, context);
+
+	scoped_guard(mutex, &chip->rate_mutex) {
+		jockey3_stop_urbs(chip);
+		jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip), context);
+	}
+
+	if (jockey3_wait_urb_stream_started(chip, direction, JOCKEY3_PREPARE_CONFIRM_MS))
+		return 0;
+
+	if (!jockey3_recovery_budget_take(chip)) {
+		dev_err(&chip->intf0->dev,
+			"%s stream still stalled after URB restart; recovery budget exhausted, not resetting (%s)\n",
+			type, context);
+		return 0;
+	}
+
 	dev_warn(&chip->intf0->dev,
-		 "Capture stream still stalled after URB restart; queuing full USB reset\n");
+		 "%s stream still stalled after URB restart; queuing full USB reset (%s)\n",
+		 type, context);
 	jockey3_queue_reset(chip);
 
 	ret = jockey3_wait_for_reset_completion(chip);
 	if (ret < 0)
 		return ret;
 
-	if (!jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE, 50))
+	if (!jockey3_wait_urb_stream_started(chip, direction, JOCKEY3_PREPARE_CONFIRM_MS))
 		dev_err(&chip->intf0->dev,
-			"Capture stream still stalled after full USB reset; hardware may need power-cycling\n");
+			"%s stream still stalled after full USB reset; hardware may need power-cycling (%s)\n",
+			type, context);
 
 	return 0;
 }
@@ -1845,24 +1868,12 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 							  JOCKEY3_PREPARE_CONFIRM_MS);
 
 	if (stalled) {
-		if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
-			dev_warn(&chip->intf0->dev,
-				 "Capture URB stalled when opening capture stream; attempting recovery\n");
-			ret = jockey3_recover_capture_stream(chip);
-			if (ret < 0)
-				return ret;
-		} else {
-			/*
-			 * Reported rather than recovered: a stalled playback
-			 * stream means MIDI OUT has stopped flowing too, but
-			 * resetting the device from here would interrupt
-			 * whatever else is running. Ratelimited because a
-			 * client looping on xrun recovery re-enters .prepare
-			 * several times a second.
-			 */
-			dev_warn_ratelimited(&chip->intf0->dev,
-					     "Playback URB stalled when preparing playback stream\n");
-		}
+		const char *context = substream->stream == SNDRV_PCM_STREAM_CAPTURE ?
+			"opening a capture stream" : "preparing a playback stream";
+
+		ret = jockey3_recover_urb_stream(chip, substream->stream, context);
+		if (ret < 0)
+			return ret;
 	}
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
@@ -1979,11 +1990,11 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 
 	/*
 	 * A previous call may have left a stall-recovery reset in flight (see
-	 * the reset queued below). Without this, a rate change arriving before
-	 * that reset completes runs jockey3_set_rate() and the URB restart
-	 * against a device that is mid-reset, which fails outright instead of
-	 * recovering. jockey3_pcm_prepare() and jockey3_recover_capture_stream()
-	 * already wait for the same reason.
+	 * jockey3_recover_urb_stream(), called below). Without this, a rate
+	 * change arriving before that reset completes runs jockey3_set_rate()
+	 * and the URB restart against a device that is mid-reset, which fails
+	 * outright instead of recovering. jockey3_pcm_prepare() waits for the
+	 * same reason.
 	 */
 	ret = jockey3_wait_for_reset_completion(chip);
 	if (ret < 0)
@@ -2039,22 +2050,29 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	 * Ploytec firmware re-synchronization:
 	 * During validation some edge cases have been observed where the
 	 * device's firmware does not start USB streaming after a rate change.
-	 * A USB device reset forces the Ploytec firmware to re-synchronize, so
-	 * URB liveness is checked on both directions after every change:
+	 * jockey3_recover_urb_stream() forces it to re-synchronize (a
+	 * lightweight URB restart first, a full USB reset if that alone does
+	 * not bring the direction back), so URB liveness is checked on both
+	 * directions after every change:
 	 *
 	 *  - Playback always carries the MIDI OUT channel, so it must come
 	 *    back alive unconditionally, or MIDI control of the device breaks.
-	 *    A Playback stall always forces a reset.
+	 *    A Playback stall always triggers recovery.
 	 *
-	 *  - Capture only forces a reset here if a capture stream is currently
-	 *    open. An idle Capture stall (no recording in progress) is logged
-	 *    but not acted on immediately, to avoid an audible reset glitch on
-	 *    unrelated, currently-working Playback audio. Recovery is deferred
-	 *    to the next capture stream open (see jockey3_recover_capture_stream()
-	 *    called from jockey3_pcm_prepare()).
+	 *  - Capture only triggers recovery here if a capture stream is
+	 *    currently open. An idle Capture stall (no recording in progress)
+	 *    is logged but not acted on immediately, to avoid an audible reset
+	 *    glitch on unrelated, currently-working Playback audio. Recovery
+	 *    is deferred to the next capture stream open, where
+	 *    jockey3_pcm_prepare()'s own liveness check calls the same
+	 *    function.
 	 *
-	 * pre_reset/post_reset callbacks handle the URB lifecycle.
-	 * We call this outside the rate_mutex to allow pre/post_reset to acquire it.
+	 * Called outside rate_mutex: jockey3_recover_urb_stream() may escalate
+	 * to a queued reset, whose pre_reset/post_reset callbacks need to
+	 * acquire the mutex themselves to complete. Playback is checked first
+	 * so that, if both directions died together, its call (which restarts
+	 * the shared URB ring for both) makes the capture call below a cheap
+	 * no-op instead of a second, redundant restart.
 	 */
 	playback_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_PLAYBACK, 50);
 	capture_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE, 50);
@@ -2062,9 +2080,22 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 
 	if (!playback_alive || (!capture_alive && capture_open)) {
 		dev_warn(&chip->intf0->dev,
-			 "Resetting device to recover from stall after rate change to %u Hz (playback_alive=%d, capture_alive=%d, capture_open=%d)\n",
+			 "Rate change to %u Hz left a stream stalled (playback_alive=%d, capture_alive=%d, capture_open=%d); attempting recovery\n",
 			 rate, playback_alive, capture_alive, capture_open);
-		jockey3_queue_reset(chip);
+
+		if (!playback_alive) {
+			ret = jockey3_recover_urb_stream(chip, SNDRV_PCM_STREAM_PLAYBACK,
+							 "a rate change");
+			if (ret < 0)
+				return ret;
+		}
+
+		if (!capture_alive && capture_open) {
+			ret = jockey3_recover_urb_stream(chip, SNDRV_PCM_STREAM_CAPTURE,
+							 "a rate change");
+			if (ret < 0)
+				return ret;
+		}
 	} else {
 		if (!capture_alive)
 			dev_dbg(&chip->intf0->dev,

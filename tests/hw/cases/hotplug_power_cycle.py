@@ -46,9 +46,9 @@ than just cutting power and reading dmesg.
 NOT "hardware may need power-cycling"
 ------------------------------------------
 The catalog's manual steps used to quote that string as the give-up message
-to look for. It is real (jockey3.c:1622) but belongs to a different path --
-jockey3_recover_capture_stream(), reachable only from a capture .prepare()
-after BOTH a URB restart and a full USB reset fail to bring capture back.
+to look for. It is real (jockey3.c, jockey3_recover_urb_stream()) but
+belongs to a recovery escalation, reachable only after BOTH a URB restart
+and a full USB reset fail to bring a direction back.
 A playback-only power cycle like this one cannot reach it, and forcing a
 capture open afterward just to chase a message that only fires when
 recovery has already failed twice was rejected: it would turn a

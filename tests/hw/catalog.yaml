@@ -776,21 +776,24 @@ cases:
       # invisible.
       [resets_per_change_pct, resets_total_device, stalls_per_change_pct,
        urb_restarts_that_avoided_a_reset,
-       stalls_capture, stalls_playback, resets_capture_stall,
-       resets_playback_stall, resets_full, capture_urb_restart,
-       capture_recovery_on_open, capture_restart_escalated,
+       stalls_capture, stalls_playback, recovery_triggered_capture,
+       recovery_triggered_playback, recovery_triggered_full, urb_restart_attempt,
+       capture_recovery_on_open, playback_recovery_on_prepare, restart_escalated,
+       recovery_budget_exhausted,
        failures, capture_live_changes,
        capture_nodata_changes, capture_silent_changes, capture_error_changes,
        first_bad_capture_change, capture_nonzero_min, capture_nonzero_max,
        capture_effective_hz, capture_rate_ratio_min, capture_rate_ratio_max,
        playback_rate_ratio_min, playback_rate_ratio_max,
-       # The rate change's own stall, told apart from the three later call
-       # sites that share its message. This is the incidence figure.
+       # The rate change's own stall, told apart from the later call sites
+       # that share its message. This is the incidence figure.
        capture_stall_hw_params_total, capture_stall_on_open_total,
        capture_stall_after_urb_restart_total, capture_stall_after_reset_total,
-       # Both of these end in usb_queue_reset_device(); what differs is
-       # only what was tried first, never how big the reset is.
+       # All three end in usb_queue_reset_device(); what differs is only
+       # which light retry (from which call site) failed first, never how
+       # big the reset is.
        reset_on_rate_change_total, reset_after_urb_restart_total,
+       reset_after_playback_prepare_total,
        stalled_after_full_reset_total, reset_timeout_total,
        # Which recovery path each change actually took, counted over the run.
        branch_reset, branch_recovered_on_open, branch_deferred, branch_clean,
@@ -834,9 +837,9 @@ cases:
       is 1% of frames non-zero, against >95% observed when healthy.
 
       Recording also matters for what it makes the DRIVER do: with a capture
-      stream open, jockey3_pcm_hw_params() takes its reset path on a capture
-      stall instead of the deferred one, which is the path that carries the
-      risk and was untested while this case only played.
+      stream open, jockey3_pcm_hw_params() recovers a capture stall itself
+      instead of deferring it, which is the path that carries the risk and was
+      untested while this case only played.
 
       The rate itself is checked against the clock, not against the device.
       This is independent of what GET_RATE reports, which only proves the
@@ -864,8 +867,9 @@ cases:
       judged only against capture_rate_gross_tolerance.
 
       Which branch was under test is part of the result. rate_change_stream
-      fixes whether hw_params sees capture_open=1 (reset on the spot) or 0
-      (defer to the next capture open); branch_change_* records what each
+      fixes whether hw_params sees capture_open=1 (recovers on the spot,
+      light URB restart first) or 0 (defer to the next capture open);
+      branch_change_* records what each
       change actually did, so a run that drifted onto the other branch is
       visible rather than assumed away. Two runs may only be compared as
       measurements of the same quantity if they used the same arm -- and a
@@ -876,9 +880,10 @@ cases:
     expect_dmesg:
       - 'Playback URB has stalled\.'
       - 'Capture URB has stalled\.'
-      - 'Resetting device to recover from stall after rate change'
-      - 'Capture URB stalled when opening capture stream'
-      - 'Restarting URBs to recover stalled Capture stream'
+      - 'Rate change to \d+ Hz left a stream stalled'
+      - 'Capture stream stalled \(opening a capture stream\)'
+      - 'Playback stream stalled \(preparing a playback stream\)'
+      - '(?:Playback|Capture) stream stalled \(a rate change\)'
     notes: >
       THE most important case in this catalog, and the one with the least
       obvious criterion. Capture stall after a rate change is expected on a
@@ -918,7 +923,7 @@ cases:
       min_nonzero_fraction: 0.01
     metrics: [failures, same_rate_open_s, diff_rate_attempt_s,
               diff_rate_obtained_hz, stalls_playback, stalls_capture,
-              resets_capture_stall, resets_full]
+              recovery_triggered_capture, recovery_triggered_full]
     pass: >
       A second stream at the same rate is accepted. A second stream at a
       different rate is constrained to the rate already running -- checked
@@ -1000,9 +1005,10 @@ cases:
       # is visible as a difference rather than as two incomparable numbers.
       [resets_per_change_pct, resets_total_device, stalls_per_change_pct,
        urb_restarts_that_avoided_a_reset,
-       stalls_capture, stalls_playback, resets_capture_stall,
-       resets_playback_stall, resets_full, capture_urb_restart,
-       capture_recovery_on_open, capture_restart_escalated,
+       stalls_capture, stalls_playback, recovery_triggered_capture,
+       recovery_triggered_playback, recovery_triggered_full, urb_restart_attempt,
+       capture_recovery_on_open, playback_recovery_on_prepare, restart_escalated,
+       recovery_budget_exhausted,
        failures, capture_live_changes,
        capture_nodata_changes, capture_silent_changes, capture_error_changes,
        first_bad_capture_change, capture_nonzero_min, capture_nonzero_max,
@@ -1011,6 +1017,7 @@ cases:
        capture_stall_hw_params_total, capture_stall_on_open_total,
        capture_stall_after_urb_restart_total, capture_stall_after_reset_total,
        reset_on_rate_change_total, reset_after_urb_restart_total,
+       reset_after_playback_prepare_total,
        stalled_after_full_reset_total, reset_timeout_total,
        branch_reset, branch_recovered_on_open, branch_deferred, branch_clean,
        stalls_direction_up, stalls_direction_down, stalls_direction_first,
@@ -1042,9 +1049,10 @@ cases:
     expect_dmesg:
       - 'Playback URB has stalled\.'
       - 'Capture URB has stalled\.'
-      - 'Resetting device to recover from stall after rate change'
-      - 'Capture URB stalled when opening capture stream'
-      - 'Restarting URBs to recover stalled Capture stream'
+      - 'Rate change to \d+ Hz left a stream stalled'
+      - 'Capture stream stalled \(opening a capture stream\)'
+      - 'Playback stream stalled \(preparing a playback stream\)'
+      - '(?:Playback|Capture) stream stalled \(a rate change\)'
     notes: >
       The long-running version of JT-RATE-001, historically run for ten hours
       at a time -- same script (cases/rate_change.py), same metrics, same
@@ -1618,7 +1626,7 @@ cases:
     metrics:
       [elapsed_seconds, bytes_sent, bursts, write_failures, achieved_bps,
        urb_stalls_playback, urb_stalls_capture, urb_stall_onset_ms,
-       urb_stall_recovered_ms, urb_stall_restarted_ms, urb_stall_deferred_ms]
+       urb_stall_recovered_ms, urb_stall_restarted_ms]
     pass: >
       Every MIDI OUT write is accepted, the card is still present with all three
       substream types at the end, and every PLAYBACK URB stall that started
@@ -1843,9 +1851,9 @@ cases:
 
       The steps used to quote a DIFFERENT give-up message, "hardware may
       need power-cycling" -- that string is real (jockey3.c,
-      jockey3_recover_capture_stream()) but belongs to a capture-recovery
-      escalation reachable only after a URB restart AND a full USB reset
-      both fail to bring capture back. A playback-only power cycle cannot
+      jockey3_recover_urb_stream()) but belongs to a recovery escalation
+      reachable only after a URB restart AND a full USB reset both fail to
+      bring a direction back. A playback-only power cycle cannot
       reach it, and forcing a capture open afterward just to chase a message
       that only fires when recovery has already failed twice was rejected as
       testing a should-not-happen path on every run instead of the one this
@@ -1864,8 +1872,8 @@ cases:
     steps:
       - >
         Note that JT-RATE-001 already triggers this path routinely -- check
-        dmesg there for "Resetting device to recover from stall after rate
-        change" before doing anything by hand.
+        dmesg there for "Rate change to N Hz left a stream stalled" before
+        doing anything by hand.
       - >
         To force one: start playback, then trigger a rate change to a lower
         rate while capture is open (see JT-RATE-002), which is the case most
@@ -1895,7 +1903,7 @@ cases:
          context, audio resumes afterwards) -- JT-RATE-001/JT-RATE-002 already
          provoke this path directly (the "shape that provokes the fault" is
          deliberate in JT-RATE-001's sweep_order) and already record it:
-         resets_total_device, resets_capture_stall, resets_playback_stall,
+         resets_total_device, recovery_triggered_capture, recovery_triggered_playback,
          reset_wait_ms. Whenever a reset actually fires during a routine run,
          it is measured, not merely hoped for.
       2. Whether it deadlocks -- lib/rules.yaml's `investigate` bucket matches
@@ -1918,7 +1926,7 @@ cases:
       /sys/bus/usb/devices/<dev>/reset is usbcore's own facility, triggers a
       real external reset with no driver changes, and would deterministically
       exercise .pre_reset/.post_reset (a failed reset unbinding rather than
-      resuming). It would NOT exercise jockey3_recover_capture_stream()'s own
+      resuming). It would NOT exercise jockey3_recover_urb_stream()'s own
       usb_queue_reset_device() + jockey3_wait_for_reset_completion() machinery,
       since that only runs from an internally-detected stall, which an
       external sysfs reset bypasses entirely. Worth its own case if that

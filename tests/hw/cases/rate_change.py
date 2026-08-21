@@ -39,13 +39,15 @@ reset path could spend an unknown fraction of its changes on the deferred one.
 
     rate_change_stream: capture    capture opens first, so it performs the
                         change with capture_open=1. hw_params sees a dead
-                        capture stream and resets on the spot.
+                        capture stream and calls jockey3_recover_urb_stream()
+                        on the spot -- URB restart first, full reset only if
+                        that fails.
 
     rate_change_stream: playback   playback opens first and changes the rate
-                        with capture_open=0, so hw_params defers; the capture
-                        open that follows lands in jockey3_pcm_prepare() and
-                        drives jockey3_recover_capture_stream() -- URB restart
-                        first, full reset only if that fails.
+                        with capture_open=0, so hw_params defers on capture;
+                        the capture open that follows lands in
+                        jockey3_pcm_prepare() and calls the same
+                        jockey3_recover_urb_stream() from there instead.
 
     capture: false                 nothing ever opens capture, so the deferred
                         stall is never picked up at all.
@@ -64,11 +66,17 @@ WHAT SEPARATES A DURATION EFFECT FROM A RECOVERY-TIME EFFECT
 `gap_seconds` idles between changes with nothing open. It exists so that "the
 device needs time between changes" can be tested without moving
 `seconds_per_rate`, which would change the length of the measurement at the
-same time and confound the two. There is a concrete mechanism for it: the reset
-that hw_params queues via usb_queue_reset_device() is NOT waited for there --
-only jockey3_recover_capture_stream() waits -- so at short durations change N+1
-can begin while change N's reset is still in flight, and consecutive changes
-are not independent events.
+same time and confound the two. Before Stage 3 of the recovery-unification
+cleanup there was a concrete mechanism for it: the reset that hw_params queued
+via usb_queue_reset_device() was NOT waited for there -- only
+jockey3_recover_capture_stream() waited -- so at short durations change N+1
+could begin while change N's reset was still in flight. Since Stage 3,
+jockey3_recover_urb_stream() runs (and, when it escalates, waits for
+jockey3_wait_for_reset_completion()) from hw_params() directly, so that
+specific confound is gone: hw_params() now returns only once any recovery it
+triggered has settled. `gap_seconds` is kept as a parameter regardless -- idle
+time between changes may still matter for reasons unrelated to an in-flight
+reset, and the parameter is cheap to keep available for that.
 
 MEASURING THE RATE FROM THE DEVICE'S CLOCK, NOT FROM A STOPWATCH
 -----------------------------------------------------------------
@@ -320,12 +328,13 @@ def clock_family(rate):
 # a run-level total cannot do.
 #
 # "Capture URB has stalled." is emitted by jockey3_wait_urb_stream_started()
-# from FOUR call sites, with one identical string: the post-rate-change check
-# in hw_params(), the confirmation in prepare(), and twice inside
-# jockey3_recover_capture_stream() (after the lightweight URB restart, and
-# after the full reset). Counting occurrences of the string therefore does not
-# count stalls -- one change can legitimately contain four of them, and a run
-# that escalated once would read as four stalls.
+# from several call sites, with one identical string: the post-rate-change
+# checks in hw_params(), the confirmation in prepare(), and twice inside
+# jockey3_recover_urb_stream() (after the lightweight URB restart, and after
+# the full reset) -- and that function itself now runs from both hw_params()
+# and prepare(). Counting occurrences of the string therefore does not count
+# stalls -- one change can legitimately contain several, and a run that
+# escalated once would read as more than one stall.
 #
 # What disambiguates them is the line that FOLLOWS: each caller logs its own
 # context immediately afterwards. So the stall lines are classified by looking
@@ -333,40 +342,65 @@ def clock_family(rate):
 # what classify_events() does.
 STALL_LINE = re.compile(r"(Playback|Capture) URB has stalled")
 
+# Stage 3 unified recovery into jockey3_recover_urb_stream(), shared by both
+# directions and reached from three places, distinguished only by the
+# "context" string each caller passes it: "a rate change" (hw_params(), for
+# EITHER direction), "opening a capture stream" (prepare(), capture branch),
+# "preparing a playback stream" (prepare(), playback branch -- previously this
+# branch only logged and never recovered; see below). Each context gets its
+# own light-retry/escalate/give-up event names below so the capture-open path
+# (the one this milestone has always been judged on) keeps its own counters
+# rather than being merged into an aggregate that could hide a change in it.
 CONTEXT = [
     ("prepare_capture",
-     re.compile(r"Capture URB stalled when opening capture stream")),
+     re.compile(r"Capture stream stalled \(opening a capture stream\); "
+                r"restarting URBs to recover")),
     ("prepare_playback",
-     re.compile(r"Playback URB stalled when preparing playback stream")),
-    ("urb_restart",
-     re.compile(r"Restarting URBs to recover stalled Capture stream")),
-    # Both of the names below end in the SAME call: usb_queue_reset_device().
-    # There is no such thing here as a lesser reset and a fuller one -- what
-    # differs is only what was tried first. An earlier version of this file
-    # called one of them "escalated to full reset" and printed it next to a
-    # plain count of resets, which read as though nine resets had happened and
-    # none of them had been full.
+     re.compile(r"Playback stream stalled \(preparing a playback stream\); "
+                r"restarting URBs to recover")),
+    ("hw_params_light_retry",
+     re.compile(r"(?:Playback|Capture) stream stalled \(a rate change\); "
+                r"restarting URBs to recover")),
+    # Every name below ends in the SAME call: usb_queue_reset_device(). There
+    # is no such thing here as a lesser reset and a fuller one -- what differs
+    # is only which light retry failed first, i.e. which context. An earlier
+    # version of this file called one of them "escalated to full reset" and
+    # printed it next to a plain count of resets, which read as though nine
+    # resets had happened and none of them had been full.
     #
-    #   reset_on_rate_change      hw_params() found a dead stream immediately
-    #                             after the change and reset at once
-    #   reset_after_urb_restart   recover_capture_stream() tried the cheap URB
-    #                             restart first, it did not work, so it reset
-    ("reset_after_urb_restart",
-     re.compile(r"Capture stream still stalled after URB restart")),
-    ("stalled_after_full_reset",
-     re.compile(r"Capture stream still stalled after full USB reset")),
+    #   reset_on_rate_change      hw_params()'s own light retry (context "a
+    #                             rate change") did not bring the stream back
+    #   reset_after_urb_restart   prepare()'s capture-open light retry
+    #                             (context "opening a capture stream") did not
+    #   reset_after_playback_prepare
+    #                             prepare()'s playback light retry (context
+    #                             "preparing a playback stream") did not --
+    #                             new in Stage 3; previously this branch never
+    #                             attempted recovery at all
     ("reset_on_rate_change",
-     re.compile(r"Resetting device to recover from stall after rate change to "
-                r"(?P<rate>\d+) Hz \(playback_alive=(?P<pb>\d), "
-                r"capture_alive=(?P<cap>\d), capture_open=(?P<open>\d)")),
+     re.compile(r"(?:Playback|Capture) stream still stalled after URB restart; "
+                r"queuing full USB reset \(a rate change\)")),
+    ("reset_after_urb_restart",
+     re.compile(r"Capture stream still stalled after URB restart; queuing "
+                r"full USB reset \(opening a capture stream\)")),
+    ("reset_after_playback_prepare",
+     re.compile(r"Playback stream still stalled after URB restart; queuing "
+                r"full USB reset \(preparing a playback stream\)")),
+    # The budget-exhausted give-up: chip-wide, so it can fire from any of the
+    # three contexts above without a light retry having even been tried on
+    # THIS call -- jockey3_recovery_budget_take() may already be spent from a
+    # different direction or a different call site entirely.
+    ("recovery_budget_exhausted",
+     re.compile(r"(?:Playback|Capture) stream still stalled after URB "
+                r"restart; recovery budget exhausted, not resetting")),
+    ("stalled_after_full_reset",
+     re.compile(r"(?:Playback|Capture) stream still stalled after full USB "
+                r"reset; hardware may need power-cycling")),
     ("reset_timeout",
      re.compile(r"Timeout waiting for reset completion")),
     ("watchdog_onset",
      re.compile(r"(?:Playback|Capture) URB stream stalled: no completion for "
                 r"(\d+) ms")),
-    ("watchdog_deferred",
-     re.compile(r"Capture URB stream still stalled while idle: no completion "
-                r"for (\d+) ms")),
     ("watchdog_recovered",
      re.compile(r"(?:Playback|Capture) URB stream recovered after (\d+) ms")),
     ("watchdog_restarted",
@@ -485,14 +519,17 @@ def branch_of(counts):
     failing open can put a change on the other branch, and a comparison between
     arms is worthless if the arm silently changed underneath it.
 
-    The order of the tests is a precedence, not a partition. On the capture arm
-    one change can legitimately do all of it: hw_params queues a reset without
-    waiting for it, and the prepare that follows immediately can find capture
-    still dead and start the URB restart / full reset ladder on top. Such a
-    change is labelled 'reset', so branch_reset is NOT a count of clean single
-    resets -- read reset_after_urb_restart_total and
-    prepare_capture_total beside it, and the
-    per-change metrics for any individual change.
+    The order of the tests is a precedence, not a partition. Since Stage 3,
+    hw_params()'s own call to jockey3_recover_urb_stream() waits for any reset
+    it triggers to complete before hw_params() returns, which closes the
+    specific race this docstring used to describe (a prepare() landing while
+    hw_params()'s fire-and-forget reset was still in flight). A change can
+    still legitimately carry more than one recovery event -- e.g. a fresh,
+    independent stall surfacing at the prepare() that follows -- so
+    branch_reset is still NOT guaranteed to be a count of clean single resets;
+    read reset_after_urb_restart_total, reset_after_playback_prepare_total and
+    prepare_capture_total beside it, and the per-change metrics for any
+    individual change.
     """
     if counts.get("reset_on_rate_change"):
         return "reset"
@@ -1183,26 +1220,37 @@ def main():
 
     n_stalled = len(stalled_at)
     # Every reset below is the same operation -- usb_queue_reset_device() -- so
-    # they are shown as one count with its two routes underneath, rather than
-    # as two counts that look like two severities. The previous wording put
-    # "resets 9" beside "escalated to full reset 0" and read as though nine
-    # resets had happened and none of them had been full.
+    # they are shown as one count with its three routes underneath, rather than
+    # as separate counts that look like different severities. The previous
+    # wording put "resets 9" beside "escalated to full reset 0" and read as
+    # though nine resets had happened and none of them had been full.
+    #
+    # Since Stage 3 unified recovery, ALL THREE routes try the same cheap URB
+    # restart first (jockey3_recover_urb_stream()) and only escalate to a full
+    # reset if that alone did not work -- including the direct-from-hw_params
+    # route, which used to reset unconditionally with no cheap step at all.
     direct = totals.get("reset_on_rate_change", 0)
-    after_restart = totals.get("reset_after_urb_restart", 0)
+    after_capture_restart = totals.get("reset_after_urb_restart", 0)
+    after_playback_prepare = totals.get("reset_after_playback_prepare", 0)
     c.progress(
         f"    driver: capture stalled at hw_params on "
         f"{n_stalled if attributable else '?'}/{changes} changes"
         f", playback stalls {totals.get('playback_stall', 0)}")
     c.progress(
-        f"    full USB resets: {direct + after_restart}"
-        f"  ({direct} queued by the rate change itself"
-        f", {after_restart} after a URB restart failed to clear the stall)")
-    if totals.get("prepare_capture") or totals.get("urb_restart"):
+        f"    full USB resets: {direct + after_capture_restart + after_playback_prepare}"
+        f"  ({direct} after hw_params()'s own URB restart failed"
+        f", {after_capture_restart} after prepare()'s capture-open restart failed"
+        f", {after_playback_prepare} after prepare()'s playback restart failed)")
+    if totals.get("prepare_capture"):
         c.progress(
             f"    deferred recovery at capture open: "
             f"{totals.get('prepare_capture', 0)} picked up"
-            f", {max(0, totals.get('urb_restart', 0) - after_restart)} cleared "
-            f"by a URB restart alone")
+            f", {max(0, totals.get('prepare_capture', 0) - after_capture_restart)} "
+            f"cleared by a URB restart alone")
+    if totals.get("recovery_budget_exhausted"):
+        c.progress(
+            f"    recovery budget exhausted (gave up without resetting): "
+            f"{totals['recovery_budget_exhausted']}")
     if totals.get("stalled_after_full_reset"):
         c.progress(f"    STILL STALLED after a full reset: "
                    f"{totals['stalled_after_full_reset']}")
@@ -1267,20 +1315,26 @@ def main():
     # watch while the driver is being worked on: it should trend to zero, and a
     # release where it does not has not fixed the fault, only survived it.
     #
-    # Both places a reset is queued count, because both are the same event from
-    # the device's point of view -- an audible interruption to whatever was
-    # playing:
+    # All three routes a reset can be queued from count, because they are the
+    # same event from the device's point of view -- an audible interruption to
+    # whatever was playing:
     #
     #   reset_on_rate_change
-    #              jockey3_pcm_hw_params() found a dead stream straight
-    #              after the change and reset on the spot
+    #              hw_params()'s own call to jockey3_recover_urb_stream()
+    #              (context "a rate change") tried the lightweight URB restart
+    #              first, it did not work, and it queued a full reset
     #   reset_after_urb_restart
-    #              jockey3_recover_capture_stream() tried the lightweight URB
-    #              restart first, it did not work, and it queued a full reset
+    #              prepare()'s capture-open call did the same and also failed
+    #   reset_after_playback_prepare
+    #              prepare()'s playback call did the same and also failed --
+    #              new in Stage 3; this path previously never attempted
+    #              recovery, so it could never have contributed a reset
     #
     # A URB restart that DID work is not counted: it is the outcome this metric
     # wants more of, so it is reported beside the percentage rather than inside
-    # it.
+    # it. Nor is a give-up on an exhausted recovery budget (recovery_budget_exhausted)
+    # counted here -- it deliberately did NOT reset the device, so counting it
+    # here would conflate "recovery did not run" with "recovery ran and reset".
     #
     # Taken from the run totals, not from the per-change attribution, and
     # deliberately so: totals survive a marker that failed to land, and on
@@ -1288,9 +1342,13 @@ def main():
     # headline of zero. It is the one figure here that must not be able to go
     # quietly wrong.
     resets = (totals.get("reset_on_rate_change", 0)
-              + totals.get("reset_after_urb_restart", 0))
-    restarts_that_worked = max(0, totals.get("urb_restart", 0)
-                               - totals.get("reset_after_urb_restart", 0))
+              + totals.get("reset_after_urb_restart", 0)
+              + totals.get("reset_after_playback_prepare", 0))
+    light_retries = (totals.get("hw_params_light_retry", 0)
+                     + totals.get("prepare_capture", 0)
+                     + totals.get("prepare_playback", 0))
+    restarts_that_worked = max(0, light_retries - resets
+                               - totals.get("recovery_budget_exhausted", 0))
     reset_pct = round(100.0 * resets / changes, 1) if changes else None
     stall_pct = (round(100.0 * totals.get("capture_stall_hw_params", 0)
                        / changes, 1) if changes else None)
@@ -1321,14 +1379,18 @@ def main():
     c.progress(detail)
     if changer == "capture":
         # Said out loud because the alternative is being read as a result.
-        # jockey3_recover_capture_stream() is reached only from prepare() on a
-        # capture open, which this arm never takes, so the cheap recovery path
-        # is not merely unused here -- it is unreachable, and its counter
-        # cannot be anything but zero.
+        # prepare()'s capture-open path (prepare_capture / reset_after_urb_restart)
+        # is reached only when capture was NOT open at the moment hw_params()
+        # ran, which this arm never allows -- capture is always open first, so
+        # hw_params() itself always finds and recovers the stall. Both counters
+        # are therefore structurally zero here, not evidence the deferred path
+        # works or does not. Since Stage 3, hw_params() ALSO tries the cheap URB
+        # restart before a reset (hw_params_light_retry / reset_on_rate_change),
+        # so "resets on the spot" no longer describes this arm either -- what is
+        # unreachable here is specifically prepare()'s capture-open counters.
         c.progress("        comparable only against another capture-arm run: "
-                   "here every capture stall resets on the spot, so the URB "
-                   "restart path is unreachable and its counter is "
-                   "structurally zero")
+                   "prepare()'s deferred capture-open recovery path is "
+                   "unreachable here, so its counters are structurally zero")
     if totals.get("stalled_after_full_reset"):
         c.progress(f"        {totals['stalled_after_full_reset']} did not recover even "
                    f"after a full reset")
@@ -1343,7 +1405,8 @@ def main():
     c.note(f"the rate change was performed by the {changer} stream on every "
            f"change, which fixes which branch of jockey3_pcm_hw_params() is "
            f"under test: {changer} means "
-           + ("capture_open=1, so a capture stall resets on the spot"
+           + ("capture_open=1, so a capture stall is recovered by hw_params() "
+              "itself, on the spot"
               if changer == "capture" else
               "capture_open=0, so a capture stall is deferred to the next "
               "capture open" if changer == "playback" else

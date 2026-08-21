@@ -22,31 +22,38 @@ benign:
   - pattern: 'Capture URB has stalled\.'
     metric: stalls_capture
     why: Same as playback -- expected, tracked, not a failure.
-  # Split by which direction actually triggered the reset, because "how often
-  # did a capture stall force a reset" is the question milestone 13 is judged
-  # on and the undifferentiated count cannot answer it. The driver already logs
-  # the reason -- playback_alive, capture_alive, capture_open -- so no driver
-  # change is needed to recover it.
+  # Split by which direction hw_params() found dead after the change, because
+  # "how often did a capture stall need recovery" is the question milestone 13
+  # is judged on and the undifferentiated count cannot answer it. The driver
+  # already logs the reason -- playback_alive, capture_alive, capture_open --
+  # so no driver change is needed to recover it.
+  #
+  # Stage 3 unified the recovery path: this line now means "hw_params found a
+  # stall and is about to try jockey3_recover_urb_stream()", not "a reset is
+  # about to happen" -- that function tries a lightweight URB restart first,
+  # and only escalates to a reset (logged separately, see restart_escalated
+  # below) if the restart alone does not bring the direction back. The metric
+  # names keep the "recovery" wording rather than "resets" for the same reason.
   #
   # These must precede the generic rule below: the first matching benign
   # pattern wins, so a broad pattern placed first would swallow both. Total
-  # resets after a rate change is the sum of the three.
-  - pattern: 'Resetting device to recover from stall after rate change to \d+ Hz \(playback_alive=0'
-    metric: resets_playback_stall
+  # recoveries triggered after a rate change is the sum of the three.
+  - pattern: 'Rate change to \d+ Hz left a stream stalled \(playback_alive=0'
+    metric: recovery_triggered_playback
     why: >
-      Playback died, which always forces a reset -- it carries MIDI OUT in byte
-      480 of every packet, so it may never be left down.
-  - pattern: 'Resetting device to recover from stall after rate change to \d+ Hz \(playback_alive=1, capture_alive=0'
-    metric: resets_capture_stall
+      Playback died, which always triggers recovery -- it carries MIDI OUT in
+      byte 480 of every packet, so it may never be left down.
+  - pattern: 'Rate change to \d+ Hz left a stream stalled \(playback_alive=1, capture_alive=0'
+    metric: recovery_triggered_capture
     why: >
       Playback survived and capture did not, with a capture stream open. This
       is the milestone 13 fault forcing the heaviest mitigation the driver has,
       and its rate against rate_changes is the number that says whether the
       problem is getting better.
-  - pattern: 'Resetting device to recover from stall after rate change'
-    metric: resets_full
+  - pattern: 'Rate change to \d+ Hz left a stream stalled'
+    metric: recovery_triggered_full
     why: >
-      Any reset after a rate change not attributed above -- which should be
+      Any post-rate-change recovery not attributed above -- which should be
       none, so a count here means the driver's message format changed and the
       two rules above have gone stale.
   - pattern: 'waited (\d+) ms for reset completion'
@@ -166,32 +173,48 @@ benign:
       usbcore's own load/unload announcement. It carries the module name, so it
       reads as ours and would otherwise fail every case that cycles the driver
       -- which is what it did on the first hardware run.
-  # The documented capture-recovery escalation. Each step is expected on a
-  # healthy build and is tracked so the escalation rate is visible; only the
-  # final give-up (in driver_fail) is a failure.
-  - pattern: 'Capture URB stalled when opening capture stream; attempting recovery'
+  # jockey3_recover_urb_stream()'s ladder, shared by both directions and by
+  # both call sites (hw_params()'s post-rate-change check, prepare()'s
+  # liveness check) since Stage 3. Each step is expected on a healthy build
+  # and is tracked so the escalation rate is visible; only the final give-up
+  # (in driver_fail) is a failure.
+  - pattern: 'Capture stream stalled \(opening a capture stream\); restarting URBs to recover'
     metric: capture_recovery_on_open
     why: >
       Deferred recovery arriving where it was designed to: a capture stall left
-      by an earlier rate change is picked up at the next capture open.
-  - pattern: 'Restarting URBs to recover stalled Capture stream'
-    metric: capture_urb_restart
-    why: The lightweight first step of recovery, before any USB reset.
-  - pattern: 'Capture stream still stalled after URB restart; queuing full USB reset'
-    metric: capture_restart_escalated
+      by an earlier rate change (idle, so hw_params() did not act on it) is
+      picked up at the next capture open.
+  - pattern: 'Playback stream stalled \(preparing a playback stream\); restarting URBs to recover'
+    metric: playback_recovery_on_prepare
+    why: >
+      Stage 3's symmetric counterpart to capture_recovery_on_open: a playback
+      stall found by .prepare -- rather than by hw_params() immediately after a
+      rate change -- now gets the same recovery attempt instead of only a log
+      line.
+  - pattern: '(?:Playback|Capture) stream stalled \(a rate change\); restarting URBs to recover'
+    metric: urb_restart_attempt
+    why: >
+      The lightweight first step of recovery, before any USB reset, triggered
+      directly from hw_params() rather than from a later prepare(). Ratelimited
+      by the driver, so a flapping stall can undercount this specific metric --
+      read alongside recovery_triggered_playback/capture, which are not.
+  - pattern: '(?:Playback|Capture) stream still stalled after URB restart; queuing full USB reset'
+    metric: restart_escalated
     why: >
       Escalation from URB restart to a full reset. Expected sometimes; a rising
       proportion of restarts that escalate is the signal worth watching.
   # ------------------------------------------------------------------------
   # The URB liveness watchdog.
   #
-  # Bucketed by PERSISTENCE, not by severity, and the reason is mechanical:
-  # kmsg.py tests driver_fail BEFORE a case's expect_dmesg, so a driver_fail
-  # pattern cannot be whitelisted per case. Putting the onset there would make
-  # JT-RATE-004 unconditionally red -- it cuts device power on purpose, and the
-  # watchdog can fire in the window between VBUS dropping and the hub reporting
-  # the disconnect. A stall that survives a full minute cannot be explained that
-  # way, so the heartbeat is what lives in driver_fail.
+  # Stage 3 trimmed this to edge-triggered onset/recovery only -- no periodic
+  # heartbeat. A stall is now expected to be either short-lived (recovered
+  # from hw_params()'s or prepare()'s own call to jockey3_recover_urb_stream())
+  # or, if the recovery budget is exhausted, reported loudly from there instead
+  # (see the driver_fail entries below) rather than by this watchdog going
+  # quiet for a full minute. Both remaining lines are counted rather than
+  # failed here, because a deliberate power cut (JT-RATE-004) produces an
+  # onset too and the watchdog cannot tell that apart from a real fault on its
+  # own -- what decides it is whether recovery's own give-up lines follow.
   - pattern: '(?:Playback|Capture) URB stream stalled: no completion for (\d+) ms'
     metric: urb_stall_onset_ms
     capture: 1
@@ -200,11 +223,6 @@ benign:
       is the measured age, which is the point of the message: a wedge used to be
       found minutes later by whatever tripped over it next, and the onset could
       only be bracketed to the nearest surrounding event.
-
-      Counted rather than failed, because a deliberate power cut produces one
-      too. An onset PAIRED with a recovery line is the stream coming back; an
-      onset that stands alone is a wedge, and the heartbeat in driver_fail is
-      what turns that into a red run.
   - pattern: '(?:Playback|Capture) URB stream recovered after (\d+) ms'
     metric: urb_stall_recovered_ms
     capture: 1
@@ -230,25 +248,6 @@ benign:
       silently, which left every onset unpaired and made the recovery metric
       dead on arrival. An onset with neither this nor a recovery to match it is
       a stall that never ended.
-  - pattern: 'Capture URB stream still stalled while idle: no completion for (\d+) ms'
-    metric: urb_stall_deferred_ms
-    capture: 1
-    why: >
-      The one stall the driver decides to live with. A capture stall while
-      nothing is recording is deliberately not acted on -- resetting the device
-      would glitch whatever playback is running for the sake of a direction
-      nobody is using -- and jockey3_pcm_prepare() picks it up at the next
-      capture open. It can persist indefinitely with nothing wrong.
-
-      Note the driver states this itself, in the message, rather than the
-      distinction being reconstructed here from direction and substream state.
-      The policy lives in one place, and this rule follows it instead of
-      duplicating it.
-
-      Counted because the frequency still matters: this is the M13 firmware
-      behavior, and how often it happens is the signal worth watching even
-      though each occurrence is expected. The first debug-kernel run recorded
-      103 capture stalls against one playback stall.
   # KUnit TAP scaffolding around the codec suite at module load. It is our
   # output, so it is classified here rather than as unrelated noise -- the
   # unrelated list is only consulted for lines that are not ours at all.
@@ -319,8 +318,17 @@ driver_fail:
     why: Endpoint delivered less than a packet; the format assumption is broken.
   - pattern: 'hardware may need power-cycling'
     why: >
-      The give-up path. Recovery escalated all the way through a full USB reset
-      and the stream is still dead.
+      One of jockey3_recover_urb_stream()'s two give-up paths. Recovery
+      escalated all the way through a full USB reset and the stream is still
+      dead.
+  - pattern: 'recovery budget exhausted, not resetting'
+    why: >
+      jockey3_recover_urb_stream()'s other give-up path: the chip-wide
+      bounded-retry budget (JOCKEY3_RECOVERY_MAX_ATTEMPTS per
+      JOCKEY3_RECOVERY_WINDOW_MS) was already spent, so this occurrence was
+      not even escalated to a reset. Since Stage 3 trimmed the watchdog's
+      periodic heartbeat, this line -- not a silent watchdog -- is what turns
+      a stall nothing is dealing with into a red run.
   - pattern: 'Failed to submit (?:playback|capture|MIDI IN) URB'
     why: >
       Not the same message as the benign "Failed to RESUBMIT ... -2/-108"
@@ -343,25 +351,6 @@ driver_fail:
       any reason other than the device having just gone away -- see the
       benign -19 entry for that case. Any other errno here is the rate
       change genuinely not having worked.
-  - pattern: '(?:Playback|Capture) URB stream still stalled: no completion for'
-    why: >
-      The watchdog's heartbeat: a direction that has been silent for a full
-      minute with nothing dealing with it. A deliberate power cut cannot produce
-      it -- the driver is disconnected by then and the watchdog has stopped --
-      which is why the onset above is only counted while this is a failure.
-
-      Deliberately does NOT match the deferred variant, which reads "still
-      stalled WHILE IDLE" and is benign above. driver_fail is tested before
-      benign, so this pattern staying narrow is what lets the two coexist:
-      widen it to 'still stalled' and every deferred capture stall starts
-      failing runs, which on the first debug-kernel numbers is most of them.
-  - pattern: 'Playback URB stalled when preparing playback stream'
-    why: >
-      .prepare confirmed, over a 50 ms poll, that playback is not running as an
-      application was about to use it. Deliberately worded differently from the
-      benign "Playback URB has stalled." that jockey3_wait_urb_stream_started()
-      emits: that one is counted, and routing this through it would have left a
-      dead device producing nothing but benign-classified output.
   - pattern: 'Started only \d+/\d+ playback and \d+/\d+ capture URBs'
     why: >
       The URB ring came up short. Only a completion handler resubmits a URB, so
