@@ -103,6 +103,8 @@ time relative to the case's own start.
 | 2026-08-19 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260819T193028Z-smoke`) | `cfa5bf3` | 1.0.3 | 2188 B/s | 2186 B/s | 1800s | no | - | - |
 | 2026-08-19 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260819T200209Z-smoke`) | `cfa5bf3` | 1.0.3 | 2500 B/s | 2498 B/s | 1800s | no | - | - |
 | 2026-08-19 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260819T203732Z-smoke`) | `cfa5bf3` | 1.0.3 | 2656 B/s | 2654 B/s | 1800s | no | - | - |
+| 2026-08-19 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260819T230008Z-smoke`) | `568b103` | 1.0.3 | 2812 B/s | 2249 B/s | 1800s | no | - | - |
+| 2026-08-22 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260822T003117Z-smoke`) | `b0fcdb0` | 1.0.3 | 2812 B/s | 2249 B/s | 1801s | no | - | - |
 
 <!-- RUN-LOG:END -->
 

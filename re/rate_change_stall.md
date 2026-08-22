@@ -22,6 +22,31 @@
 > and whether any of it should be removed before submission is a separate
 > question this document does not answer.
 >
+> **2026-08-21/22 follow-up: the mitigation stack was simplified, not
+> removed.** `jockey3_recover_capture_stream()` -- the dedicated
+> deferred-recovery function this document's "deferred recovery at the next
+> capture open" line refers to below -- is deleted (commit `cd47c4c`,
+> `implementation_plan.md` Milestone 13). Playback and capture recovery are
+> now one shared function, `jockey3_recover_urb_stream()`, called from both
+> `jockey3_pcm_hw_params()`'s post-rate-change check and
+> `jockey3_pcm_prepare()`'s liveness check. The *behavior* this document
+> measured did not change: a capture stall while idle is still left alone at
+> rate-change time and still only recovered the next time a capture stream is
+> opened -- deferred recovery is still exactly what happens. What changed is
+> that there is no longer a dedicated function or remembered "capture owes a
+> catch-up" state to implement that deferral; `jockey3_pcm_prepare()`'s own
+> liveness check, now symmetric between directions, simply notices the
+> still-stalled capture stream on open and calls the same function playback
+> always used. The idle-capture gate itself (only reset capture immediately if a
+> capture stream is actually open, to avoid an audible reset glitch on
+> unrelated, working playback audio) is unchanged and was deliberately kept;
+> see `notes.md`'s "Why the idle-capture gate exists, and why it's being
+> kept" for the full rationale. Hardware-endurance-validated post-cleanup at
+> 0 resets over 20,000 rate changes on x86_64-prod and 4,000 on arm64-prod
+> (2026-08-22); a small residual stall rate on arm64 (12 playback / 6 capture
+> stalls out of 4,000 changes) recovered every time without needing a device
+> reset.
+>
 > The rest of this document is the investigation as it ran, kept because the
 > reasoning is the record of how the cause was found -- and because several
 > of its intermediate conclusions were wrong in instructive ways.
