@@ -28,7 +28,6 @@ REPO=$(cd "$HERE/../.." && pwd)
 KERNEL_SRC=${1:?usage: use-committed.sh <kernel-src> <build-tree> [ref]}
 BUILD_TREE=${2:?usage: use-committed.sh <kernel-src> <build-tree> [ref]}
 REF=${3:-feature/jockey3}
-DST=sound/usb/jockey3
 
 SHA=$(git -C "$KERNEL_SRC" rev-parse --verify "$REF" 2>/dev/null) || {
 	echo "no ref '$REF' in $KERNEL_SRC" >&2; exit 2; }
@@ -36,12 +35,14 @@ SHA=$(git -C "$KERNEL_SRC" rev-parse --verify "$REF" 2>/dev/null) || {
 # Compare the files rather than trusting a workflow. The property that matters
 # is that rebuilding from this commit produces the same driver, and only the
 # bytes can say that. The mapping comes from sync-driver.sh, so a newly added
-# source file is covered here the moment it is covered there.
+# source file -- or documentation file, at whatever path -- is covered here
+# the moment it is covered there. dst is already relative to the kernel tree
+# root (sync-driver.sh does not assume everything lands under sound/usb/jockey3).
 drift=""
 while IFS= read -r pair; do
 	src=${pair%%:*}
 	dst=${pair#*:}
-	a=$(git -C "$KERNEL_SRC" show "$SHA:$DST/$dst" 2>/dev/null | sha256sum | cut -d' ' -f1)
+	a=$(git -C "$KERNEL_SRC" show "$SHA:$dst" 2>/dev/null | sha256sum | cut -d' ' -f1)
 	b=$(sha256sum "$REPO/$src" 2>/dev/null | cut -d' ' -f1)
 	[ "$a" = "$b" ] || drift="$drift $src"
 done < <("$HERE/sync-driver.sh" --list)
@@ -54,7 +55,7 @@ if [ -n "$drift" ]; then
 	echo "and the manifest names a revision that contains it:" >&2
 	echo >&2
 	echo "    tests/build/sync-driver.sh $KERNEL_SRC" >&2
-	echo "    git -C $KERNEL_SRC add $DST" >&2
+	echo "    git -C $KERNEL_SRC add sound/usb/jockey3 Documentation/sound/cards/jockey3.rst" >&2
 	echo "    git -C $KERNEL_SRC commit --amend --no-edit   # or a new commit" >&2
 	echo >&2
 	echo "or pass --uncommitted to build them as they are." >&2
