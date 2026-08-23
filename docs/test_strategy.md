@@ -770,6 +770,37 @@ against the USB PM model, and then a decision: fix, or allowlist with a reason.
 Note it does not match the "ours" pattern, since the lines say `ep_05` rather
 than the module name, which is why it is not attributed automatically.
 
+**Mid-stream URB stall after hours of clean operation —
+`JT-PCM-008-1`, x86_64-prod, 2026-08-23
+(`tests/hw/results/x86_64-prod/20260823T034127Z-smoke`).** An 8h duplex soak at 44.1 kHz ran
+cleanly for 4.1h — 24 consecutive 10-minute checkpoints, zero xruns either
+direction, stable memory growth — then both rings went silent in the same
+instant: `Playback URB stream stalled: no completion for 717 ms` immediately
+followed by `Capture URB stream stalled: no completion for 838 ms`, both 8
+URBs in flight, no rate change or MIDI activity anywhere nearby. `arecord` and
+`aplay` both got `-EIO` and died together.
+
+One line immediately precedes it in dmesg, same jiffy: `perf: interrupt took
+too long (2502 > 2500), lowering kernel.perf_event_max_sample_rate to 79750`.
+That is the kernel's own NMI-watchdog safety valve tripping, i.e. evidence of
+a genuine host-side latency spike at the exact moment both rings stopped
+completing — worth watching for on future stalls, since it points at
+system/hardware-level jitter rather than a driver logic error. Whether this
+is the Jockey 3 hardware itself glitching under sustained load, or a host
+scheduling perturbation starving the URB completion path, is undecided; this
+is being tracked as a possible **general reliability pattern** rather than
+assumed to be a driver defect, pending more occurrences.
+
+Process gap to fix next time: the device was power-cycled the following
+morning, before its wedged state was inspected, so as to restart the test —
+the restart's own dmesg shows `-71` (`EPROTO`) noise from the fresh
+enumeration, and whatever the original wedge would have shown (compare
+finding 3's `-2`/`ENOENT` submit failures and `-110` EP0 timeouts) is gone.
+**Before power-cycling or restarting a hung device, capture its live state
+first** (`lsusb -v`, the driver's sysfs/debug state if any, a
+`journalctl -k` snapshot) — a power cycle is destructive to exactly the
+evidence a wedge investigation needs.
+
 **Nothing yet proves data integrity.** Every automated case measures timing or
 liveness. `xrun_counter`, `avail_max`, byte counts and stall counts all say
 whether audio flowed on time; none says whether the bits arriving were the bits
