@@ -123,6 +123,11 @@ profiles:
         JT-PM-001:    {iterations: 0}
         JT-PM-002:    {iterations: 0}
         JT-MIDI-004:  {params: {rates: [44100, 48000]}}
+        # exclude the application/interopability tests for the pi1
+        JT-INTEROP-001: {iterations: 0}
+        JT-INTEROP-002: {iterations: 0}
+        JT-INTEROP-003: {iterations: 0}
+        JT-INTEROP-004: {iterations: 0}
       arm64-prod:
         JT-BUILD-001: {iterations: 0}
         JT-BUILD-002: {iterations: 0}
