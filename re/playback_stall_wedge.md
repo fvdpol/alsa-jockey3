@@ -104,7 +104,10 @@ time relative to the case's own start.
 | 2026-08-19 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260819T200209Z-smoke`) | `cfa5bf3` | 1.0.3 | 2500 B/s | 2498 B/s | 1800s | no | - | - |
 | 2026-08-19 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260819T203732Z-smoke`) | `cfa5bf3` | 1.0.3 | 2656 B/s | 2654 B/s | 1800s | no | - | - |
 | 2026-08-19 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260819T230008Z-smoke`) | `568b103` | 1.0.3 | 2812 B/s | 2249 B/s | 1800s | no | - | - |
+| 2026-08-22 | arm64-prod | JT-MIDI-007 (`arm64-prod-20260822T193754Z-functional`) | `a6adada` | 1.0.3 | 2812 B/s | 2249 B/s | 1802s | no | - | - |
 | 2026-08-22 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260822T003117Z-smoke`) | `b0fcdb0` | 1.0.3 | 2812 B/s | 2249 B/s | 1801s | no | - | - |
+| 2026-08-23 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260823T034127Z-smoke`) | `e87418d` | 1.0.6 | no MIDI (0 B/s) | n/a | 4.1h (cut short -- planned 8.0h) | no | - | - |
+| 2026-08-23 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260823T122413Z-smoke`) | `e87418d` | 1.0.6 | no MIDI (0 B/s) | n/a | 8.0h | no | - | - |
 
 <!-- RUN-LOG:END -->
 
