@@ -27,12 +27,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-try:
-    import yaml
-except ImportError:
-    sys.exit("PyYAML is required: apt install python3-yaml")
+from lib import alsa, env, kmsg, results, yamlio    # noqa: E402
 
-from lib import alsa, env, kmsg, results    # noqa: E402
+if not yamlio.available():
+    sys.exit("PyYAML is required: apt install python3-yaml")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DRIVER = "snd-reloop-jockey3 1-3:1.0: "
@@ -52,7 +50,7 @@ def check(ok, label, detail=""):
 
 def load(name):
     with open(os.path.join(HERE, name), "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return yamlio.safe_load(f)
 
 
 # --------------------------------------------------------------- classifier

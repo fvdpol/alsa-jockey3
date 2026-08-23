@@ -50,11 +50,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lib import (alsa, capabilities, env, kmsg, machineconf, priv,  # noqa: E402
-                 results, term)
+                 results, term, yamlio)
 
-try:
-    import yaml
-except ImportError:
+if not yamlio.available():
     sys.exit("PyYAML is required: apt install python3-yaml")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,7 +61,7 @@ REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 
 def load_yaml(name):
     with open(os.path.join(HERE, name), "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return yamlio.safe_load(f)
 
 
 def load_all():

@@ -59,10 +59,7 @@ renaming a file is not worth a broken bench.
 import os
 import sys
 
-try:
-    import yaml
-except ImportError:                                  # pragma: no cover
-    yaml = None
+from lib import yamlio
 
 DEFAULT_DIR = "~/.config/jockey3"
 FILENAME = "machine.yaml"
@@ -98,12 +95,12 @@ def load(refresh=False):
         return _cache[p]
     if not os.path.exists(p):
         result = ({}, None)
-    elif yaml is None:                               # pragma: no cover
+    elif not yamlio.available():                     # pragma: no cover
         result = ({}, f"PyYAML missing, cannot read {p}")
     else:
         try:
             with open(p, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
+                data = yamlio.safe_load(f) or {}
             result = (data if isinstance(data, dict) else {},
                       None if isinstance(data, dict)
                       else f"{p}: top level is not a mapping")
