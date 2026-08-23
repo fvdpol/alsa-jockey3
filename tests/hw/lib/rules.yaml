@@ -203,18 +203,33 @@ benign:
     why: >
       Escalation from URB restart to a full reset. Expected sometimes; a rising
       proportion of restarts that escalate is the signal worth watching.
+  - pattern: 'Playback stream stalled \(the watchdog\); restarting URBs to recover'
+    metric: playback_recovery_on_watchdog
+    why: >
+      The watchdog itself triggering recovery on a mid-stream stall with no PCM
+      ioctl re-entry to catch it -- the gap JT-PCM-008-1 (2026-08-23) exposed.
+      Recovery is attempted with xrun-reporting enabled; that does not by
+      itself mean an xrun was delivered (jockey3_report_xrun() still requires
+      the substream to be open and running).
+  - pattern: 'Capture stream stalled \(the watchdog\); restarting URBs to recover'
+    metric: capture_recovery_on_watchdog
+    why: >
+      Symmetric counterpart, gated the same way hw_params() already gates its
+      own capture recovery: only when a capture stream is open.
   # ------------------------------------------------------------------------
   # The URB liveness watchdog.
   #
-  # Stage 3 trimmed this to edge-triggered onset/recovery only -- no periodic
-  # heartbeat. A stall is now expected to be either short-lived (recovered
-  # from hw_params()'s or prepare()'s own call to jockey3_recover_urb_stream())
-  # or, if the recovery budget is exhausted, reported loudly from there instead
-  # (see the driver_fail entries below) rather than by this watchdog going
-  # quiet for a full minute. Both remaining lines are counted rather than
-  # failed here, because a deliberate power cut (JT-RATE-004) produces an
-  # onset too and the watchdog cannot tell that apart from a real fault on its
-  # own -- what decides it is whether recovery's own give-up lines follow.
+  # The watchdog now acts as well as detects: jockey3_watchdog_check() calls
+  # jockey3_recover_urb_stream() directly on a new onset (see the
+  # *_recovery_on_watchdog entries above), rather than only logging and
+  # leaving recovery to hw_params()'s or prepare()'s own call. A stall is
+  # still expected to be either short-lived or, if the recovery budget is
+  # exhausted, reported loudly from jockey3_recover_urb_stream() instead (see
+  # the driver_fail entries below) rather than by this watchdog going quiet.
+  # Both remaining lines are counted rather than failed here, because a
+  # deliberate power cut (JT-RATE-004) produces an onset too and the watchdog
+  # cannot tell that apart from a real fault on its own -- what decides it is
+  # whether recovery's own give-up lines follow.
   - pattern: '(?:Playback|Capture) URB stream stalled: no completion for (\d+) ms'
     metric: urb_stall_onset_ms
     capture: 1
@@ -235,7 +250,9 @@ benign:
       Rare in practice. Every recovery path in the driver goes through a URB
       stop/start, so a stall is nearly always closed by the restart line below
       instead -- the first hardware run with the watchdog recorded 103 onsets
-      and zero of these.
+      and zero of these. Expected to become rarer still now that the watchdog
+      calls jockey3_recover_urb_stream() directly on its own onset instead of
+      only logging, since that call itself performs the stop/start.
   - pattern: '(?:Playback|Capture) URB stream restarted after stalling for (\d+) ms'
     metric: urb_stall_restarted_ms
     capture: 1

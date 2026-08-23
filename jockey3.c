@@ -71,6 +71,11 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * device over EP0, and starting them again. jockey3_pcm_hw_params() checks
  * URB liveness on both directions afterward and recovers if either did not
  * restart; see the comment there for what that covers and why.
+ *
+ * A stall can also be found and recovered mid-stream, with no rate change or
+ * PCM ioctl involved: jockey3_watchdog_work() polls URB liveness for the
+ * device's whole lifetime and calls the same recovery ladder directly on a
+ * new stall onset. See jockey3_watchdog_check() and jockey3_watchdog_arm().
  */
 
 /**
@@ -105,6 +110,17 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * running when the cancel lands re-reads 'stopping' and does nothing. The sync
  * form appears only in jockey3_disconnect() and in the devres teardown action,
  * neither of which holds a mutex.
+ *
+ * jockey3_watchdog_work() itself may now call jockey3_recover_urb_stream(),
+ * which takes rate_mutex and calls jockey3_stop_urbs() -- i.e. the watchdog's
+ * own tick disarming itself via the non-sync cancel above, which is exactly
+ * the safe case: it never blocks and does not affect the tick already
+ * running. It may also queue a full USB reset; that reset runs on system_wq
+ * (usb_queue_reset_device(), drivers/usb/core/message.c), never
+ * system_long_wq where the watchdog runs, so the two cannot serialize behind
+ * one another, and rate_mutex is dropped before the wait for it, letting
+ * jockey3_pre_reset()/jockey3_post_reset() take the mutex themselves to
+ * complete.
  */
 
 #define JOCKEY3_N_URBS 8
@@ -119,17 +135,35 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * packet interval: PLOYTEC_PLAYBACK_FRAMES (10) or PLOYTEC_CAPTURE_FRAMES (8)
  * PCM frames' worth of time. That is 226.8 us per playback packet at 44100 Hz,
  * the slowest supported rate, down to 83.3 us per capture packet at 96000 Hz.
- * JOCKEY3_WATCHDOG_STALL_MS of silence is therefore at least 2200 consecutive
+ * JOCKEY3_WATCHDOG_STALL_MS of silence is therefore at least 800 consecutive
  * missed packets, and no scheduling delay or bus contention produces that on a
  * device that is still streaming.
+ *
+ * The threshold is sized against ALSA core's own stall timeout
+ * (wait_for_avail() in sound/core/pcm_lib.c, roughly buffer_size * 1100 / rate
+ * ms), not just against log-line visibility: jockey3_watchdog_check() now
+ * triggers jockey3_recover_urb_stream() on this same signal, so it has to fire
+ * with enough headroom to have a chance of recovering before the ALSA core
+ * gives up on the open substream and returns -EIO to userspace on its own.
  *
  * Note the contrast with jockey3_check_urb_stream_alive(), whose window is 1 ms:
  * that one is sampled repeatedly inside a 50 ms deadline and only has to answer
  * "has anything completed just now", whereas a single background sample has to
  * be robust against everything a loaded system can do to a workqueue.
+ *
+ * jockey3_watchdog_arm() no longer always waits the full JOCKEY3_WATCHDOG_POLL_MS
+ * before rechecking: it self-reschedules from the nearer of the two directions'
+ * last-activity deadlines, the same way net/sched/sch_generic.c's dev_watchdog()
+ * self-rearms via round_jiffies(oldest_start + watchdog_timeo) -- existing,
+ * proven kernel code solving the identical "detect silence cheaply, act
+ * promptly" problem. JOCKEY3_WATCHDOG_POLL_MS remains the ceiling delay (used
+ * before either direction has ever started); JOCKEY3_WATCHDOG_MIN_POLL_MS is
+ * the floor once a direction is at or past its deadline, so a confirmed stall
+ * gets rechecked tightly instead of waiting out a stale window.
  */
 #define JOCKEY3_WATCHDOG_POLL_MS	1000
-#define JOCKEY3_WATCHDOG_STALL_MS	500
+#define JOCKEY3_WATCHDOG_MIN_POLL_MS	10
+#define JOCKEY3_WATCHDOG_STALL_MS	20
 
 /*
  * Bounded-retry budget for jockey3_recover_urb_stream(), chip-wide because the
@@ -139,8 +173,16 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * budget is consulted after JOCKEY3_RECOVERY_WINDOW_MS has passed since the
  * current one started, so a chip that stops stalling is never left refusing
  * to recover for the rest of its life.
+ *
+ * Sized with headroom for the watchdog now calling jockey3_recover_urb_stream()
+ * directly (see its report_xrun parameter): an early xrun report can wake a
+ * concurrent jockey3_pcm_prepare() retry on the same direction before the
+ * watchdog's own call returns, so one physical stall can draw against this
+ * budget twice. jockey3_recover_urb_stream()'s own liveness check makes the
+ * second call a cheap no-op in the common case; the extra headroom covers the
+ * uncommon one.
  */
-#define JOCKEY3_RECOVERY_MAX_ATTEMPTS	3
+#define JOCKEY3_RECOVERY_MAX_ATTEMPTS	5
 #define JOCKEY3_RECOVERY_WINDOW_MS	60000
 
 /*
@@ -1042,17 +1084,79 @@ static void jockey3_midi_in_callback(struct urb *urb)
 }
 
 /*
+ * How long until a direction's watchdog deadline (last activity plus
+ * JOCKEY3_WATCHDOG_STALL_MS), in ms clamped to
+ * [JOCKEY3_WATCHDOG_MIN_POLL_MS, JOCKEY3_WATCHDOG_POLL_MS]. Returns
+ * JOCKEY3_WATCHDOG_POLL_MS if the direction has never started (no deadline to
+ * chase yet), and the floor if the deadline has already passed, so a
+ * confirmed stall gets rechecked tightly instead of waiting out a stale
+ * window. Only meaningful while a PCM stream is open somewhere -- see the
+ * caller, jockey3_watchdog_arm().
+ */
+static unsigned long jockey3_watchdog_next_delay_ms(const struct jockey3_pcm_urb_stream *urb_stream)
+{
+	u64 last = atomic64_read(&urb_stream->last_callback_time);
+	u64 started = atomic64_read(&urb_stream->urbs_started_time);
+	u64 now, remaining_ns;
+
+	if (!last)
+		last = started;
+	if (!last)
+		return JOCKEY3_WATCHDOG_POLL_MS;
+
+	now = ktime_get_mono_fast_ns();
+	remaining_ns = last + (u64)JOCKEY3_WATCHDOG_STALL_MS * NSEC_PER_MSEC - now;
+
+	if ((s64)remaining_ns <= 0)
+		return JOCKEY3_WATCHDOG_MIN_POLL_MS;
+
+	return clamp_t(unsigned long, div_u64(remaining_ns, NSEC_PER_MSEC),
+		       JOCKEY3_WATCHDOG_MIN_POLL_MS, JOCKEY3_WATCHDOG_POLL_MS);
+}
+
+/* Forward declaration: defined further down, alongside its other caller jockey3_pcm_hw_params() */
+static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int direction);
+
+/*
  * Schedule the next watchdog tick.
  *
- * system_long_wq rather than system_wq: the tick itself is trivial, but the
- * recovery this is intended to grow into blocks for seconds at a time (an EP0
- * transfer alone may take PLOYTEC_CTRL_TIMEOUT_MS), and system_wq items are
- * expected to be short.
+ * State-dependent cadence: while no PCM stream is open on either direction,
+ * URBs still flow (for MIDI's sake -- see the top-of-file DOC), but nothing
+ * is blocked on ALSA core's own per-period wait_for_avail() timeout the way an
+ * open, running substream is, so there is no reason to chase
+ * JOCKEY3_WATCHDOG_STALL_MS's tight window; poll at the JOCKEY3_WATCHDOG_POLL_MS
+ * ceiling instead, matching today's rate. Once either direction has an open
+ * substream, self-reschedule from the nearer of the two directions' watchdog
+ * deadlines, the same way net/sched/sch_generic.c's dev_watchdog() self-arms
+ * via round_jiffies(oldest_start + watchdog_timeo) for the identical "detect
+ * silence cheaply, act promptly" problem -- existing, proven kernel code, not
+ * a novel scheme.
+ *
+ * Unlike dev_watchdog(), the delay here is NOT passed through
+ * round_jiffies_relative(): that function rounds to whole *seconds*
+ * (kernel/time/timer.c), the right granularity for dev_watchdog()'s
+ * multi-second watchdog_timeo but two orders of magnitude coarser than
+ * JOCKEY3_WATCHDOG_STALL_MS -- it would inflate a tens-of-ms delay to nearly a
+ * full second, defeating the point.
+ *
+ * system_long_wq rather than system_wq: the tick itself is cheap, but
+ * jockey3_watchdog_check() may now call jockey3_recover_urb_stream(), which
+ * blocks for seconds at a time (an EP0 transfer alone may take
+ * PLOYTEC_CTRL_TIMEOUT_MS, and a full USB reset roughly 334 ms), and system_wq
+ * items are expected to be short.
  */
 static void jockey3_watchdog_arm(struct jockey3_chip *chip)
 {
-	queue_delayed_work(system_long_wq, &chip->watchdog_work,
-			   msecs_to_jiffies(JOCKEY3_WATCHDOG_POLL_MS));
+	unsigned long delay_ms;
+
+	if (jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_PLAYBACK) ||
+	    jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE))
+		delay_ms = min(jockey3_watchdog_next_delay_ms(&chip->playback),
+			       jockey3_watchdog_next_delay_ms(&chip->capture));
+	else
+		delay_ms = JOCKEY3_WATCHDOG_POLL_MS;
+
+	queue_delayed_work(system_long_wq, &chip->watchdog_work, msecs_to_jiffies(delay_ms));
 }
 
 /**
@@ -1398,6 +1502,12 @@ static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int directio
 	return open;
 }
 
+/* Forward declaration: defined further down, alongside its other callers jockey3_pcm_hw_params()
+ * and jockey3_pcm_prepare()
+ */
+static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direction,
+				      const char *context, bool report_xrun);
+
 static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *urb_stream)
 {
 	u64 last_time = atomic64_read(&urb_stream->last_callback_time);
@@ -1414,13 +1524,23 @@ static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *
  * @chip: driver state
  * @direction: SNDRV_PCM_STREAM_PLAYBACK or SNDRV_PCM_STREAM_CAPTURE
  *
- * Reports, but does not act on, a direction that has stopped completing URBs.
+ * Reports a direction that has stopped completing URBs, and, on the onset
+ * edge, calls jockey3_recover_urb_stream() to act on it directly -- this is
+ * the only path that catches a stall mid-stream, with no PCM ioctl re-entry
+ * to hand it to otherwise. Gated the same way jockey3_pcm_hw_params() already
+ * gates its own capture recovery: Playback always recovers, because it always
+ * carries MIDI OUT; Capture only recovers here if a capture stream is open,
+ * since jockey3_recover_urb_stream()'s ladder restarts the shared URB ring
+ * (Playback, Capture and MIDI together) and an idle Capture stall is the
+ * common case whenever no capture app is running -- recovering it here would
+ * glitch working Playback audio for no application-visible benefit. An idle
+ * Capture stall is still logged and left for the next capture open, exactly
+ * as jockey3_pcm_prepare() already handles it.
  *
  * Logging is edge-triggered: one line when a stall starts, one when it ends.
- * No periodic heartbeat in between -- jockey3_recover_urb_stream() now runs
- * from both jockey3_pcm_hw_params() and jockey3_pcm_prepare(), so a stall is
- * expected to be either short-lived or, if the recovery budget is exhausted,
- * reported loudly from there instead of by this watchdog going quiet. The
+ * No periodic heartbeat in between -- a stall is expected to be either
+ * short-lived or, if the recovery budget is exhausted, reported loudly from
+ * jockey3_recover_urb_stream() instead of by this watchdog going quiet. The
  * measured age is reported rather than the threshold, because the onset
  * timestamp is the point of the exercise and the poll interval alone would
  * only bound it to the width of one tick.
@@ -1501,6 +1621,9 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 	else if (log_recovery)
 		dev_warn(&chip->intf0->dev, "%s URB stream recovered after %llu ms\n",
 			 type, div_u64(outage_ns, NSEC_PER_MSEC));
+
+	if (log_onset && (direction == SNDRV_PCM_STREAM_PLAYBACK || open))
+		jockey3_recover_urb_stream(chip, direction, "the watchdog", true);
 }
 
 /**
@@ -1516,8 +1639,27 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
  * stream is open -- the URBs do too, since MIDI OUT rides in every playback
  * packet and there is no idle state in which "no completions" is legitimate.
  *
- * Detection only: what to do about a stall is deliberately left to the paths
- * that already own recovery.
+ * Acts as well as detects: jockey3_watchdog_check() calls
+ * jockey3_recover_urb_stream() directly on a new stall onset. This is the
+ * only place recovery can be triggered without some PCM ioctl (hw_params,
+ * prepare) re-entering the driver first -- necessary because a long-running,
+ * uninterrupted stream never re-enters otherwise, and ALSA core's own
+ * wait_for_avail() (sound/core/pcm_lib.c) times out the open substream with
+ * -EIO on its own schedule regardless of whether this driver ever notices.
+ * jockey3_watchdog_arm()'s cadence tightens while a PCM stream is open, for
+ * exactly this reason.
+ *
+ * Calling into jockey3_recover_urb_stream() from here is safe even though it
+ * calls jockey3_stop_urbs(), which disarms this same work item: the disarm is
+ * the non-sync cancel_delayed_work(), which never blocks and only prevents a
+ * future queueing -- it does not affect the tick that is already running
+ * (this one). The reset jockey3_recover_urb_stream() may queue runs on
+ * system_wq (drivers/usb/core/message.c's usb_queue_reset_device()), not
+ * system_long_wq where this tick runs, so the two cannot serialize behind
+ * each other; and rate_mutex is not held across the wait for that reset
+ * (jockey3_recover_urb_stream() drops it first), which is what lets
+ * jockey3_pre_reset()/jockey3_post_reset() take the mutex themselves and
+ * complete while this tick is blocked waiting.
  */
 static void jockey3_watchdog_work(struct work_struct *work)
 {
@@ -1574,17 +1716,28 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  * @chip: driver state
  * @direction: SNDRV_PCM_STREAM_PLAYBACK or SNDRV_PCM_STREAM_CAPTURE
  * @context: short description of what found the stall, for the log
+ * @report_xrun: report an xrun on the open substream once recovery is
+ *	committed to (see jockey3_report_xrun()). Pass true only when a stream
+ *	that was already running just lost continuity -- e.g. the watchdog
+ *	catching a mid-stream stall with no PCM ioctl re-entry to do it instead.
+ *	Pass false when the discontinuity is already expected by the caller (a
+ *	rate change) or nothing has flowed yet (recovery from .prepare, before
+ *	the stream is running).
  *
- * Shared by jockey3_pcm_hw_params()'s post-rate-change check and
- * jockey3_pcm_prepare()'s liveness check, replacing what used to be an
- * unconditional reset from the former and a dedicated deferred-recovery
- * function reached only from the latter. Both call sites confirm the
- * direction is actually stalled (over JOCKEY3_PREPARE_CONFIRM_MS) before
- * calling this, but the two-step ladder below is idempotent: a direction
- * found alive here -- for instance because a sibling call already restarted
- * the shared URB ring -- returns immediately, at no cost beyond one 1 ms
- * sample and without a second light retry glitching a stream that just came
- * back.
+ * Shared by jockey3_pcm_hw_params()'s post-rate-change check,
+ * jockey3_pcm_prepare()'s liveness check, and jockey3_watchdog_check()'s
+ * mid-stream stall detection, replacing what used to be an unconditional
+ * reset from the former and a dedicated deferred-recovery function reached
+ * only from the second. All call sites confirm the direction is actually
+ * stalled before calling this (over JOCKEY3_PREPARE_CONFIRM_MS for the ioctl
+ * paths, over JOCKEY3_WATCHDOG_STALL_MS for the watchdog), but the two-step
+ * ladder below is idempotent: a direction found alive here -- for instance
+ * because a sibling call already restarted the shared URB ring -- returns
+ * immediately, at no cost beyond one 1 ms sample and without a second light
+ * retry glitching a stream that just came back. That idempotence is also what
+ * makes it safe for the watchdog and a racing jockey3_pcm_prepare() retry
+ * (woken by @report_xrun's xrun) to both call this for the same stall; the
+ * second call is a cheap no-op in the common case.
  *
  * Ladder: a lightweight URB stop/start first; if that alone did not bring
  * the direction back, escalate to a full USB device reset, queued via
@@ -1607,7 +1760,7 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  * or -EAGAIN if a reset was queued but did not complete in time.
  */
 static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direction,
-				      const char *context)
+				      const char *context, bool report_xrun)
 {
 	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
 	const char *type = direction == SNDRV_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
@@ -1622,6 +1775,16 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	dev_warn_ratelimited(&chip->intf0->dev,
 			     "%s stream stalled (%s); restarting URBs to recover\n",
 			     type, context);
+
+	/*
+	 * Even the light restart below discards in-flight buffer state, so
+	 * sample-accuracy is already broken the moment recovery is committed
+	 * to -- report it now rather than waiting to see how far the ladder
+	 * escalates. jockey3_report_xrun() itself is a no-op if the substream
+	 * is not open and running, so this is safe to request unconditionally.
+	 */
+	if (report_xrun)
+		jockey3_report_xrun(urb_stream);
 
 	scoped_guard(mutex, &chip->rate_mutex) {
 		jockey3_stop_urbs(chip);
@@ -1871,7 +2034,7 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 		const char *context = substream->stream == SNDRV_PCM_STREAM_CAPTURE ?
 			"opening a capture stream" : "preparing a playback stream";
 
-		ret = jockey3_recover_urb_stream(chip, substream->stream, context);
+		ret = jockey3_recover_urb_stream(chip, substream->stream, context, false);
 		if (ret < 0)
 			return ret;
 	}
@@ -2085,14 +2248,14 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 
 		if (!playback_alive) {
 			ret = jockey3_recover_urb_stream(chip, SNDRV_PCM_STREAM_PLAYBACK,
-							 "a rate change");
+							 "a rate change", false);
 			if (ret < 0)
 				return ret;
 		}
 
 		if (!capture_alive && capture_open) {
 			ret = jockey3_recover_urb_stream(chip, SNDRV_PCM_STREAM_CAPTURE,
-							 "a rate change");
+							 "a rate change", false);
 			if (ret < 0)
 				return ret;
 		}
