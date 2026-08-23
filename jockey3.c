@@ -121,6 +121,14 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * one another, and rate_mutex is dropped before the wait for it, letting
  * jockey3_pre_reset()/jockey3_post_reset() take the mutex themselves to
  * complete.
+ *
+ * This also means jockey3_recover_urb_stream() can now be entered from two
+ * independent contexts (the watchdog, and a PCM ioctl) for what turns out to
+ * be the same stall. rate_mutex alone does not prevent both from running
+ * their stop/start-or-reset sequence concurrently, since neither holds it for
+ * the whole ladder -- chip->recovery_in_progress (atomic_cmpxchg(), not a
+ * lock, since the second caller must decline rather than block) is what
+ * makes only one such ladder run at a time; see its doc comment.
  */
 
 #define JOCKEY3_N_URBS 8
@@ -174,15 +182,15 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * current one started, so a chip that stops stalling is never left refusing
  * to recover for the rest of its life.
  *
- * Sized with headroom for the watchdog now calling jockey3_recover_urb_stream()
- * directly (see its report_xrun parameter): an early xrun report can wake a
- * concurrent jockey3_pcm_prepare() retry on the same direction before the
- * watchdog's own call returns, so one physical stall can draw against this
- * budget twice. jockey3_recover_urb_stream()'s own liveness check makes the
- * second call a cheap no-op in the common case; the extra headroom covers the
- * uncommon one.
+ * The watchdog now calling jockey3_recover_urb_stream() directly (see its
+ * report_xrun parameter) raised a question of whether this needed headroom:
+ * an early xrun report can wake a concurrent jockey3_pcm_prepare() retry on
+ * the same direction before the watchdog's own call returns. It does not --
+ * chip->recovery_in_progress (see jockey3_recover_urb_stream()) makes a
+ * concurrent second call decline outright rather than draw from this budget,
+ * so one physical stall still draws against it at most once.
  */
-#define JOCKEY3_RECOVERY_MAX_ATTEMPTS	5
+#define JOCKEY3_RECOVERY_MAX_ATTEMPTS	3
 #define JOCKEY3_RECOVERY_WINDOW_MS	60000
 
 /*
@@ -292,6 +300,18 @@ struct jockey3_pcm_urb_stream {
  *	stuck or negative budget.
  * @recovery_window_start: ktime the current budget window opened; 0 before
  *	the first attempt. See JOCKEY3_RECOVERY_WINDOW_MS.
+ * @recovery_in_progress: one jockey3_recover_urb_stream() ladder running at a
+ *	time, chip-wide rather than per-direction for the same reason
+ *	@recovery_attempts is chip-wide: jockey3_stop_urbs()/jockey3_start_urbs()
+ *	restart the shared ring for both directions together, so a Playback
+ *	recovery and a concurrent Capture recovery -- e.g. the watchdog and a
+ *	racing jockey3_pcm_prepare() retry -- would step on each other's
+ *	stop/start (or reset) sequence rather than being independent. A second
+ *	caller finding this already set declines immediately rather than racing
+ *	the first; the first caller's restart brings back whichever direction
+ *	the second one wanted too. Test-and-set via atomic_cmpxchg() rather than
+ *	a mutex held across the whole ladder, since jockey3_check_urb_stream_alive()
+ *	callers elsewhere poll rather than block on recovery finishing.
  * @midi_in_substream: open MIDI IN substream, or NULL; @midi_lock
  * @midi_out_substream: open MIDI OUT substream, or NULL; @midi_lock
  * @midi_in_urb: the single MIDI IN URB; not anchored, killed directly
@@ -323,6 +343,7 @@ struct jockey3_chip {
 	struct delayed_work watchdog_work;
 	atomic_t recovery_attempts;
 	atomic64_t recovery_window_start;
+	atomic_t recovery_in_progress;
 
 	/* MIDI Path */
 	struct snd_rawmidi_substream *midi_in_substream;
@@ -1730,14 +1751,22 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  * reset from the former and a dedicated deferred-recovery function reached
  * only from the second. All call sites confirm the direction is actually
  * stalled before calling this (over JOCKEY3_PREPARE_CONFIRM_MS for the ioctl
- * paths, over JOCKEY3_WATCHDOG_STALL_MS for the watchdog), but the two-step
- * ladder below is idempotent: a direction found alive here -- for instance
- * because a sibling call already restarted the shared URB ring -- returns
- * immediately, at no cost beyond one 1 ms sample and without a second light
- * retry glitching a stream that just came back. That idempotence is also what
- * makes it safe for the watchdog and a racing jockey3_pcm_prepare() retry
- * (woken by @report_xrun's xrun) to both call this for the same stall; the
- * second call is a cheap no-op in the common case.
+ * paths, over JOCKEY3_WATCHDOG_STALL_MS for the watchdog), and a direction
+ * found alive at entry -- for instance because a sibling call already
+ * restarted the shared URB ring -- returns immediately, at no cost beyond one
+ * 1 ms sample and without a second light retry glitching a stream that just
+ * came back. That is enough to make two *sequential* calls for the same
+ * stall cheap, but not enough on its own for two *concurrent* ones: two
+ * callers can both pass the alive check before either has restarted
+ * anything, and then run jockey3_stop_urbs()/jockey3_start_urbs() (or queue
+ * competing resets) against each other. @chip->recovery_in_progress closes
+ * that gap: only one ladder runs at a time, chip-wide (see its doc comment
+ * for why chip-wide rather than per-direction). This was found the hard way
+ * on the bench -- the watchdog and a racing jockey3_pcm_prepare() retry (the
+ * latter woken by @report_xrun's xrun) both entered the ladder for the same
+ * stall, and the two stop/start-or-reset sequences colliding produced
+ * repeated -EPROTO transport errors on every endpoint and forced a real
+ * device re-enumeration to recover from.
  *
  * Ladder: a lightweight URB stop/start first; if that alone did not bring
  * the direction back, escalate to a full USB device reset, queued via
@@ -1755,22 +1784,30 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  * light retry that keeps working never spends any budget but would otherwise
  * log on every call.
  *
- * Return: 0 if the direction is confirmed alive, or recovery gave up and
- * logged why (still non-fatal to the caller); -ENODEV if the device is gone,
- * or -EAGAIN if a reset was queued but did not complete in time.
+ * Return: 0 if the direction is confirmed alive, recovery gave up and logged
+ * why (still non-fatal to the caller), or a concurrent call already had this
+ * in hand; -ENODEV if the device is gone; or -EAGAIN if a reset was queued
+ * but did not complete in time.
  */
 static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direction,
 				      const char *context, bool report_xrun)
 {
 	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
 	const char *type = direction == SNDRV_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
-	int ret;
+	int ret = 0;
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
 	if (jockey3_check_urb_stream_alive(urb_stream))
 		return 0;
+
+	if (atomic_cmpxchg(&chip->recovery_in_progress, 0, 1) != 0) {
+		dev_dbg(&chip->intf0->dev,
+			"%s stream stalled (%s); another recovery is already in progress, skipping\n",
+			type, context);
+		return 0;
+	}
 
 	dev_warn_ratelimited(&chip->intf0->dev,
 			     "%s stream stalled (%s); restarting URBs to recover\n",
@@ -1792,13 +1829,13 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	}
 
 	if (jockey3_wait_urb_stream_started(chip, direction, JOCKEY3_PREPARE_CONFIRM_MS))
-		return 0;
+		goto out;
 
 	if (!jockey3_recovery_budget_take(chip)) {
 		dev_err(&chip->intf0->dev,
 			"%s stream still stalled after URB restart; recovery budget exhausted, not resetting (%s)\n",
 			type, context);
-		return 0;
+		goto out;
 	}
 
 	dev_warn(&chip->intf0->dev,
@@ -1808,14 +1845,16 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 
 	ret = jockey3_wait_for_reset_completion(chip);
 	if (ret < 0)
-		return ret;
+		goto out;
 
 	if (!jockey3_wait_urb_stream_started(chip, direction, JOCKEY3_PREPARE_CONFIRM_MS))
 		dev_err(&chip->intf0->dev,
 			"%s stream still stalled after full USB reset; hardware may need power-cycling (%s)\n",
 			type, context);
 
-	return 0;
+out:
+	atomic_set(&chip->recovery_in_progress, 0);
+	return ret;
 }
 
 /*
