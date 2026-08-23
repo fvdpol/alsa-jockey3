@@ -59,7 +59,15 @@ renaming a file is not worth a broken bench.
 import os
 import sys
 
-from lib import yamlio
+# This module doubles as a CLI (see _main() / reload_driver.sh), and when
+# python3 runs it by path, sys.path[0] is this file's own directory rather
+# than tests/hw -- so "from lib import yamlio" below would fail to find the
+# lib package unless tests/hw is added explicitly, same as the other
+# lib-importing entry-point scripts under actions/ and cases/ do.
+sys.path.insert(0, os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
+
+from lib import yamlio    # noqa: E402
 
 DEFAULT_DIR = "~/.config/jockey3"
 FILENAME = "machine.yaml"
