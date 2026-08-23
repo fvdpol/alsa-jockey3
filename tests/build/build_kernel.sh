@@ -247,15 +247,42 @@ fi
 # the dtc this same build just produced. This driver needs no device-tree
 # overlay of its own; this exists purely to give the glob something to
 # match.
+#
+# A second, unrelated z50 gap gets fixed in the same pass: it only rsyncs
+# `bcm27*.dtb` into /boot/firmware, which is Raspberry Pi's own downstream
+# kernel's legacy per-SoC naming (bcm2708/2709/2710/2711/2712). A mainline
+# build's board dtbs are named after the actual SoC instead (bcm2835 for
+# the v6 flavour's boards, e.g. bcm2835-rpi-b-plus.dtb for a Pi 1B+), so
+# they fall outside that glob and are silently never installed -- the
+# board then boots the new kernel against whatever dtb was already in
+# /boot/firmware from a previous install. First hit and diagnosed on
+# pi1test, 2026-08-22 (see implementation_plan.md / session notes).
+#
+# Fixed by appending a small step to the package's own DEBIAN/postinst,
+# after dpkg's generated `run-parts /etc/kernel/postinst.d` call, that
+# copies this kernel's own bcm28*.dtb alongside whatever z50 installed.
+# Deliberately NOT a file dropped under /etc/kernel/postinst.d/: that
+# directory is unversioned, so a fixed filename there would collide the
+# next time a same-flavour kernel package is installed ("trying to
+# overwrite ... also in package ..."), where every path a kernel-image
+# package DOES own is namespaced by $release for exactly this reason.
+# Appending to the maintainer script instead can't collide, since it is
+# not a filesystem path. Deliberately does NOT touch the legacy bcm27*
+# names or config.txt: overwriting bcm2708-rpi-b-plus.dtb with mainline
+# content would silently hand a mainline devicetree to a downstream/rpt
+# kernel installed later, and board selection belongs to the rig, not the
+# package.
 if [ "$PACKAGE" -eq 1 ] && [ -n "$RPI_LV" ]; then
 	image_deb=$(find "$BUILD_OUTPUT" -maxdepth 1 \
 		-name "linux-image-${release}_*.deb" -newermt "@$start" | head -1)
 	dtc=$O/scripts/dtc/dtc
-	if [ -n "$image_deb" ] && [ -x "$dtc" ]; then
-		ov_dir="usr/lib/linux-image-${release}/overlays"
+	if [ -n "$image_deb" ]; then
 		tmp=$(mktemp -d)
 		dpkg-deb -R "$image_deb" "$tmp"
-		if [ ! -d "$tmp/$ov_dir" ]; then
+		changed=0
+
+		ov_dir="usr/lib/linux-image-${release}/overlays"
+		if [ -x "$dtc" ] && [ ! -d "$tmp/$ov_dir" ]; then
 			mkdir -p "$tmp/$ov_dir"
 			cat > "$tmp/$ov_dir/README" <<-EOF
 				No Raspberry Pi downstream device-tree overlays here: this is
@@ -281,10 +308,50 @@ if [ "$PACKAGE" -eq 1 ] && [ -n "$RPI_LV" ]; then
 				-o "$tmp/$ov_dir/placeholder.dtbo" \
 				"$placeholder/placeholder.dts"
 			rm -rf "$placeholder"
-			dpkg-deb --root-owner-group -b "$tmp" "$image_deb" >/dev/null
+			changed=1
 			echo "   added a placeholder $ov_dir/ to $(basename "$image_deb")" \
 				"(raspi-firmware requires *.dtb* to match there)"
 		fi
+
+		# Mirrors z50's own flavour switch (v8/v8-rt/2712 -> .../broadcom,
+		# v6/v7 -> flat) so the copy looks in the same place z50 does.
+		case "$RPI_LV" in
+		-rpi-v8|-rpi-v8-rt|-rpi-2712)
+			dtb_src_dir="usr/lib/linux-image-${release}/broadcom" ;;
+		*)
+			dtb_src_dir="usr/lib/linux-image-${release}" ;;
+		esac
+		postinst=$tmp/DEBIAN/postinst
+		if [ -f "$postinst" ] && [ -d "$tmp/$dtb_src_dir" ] \
+			&& ! grep -q "jockey3: copy this kernel's own bcm28\*.dtb" "$postinst"; then
+			# Insert before the script's own trailing `exit 0`, so this runs
+			# after run-parts (and thus after z50) but is still covered by
+			# the script's `set -e`.
+			tmp_postinst=$(mktemp)
+			sed '$ d' "$postinst" > "$tmp_postinst"
+			cat >> "$tmp_postinst" <<-EOF
+				# jockey3: copy this kernel's own bcm28*.dtb into /boot/firmware --
+				# z50-raspi-firmware only rsyncs bcm27*.dtb, which a mainline build's
+				# board dtbs (bcm28*.dtb) never match. Never touches the legacy
+				# bcm27* names or config.txt; quiet no-op off a Pi / without
+				# /boot/firmware mounted, same as z50's own guard.
+				if [ -d /boot/firmware ]; then
+					for f in /$dtb_src_dir/bcm28*.dtb; do
+						[ -e "\$f" ] || continue
+						cp -f "\$f" /boot/firmware/
+					done
+					sync -f /boot/firmware 2>/dev/null || true
+				fi
+			EOF
+			echo "exit 0" >> "$tmp_postinst"
+			cp "$tmp_postinst" "$postinst"
+			rm -f "$tmp_postinst"
+			changed=1
+			echo "   appended a bcm28*.dtb copy step to $(basename "$image_deb")'s postinst" \
+				"(raspi-firmware only installs bcm27*.dtb)"
+		fi
+
+		[ "$changed" -eq 1 ] && dpkg-deb --root-owner-group -b "$tmp" "$image_deb" >/dev/null
 		rm -rf "$tmp"
 	fi
 fi
