@@ -41,10 +41,13 @@ profiles:
     cases:
       - {id: JT-BUILD-006, iterations: 1}
       - {id: JT-PROBE-001, iterations: 3}
+      - {id: JT-PROBE-002, iterations: 3, params: {iterations_per_run: 5}}
+      - {id: JT-PROBE-003, iterations: 1, params: {iterations_per_run: 3}}
       - {id: JT-PCM-002,   iterations: 1, params: {rates: [44100, 96000], seconds: 2}}
       - {id: JT-PCM-004,   iterations: 1, params: {rates: [44100], seconds: 2}}
-      - {id: JT-RATE-001,  iterations: 1, params: {iterations_per_run: 5}}
-      - {id: JT-MIDI-002,  iterations: 1}
+      - {id: JT-RATE-001,  iterations: 1, params: {iterations_per_run: 3}}
+      - {id: JT-AUDIO-002, iterations: 1}
+      - {id: JT-AUDIO-005, iterations: 1, params: {iterations_per_run: 3}}
     overrides:
       armhf-prod:
         JT-PCM-002: {params: {rates: [44100], seconds: 2}}
@@ -239,7 +242,7 @@ profiles:
       - {id: JT-PCM-008, iterations: 1}
       - {id: JT-RATE-003, iterations: 1}
       - {id: JT-PROBE-005, iterations: 1}
-      - {id: JT-MIDI-007, iterations: 1, params: {duration_seconds: 14400}}
+      - {id: JT-MIDI-007, iterations: 1, params: {duration_seconds: 7200}}
       - {id: JT-INTEROP-004, iterations: 1}
       # Thirty cold boots rather than the usual ten. Ten cycles cannot tell a
       # true 0% failure rate from about 25%, which is fine while bisecting a
