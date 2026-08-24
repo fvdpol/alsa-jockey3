@@ -139,11 +139,31 @@ else
 	echo "building $ref_desc"
 fi
 
-make -C "$BUILD_TREE" -j"$(nproc)" O="$OBJ" ARCH="$KARCH" ${CROSS:+CROSS_COMPILE="$CROSS"} \
-	M=$DST modules
+# With plain M=, kbuild writes the module's own objects next to its sources
+# in $BUILD_TREE -- one shared location regardless of target, since $BUILD_TREE
+# is the same worktree for every target and only $OBJ (via O=) varies. Building
+# arm64-prod right after x86_64-prod would silently overwrite the same .ko
+# with the wrong architecture's binary, with nothing to stop it being handed to
+# reload_driver.sh next. MO= (Documentation/kbuild/modules.rst) redirects the
+# module's own build output to a separate directory while still reading
+# configuration and headers from $OBJ; pointing it at $OBJ/$DST leaves the
+# module at the same path a full build_kernel.sh build would also leave it at,
+# so each target gets one stable, independent location, the same way
+# $OBJ itself already does for the kernel object tree.
+MOD_OUT=$OBJ/$DST
 
-# With M=, kbuild writes objects next to the sources rather than into O=.
-KO=$BUILD_TREE/$DST/snd-reloop-jockey3.ko
+# A source tree that already holds build artifacts -- from a build predating
+# MO=, or a stray plain M= invocation -- makes kbuild refuse an MO= build with
+# "external module source tree is not clean". Harmless and fast when there is
+# nothing to clean.
+if compgen -G "$BUILD_TREE/$DST/*.o" >/dev/null 2>&1 || [ -f "$BUILD_TREE/$DST/Module.symvers" ]; then
+	make -C "$BUILD_TREE" M=$DST clean >/dev/null
+fi
+
+make -C "$BUILD_TREE" -j"$(nproc)" O="$OBJ" ARCH="$KARCH" ${CROSS:+CROSS_COMPILE="$CROSS"} \
+	M=$DST MO="$MOD_OUT" modules
+
+KO=$MOD_OUT/snd-reloop-jockey3.ko
 [ -f "$KO" ] || { echo "no module produced at $KO" >&2; exit 3; }
 
 echo

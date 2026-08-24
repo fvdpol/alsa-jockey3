@@ -216,7 +216,7 @@ power_switch:      # mains relay on the device's own supply, for JT-AUDIO-005
   url: http://relay.example.com
 paths:             # where a built module is fetched from, per machine
   build_host: alsa-dev
-  build_path: ~/sound-build/sound/usb/jockey3/snd-reloop-jockey3.ko
+  build_path: ~/kbuild/{target}/sound/usb/jockey3/snd-reloop-jockey3.ko
 profiles:
   default: smoke                                    # what a bare run does here
   applicable: [smoke, functional, regression, soak] # advisory, not a gate

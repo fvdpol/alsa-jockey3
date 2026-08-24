@@ -92,8 +92,10 @@ holds in-tree output, and #2 is built in tree. Reaching for `make mrproper` on
 #2 instead would discard 24 GB and roughly forty minutes every time a target
 kernel is built.
 
-Because `M=` writes objects next to the sources, this worktree accumulates
-`.o` files under `sound/usb/jockey3/`. That is expected.
+Plain `M=` writes a module's own objects next to its sources, but
+`build_module.sh` passes `MO=` to redirect them into the target's own
+`~/kbuild/<target>/sound/usb/jockey3/` instead (see below), so this worktree's
+`sound/usb/jockey3/` holds source only, never build output.
 
 ### 4. Target builds — `~/kbuild/<target>/`
 
@@ -104,6 +106,20 @@ in each is the authoritative answer to "which kernel is this".
 This is what a deployable module must be built against, because **`vermagic`
 must match the running kernel exactly** — and on a debug target the KASAN
 mismatch makes that unmissable rather than subtle.
+
+`build_module.sh` also leaves the module itself here, at
+`sound/usb/jockey3/snd-reloop-jockey3.ko` under this target's own directory —
+the same path a full `build_kernel.sh` build already leaves it at. It does
+this with `MO=` (`Documentation/kbuild/modules.rst`), which redirects an
+external module's own build output to a separate directory while `O=` still
+supplies the configuration and headers. Without it, `M=` alone writes the
+module's objects next to its sources in `~/sound-build`, one shared location
+regardless of target — so building `arm64-prod` right after `x86_64-prod`
+silently overwrote the same `.ko` with the wrong architecture's binary, with
+nothing to stop `reload_driver.sh` loading it next. With `MO=`, each target's
+module — like its kernel object tree — has its own stable location, and two
+targets can be built one after the other (or tested concurrently) without
+either clobbering the other.
 
 ### 5. The KUnit worktree — `~/sound-kunit/`
 

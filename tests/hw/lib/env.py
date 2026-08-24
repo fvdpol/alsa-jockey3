@@ -18,8 +18,17 @@ import gzip
 import os
 import re
 import subprocess
+import sys
 
-from lib import priv
+# This module doubles as a CLI (see _main() / reload_driver.sh), and when
+# python3 runs it by path, sys.path[0] is this file's own directory rather
+# than tests/hw -- so "from lib import priv" below would fail to find the
+# lib package unless tests/hw is added explicitly, same as the other
+# lib-importing entry-point scripts under actions/ and lib/machineconf.py do.
+sys.path.insert(0, os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
+
+from lib import priv    # noqa: E402
 
 MODULE = "snd_reloop_jockey3"          # as it appears in sysfs
 MODULE_DASH = "snd-reloop-jockey3"     # as modprobe spells it
@@ -635,3 +644,31 @@ def capture(targets=None, kernel_src=None):
         if err:
             env["detected_target_error"] = err
     return env
+
+
+def _main(argv):
+    """Query this module from a shell script.
+
+        env.py detect-target
+
+    Prints the target this machine is currently booted as (e.g.
+    "x86_64-prod") and exits 0, or prints an error to stderr and exits 1 --
+    for a caller like reload_driver.sh that needs the answer but has no
+    business duplicating detect_target()'s LOCALVERSION matching.
+    """
+    if argv != ["detect-target"]:
+        print("usage: env.py detect-target", file=sys.stderr)
+        return 2
+    from lib import yamlio
+    with open(os.path.join(HW_DIR, "targets.yaml"), "r", encoding="utf-8") as f:
+        targets = yamlio.safe_load(f)["targets"]
+    name, _spec, err = detect_target(targets)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    print(name)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main(sys.argv[1:]))

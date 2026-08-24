@@ -33,7 +33,7 @@ remember, fewer to forget.
 
     paths:
       build_host: alsa-dev
-      build_path: ~/sound-build/sound/usb/jockey3/snd-reloop-jockey3.ko
+      build_path: ~/kbuild/{target}/sound/usb/jockey3/snd-reloop-jockey3.ko
 
     profiles:
       default: smoke

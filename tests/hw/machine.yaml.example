@@ -48,15 +48,22 @@ capabilities:
 # Where actions/reload_driver.sh fetches a built module from, when it is not
 # given one on the command line.
 #
-# build_path must be the per-target module -- what build_module.sh puts in
-# ~/sound-build -- and NOT ~/sound, which is the in-tree build for the build
-# host's own kernel. Deploying that to a target gives a vermagic mismatch.
+# build_path must be the per-target module -- what build_module.sh puts under
+# ~/kbuild/<target> -- and NOT ~/sound, which is the in-tree build for the
+# build host's own kernel. Deploying that to a target gives a vermagic
+# mismatch.
+#
+# A literal {target} is filled in from what THIS machine is currently booted
+# as (the same LOCALVERSION-based detection every other tool in this suite
+# uses), so one build_path template covers every target rather than naming
+# whichever one was built most recently -- important once more than one
+# target is in play, since build_module.sh gives each its own directory.
 #
 # Env: JT_BUILD_HOST, JT_BUILD_PATH
 #
 # paths:
 #   build_host: alsa-dev
-#   build_path: ~/sound-build/sound/usb/jockey3/snd-reloop-jockey3.ko
+#   build_path: ~/kbuild/{target}/sound/usb/jockey3/snd-reloop-jockey3.ko
 
 # default:    what `./runner.py` with no --profile does on this machine. The
 #             build server wants "build"; a bench wants "smoke".
