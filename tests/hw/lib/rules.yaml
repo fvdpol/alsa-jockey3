@@ -536,3 +536,17 @@ unrelated:
   - pattern: 'ACPI: PM: '
   - pattern: 'serial \d+:\d+: disabled'
   - pattern: 'e1000e: EEE TX LPI TIMER'
+  # e1000e re-establishing the EliteDesk's onboard NIC link and the Intel ME
+  # watchdog failing its post-resume reprobe. Both are `alsa-test`'s own
+  # unrelated PCI devices (0000:00:1f.6, 0000:00:16.0) doing their own thing
+  # inside JT-PM-001's suspend/resume window; neither touches USB. Seen
+  # 2026-08-24, x86_64-prod functional run.
+  - pattern: 'e1000e [0-9a-f:.]+ \w+: NIC Link is Up'
+  - pattern: 'mei_wdt [0-9a-f:.]+-[0-9a-f-]+: (Could not reg notif event|probe with driver mei_wdt failed)'
+  # A hub's own extended-port-status read glitching (-71/EPROTO) is generic
+  # usbcore/host-controller housekeeping, not attributable to any specific
+  # downstream device -- the message never names one. Seen 2026-08-24,
+  # x86_64-prod smoke run, on a hub branch (`1-2.4`) that is not the Jockey
+  # 3's own parent hub (`1-13`), during JT-PROBE-003's unrelated port-power
+  # cycling of the device's own hub.
+  - pattern: 'hub \d+-[\d.]+:1\.0: hub_ext_port_status failed'
