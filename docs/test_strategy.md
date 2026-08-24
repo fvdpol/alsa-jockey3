@@ -77,6 +77,27 @@ Tests are worth writing where failure is plausible. For this driver that is:
   runs of the same build, so a short run indicates rather than measures; the
   statistically useful version is `JT-RATE-003`. Working document:
   `re/rate_change_stall.md`.
+
+  **2026-08-23, x86_64-prod, bench build (watchdog self-healing +
+  concurrency fix, not yet released).** During `JT-AUDIO-002`, the 44.1→48kHz
+  transition — an *upward* change, contradicting the 2026-08-15 measurement
+  above that every observed stall fell on a downward one — failed outright at
+  EP0: `Firmware version read failed: -110` (`ETIMEDOUT`), `Rate change to
+  48000 failed: -110`, repeated three times over about 4 seconds. The
+  watchdog independently noticed Playback had stopped completing at the same
+  moment (same underlying cause), tried its light restart, that did not
+  hold, and escalated to a full USB reset — which itself ran long enough that
+  the driver's own 1000 ms wait bound gave up (`Timeout waiting for reset
+  completion`) while the real reset kept running via the USB core's own
+  workqueue and completed on its own after the driver had already moved on.
+  The device fully recovered: 88.2kHz and 96kHz worked cleanly in the same
+  run, and the next run passed outright. No concurrent-recovery collision
+  this time (contrast the bug fixed by "ALSA: jockey3: prevent concurrent
+  recovery ladders from racing each other") — this looks like the same
+  already-tracked hardware/firmware-timing instability as the rest of this
+  section, just caught by the watchdog directly rather than only by
+  `hw_params()`'s post-rate-change check, and with an occasionally slower
+  reset than the driver's internal timeout expects.
 - **URB lifecycle.** The `callbacks_active` safe-zone counter, `sync_stop`
   draining with a 1000 ms cap, the `stopping` flag checked inside the same
   critical section that resubmits. Use-after-free lives here.
