@@ -111,7 +111,7 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * form appears only in jockey3_disconnect() and in the devres teardown action,
  * neither of which holds a mutex.
  *
- * jockey3_watchdog_work() itself may now call jockey3_recover_urb_stream(),
+ * jockey3_watchdog_work() itself may call jockey3_recover_urb_stream(),
  * which takes rate_mutex and calls jockey3_stop_urbs() -- i.e. the watchdog's
  * own tick disarming itself via the non-sync cancel above, which is exactly
  * the safe case: it never blocks and does not affect the tick already
@@ -122,7 +122,7 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * jockey3_pre_reset()/jockey3_post_reset() take the mutex themselves to
  * complete.
  *
- * This also means jockey3_recover_urb_stream() can now be entered from two
+ * This also means jockey3_recover_urb_stream() can be entered from two
  * independent contexts (the watchdog, and a PCM ioctl) for what turns out to
  * be the same stall. rate_mutex alone does not prevent both from running
  * their stop/start-or-reset sequence concurrently, since neither holds it for
@@ -149,7 +149,7 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  *
  * The threshold is sized against ALSA core's own stall timeout
  * (wait_for_avail() in sound/core/pcm_lib.c, roughly buffer_size * 1100 / rate
- * ms), not just against log-line visibility: jockey3_watchdog_check() now
+ * ms), not just against log-line visibility: jockey3_watchdog_check()
  * triggers jockey3_recover_urb_stream() on this same signal, so it has to fire
  * with enough headroom to have a chance of recovering before the ALSA core
  * gives up on the open substream and returns -EIO to userspace on its own.
@@ -159,15 +159,16 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * "has anything completed just now", whereas a single background sample has to
  * be robust against everything a loaded system can do to a workqueue.
  *
- * jockey3_watchdog_arm() no longer always waits the full JOCKEY3_WATCHDOG_POLL_MS
- * before rechecking: it self-reschedules from the nearer of the two directions'
- * last-activity deadlines, the same way net/sched/sch_generic.c's dev_watchdog()
- * self-rearms via round_jiffies(oldest_start + watchdog_timeo) -- existing,
- * proven kernel code solving the identical "detect silence cheaply, act
- * promptly" problem. JOCKEY3_WATCHDOG_POLL_MS remains the ceiling delay (used
- * before either direction has ever started); JOCKEY3_WATCHDOG_MIN_POLL_MS is
- * the floor once a direction is at or past its deadline, so a confirmed stall
- * gets rechecked tightly instead of waiting out a stale window.
+ * jockey3_watchdog_arm() self-reschedules from the nearer of the two
+ * directions' last-activity deadlines, rather than always waiting the full
+ * JOCKEY3_WATCHDOG_POLL_MS before rechecking, the same way
+ * net/sched/sch_generic.c's dev_watchdog() self-rearms via
+ * round_jiffies(oldest_start + watchdog_timeo) -- existing, proven kernel
+ * code solving the identical "detect silence cheaply, act promptly" problem.
+ * JOCKEY3_WATCHDOG_POLL_MS remains the ceiling delay (used before either
+ * direction has ever started); JOCKEY3_WATCHDOG_MIN_POLL_MS is the floor
+ * once a direction is at or past its deadline, so a confirmed stall gets
+ * rechecked tightly instead of waiting out a stale window.
  */
 #define JOCKEY3_WATCHDOG_POLL_MS	1000
 #define JOCKEY3_WATCHDOG_MIN_POLL_MS	10
@@ -182,13 +183,13 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * current one started, so a chip that stops stalling is never left refusing
  * to recover for the rest of its life.
  *
- * The watchdog now calling jockey3_recover_urb_stream() directly (see its
- * report_xrun parameter) raised a question of whether this needed headroom:
- * an early xrun report can wake a concurrent jockey3_pcm_prepare() retry on
- * the same direction before the watchdog's own call returns. It does not --
- * chip->recovery_in_progress (see jockey3_recover_urb_stream()) makes a
- * concurrent second call decline outright rather than draw from this budget,
- * so one physical stall still draws against it at most once.
+ * The watchdog calls jockey3_recover_urb_stream() directly (see its
+ * report_xrun parameter), and an early xrun report from that call can wake a
+ * concurrent jockey3_pcm_prepare() retry on the same direction before the
+ * watchdog's own call returns. chip->recovery_in_progress (see
+ * jockey3_recover_urb_stream()) makes that concurrent second call decline
+ * outright rather than draw from this budget, so one physical stall still
+ * draws against it at most once.
  */
 #define JOCKEY3_RECOVERY_MAX_ATTEMPTS	3
 #define JOCKEY3_RECOVERY_WINDOW_MS	60000
@@ -1161,7 +1162,7 @@ static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int directio
  * full second, defeating the point.
  *
  * system_long_wq rather than system_wq: the tick itself is cheap, but
- * jockey3_watchdog_check() may now call jockey3_recover_urb_stream(), which
+ * jockey3_watchdog_check() may call jockey3_recover_urb_stream(), which
  * blocks for seconds at a time (an EP0 transfer alone may take
  * PLOYTEC_CTRL_TIMEOUT_MS, and a full USB reset roughly 334 ms), and system_wq
  * items are expected to be short.
@@ -1195,7 +1196,7 @@ static void jockey3_watchdog_arm(struct jockey3_chip *chip)
  * anything reading the log afterwards.
  *
  * So the restart closes the outage explicitly. Together with the recovery line
- * in jockey3_watchdog_check(), every onset now has exactly one counterpart.
+ * in jockey3_watchdog_check(), every onset has exactly one counterpart.
  */
 static void jockey3_watchdog_clear_stall(struct jockey3_chip *chip,
 					 struct jockey3_pcm_urb_stream *urb_stream,
@@ -1483,14 +1484,13 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate, bool c
 	dev_dbg(&chip->intf0->dev, "Current hardware rate: %u Hz\n", current_hw_rate);
 
 	/*
-	 * Program the rate even when the device already reports it. This used to
-	 * be skipped on a match, which meant it never ran at all during probe:
-	 * initialization asks for 44100 Hz and 44100 Hz is the power-on default,
-	 * so the device always reported the value we were about to write and the
-	 * write was elided. The USB traces show no vendor sequence doing that --
-	 * every macOS and Windows initialization programs the rate
-	 * unconditionally, to a device already reporting it, and only then reads
-	 * it back. The writes evidently do more than set a frequency.
+	 * Program the rate even when the device already reports it. Skipping the
+	 * write on a match would silently elide it during probe every time,
+	 * since initialization always asks for 44100 Hz and that is also the
+	 * device's power-on default. Every macOS and Windows initialization
+	 * programs the rate unconditionally, to a device already reporting it,
+	 * and only then reads it back -- the write evidently does more than set
+	 * a frequency.
 	 *
 	 * Callers that want to avoid a redundant rate change already check
 	 * against chip->current_rate before getting here.
@@ -1749,9 +1749,7 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  *
  * Shared by jockey3_pcm_hw_params()'s post-rate-change check,
  * jockey3_pcm_prepare()'s liveness check, and jockey3_watchdog_check()'s
- * mid-stream stall detection, replacing what used to be an unconditional
- * reset from the former and a dedicated deferred-recovery function reached
- * only from the second. All call sites confirm the direction is actually
+ * mid-stream stall detection. All call sites confirm the direction is actually
  * stalled before calling this (over JOCKEY3_PREPARE_CONFIRM_MS for the ioctl
  * paths, over JOCKEY3_WATCHDOG_STALL_MS for the watchdog), and a direction
  * found alive at entry -- for instance because a sibling call already
@@ -1763,12 +1761,12 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  * anything, and then run jockey3_stop_urbs()/jockey3_start_urbs() (or queue
  * competing resets) against each other. @chip->recovery_in_progress closes
  * that gap: only one ladder runs at a time, chip-wide (see its doc comment
- * for why chip-wide rather than per-direction). This was found the hard way
- * on the bench -- the watchdog and a racing jockey3_pcm_prepare() retry (the
- * latter woken by @report_xrun's xrun) both entered the ladder for the same
- * stall, and the two stop/start-or-reset sequences colliding produced
- * repeated -EPROTO transport errors on every endpoint and forced a real
- * device re-enumeration to recover from.
+ * for why chip-wide rather than per-direction). Without it, the watchdog and
+ * a racing jockey3_pcm_prepare() retry (the latter woken by @report_xrun's
+ * xrun) can both enter the ladder for the same stall; the two stop/
+ * start-or-reset sequences colliding produce repeated -EPROTO transport
+ * errors on every endpoint and force a real device re-enumeration to
+ * recover from.
  *
  * Ladder: a lightweight URB stop/start first; if that alone did not bring
  * the direction back, escalate to a full USB device reset, queued via
