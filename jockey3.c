@@ -1737,13 +1737,15 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  * @chip: driver state
  * @direction: SNDRV_PCM_STREAM_PLAYBACK or SNDRV_PCM_STREAM_CAPTURE
  * @context: short description of what found the stall, for the log
- * @report_xrun: report an xrun on the open substream once recovery is
- *	committed to (see jockey3_report_xrun()). Pass true only when a stream
- *	that was already running just lost continuity -- e.g. the watchdog
- *	catching a mid-stream stall with no PCM ioctl re-entry to do it instead.
- *	Pass false when the discontinuity is already expected by the caller (a
- *	rate change) or nothing has flowed yet (recovery from .prepare, before
- *	the stream is running).
+ * @report_xrun: report an xrun on both directions' open substreams once
+ *	recovery is committed to (see jockey3_report_xrun()) -- both, not just
+ *	@direction, because jockey3_stop_urbs()/jockey3_start_urbs() tear down
+ *	and resubmit the shared ring for both regardless of which one stalled.
+ *	Pass true only when a stream that was already running just lost
+ *	continuity -- e.g. the watchdog catching a mid-stream stall with no PCM
+ *	ioctl re-entry to do it instead. Pass false when the discontinuity is
+ *	already expected by the caller (a rate change) or nothing has flowed
+ *	yet (recovery from .prepare, before the stream is running).
  *
  * Shared by jockey3_pcm_hw_params()'s post-rate-change check,
  * jockey3_pcm_prepare()'s liveness check, and jockey3_watchdog_check()'s
@@ -1817,11 +1819,20 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	 * Even the light restart below discards in-flight buffer state, so
 	 * sample-accuracy is already broken the moment recovery is committed
 	 * to -- report it now rather than waiting to see how far the ladder
-	 * escalates. jockey3_report_xrun() itself is a no-op if the substream
-	 * is not open and running, so this is safe to request unconditionally.
+	 * escalates. Both directions, not just @direction: jockey3_stop_urbs()/
+	 * jockey3_start_urbs() below tear down and resubmit the *shared* ring
+	 * unconditionally, so an open sibling substream loses continuity too,
+	 * even though it was never found stalled itself. Found on the bench: an
+	 * open Capture stream died with its own -EIO from ALSA core's
+	 * wait_for_avail() timeout while a Playback-triggered recovery was still
+	 * in flight, because only Playback had been told. jockey3_report_xrun()
+	 * itself is a no-op if a given substream is not open and running, so
+	 * calling it on both unconditionally is safe.
 	 */
-	if (report_xrun)
-		jockey3_report_xrun(urb_stream);
+	if (report_xrun) {
+		jockey3_report_xrun(&chip->playback);
+		jockey3_report_xrun(&chip->capture);
+	}
 
 	scoped_guard(mutex, &chip->rate_mutex) {
 		jockey3_stop_urbs(chip);
