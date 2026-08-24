@@ -342,15 +342,17 @@ def clock_family(rate):
 # what classify_events() does.
 STALL_LINE = re.compile(r"(Playback|Capture) URB has stalled")
 
-# Stage 3 unified recovery into jockey3_recover_urb_stream(), shared by both
-# directions and reached from three places, distinguished only by the
-# "context" string each caller passes it: "a rate change" (hw_params(), for
-# EITHER direction), "opening a capture stream" (prepare(), capture branch),
-# "preparing a playback stream" (prepare(), playback branch -- previously this
-# branch only logged and never recovered; see below). Each context gets its
-# own light-retry/escalate/give-up event names below so the capture-open path
-# (the one this milestone has always been judged on) keeps its own counters
-# rather than being merged into an aggregate that could hide a change in it.
+# jockey3_recover_urb_stream() is shared by both directions and reached from
+# four places, distinguished only by the "context" string each caller passes
+# it: "rate change" (hw_params(), for EITHER direction), "opening a capture
+# stream" (prepare(), capture branch), "preparing a playback stream"
+# (prepare(), playback branch), "watchdog" (jockey3_watchdog_check(), for
+# EITHER direction -- not distinguished into its own event names below since
+# it is not attributable to any one rate change; see watchdog_* below
+# instead). Each of the first three contexts gets its own light-retry/
+# escalate/give-up event names below so the capture-open path (the one this
+# milestone has always been judged on) keeps its own counters rather than
+# being merged into an aggregate that could hide a change in it.
 CONTEXT = [
     ("prepare_capture",
      re.compile(r"Capture stream stalled \(opening a capture stream\); "
@@ -359,7 +361,7 @@ CONTEXT = [
      re.compile(r"Playback stream stalled \(preparing a playback stream\); "
                 r"restarting URBs to recover")),
     ("hw_params_light_retry",
-     re.compile(r"(?:Playback|Capture) stream stalled \(a rate change\); "
+     re.compile(r"(?:Playback|Capture) stream stalled \(rate change\); "
                 r"restarting URBs to recover")),
     # Every name below ends in the SAME call: usb_queue_reset_device(). There
     # is no such thing here as a lesser reset and a fuller one -- what differs
@@ -368,18 +370,16 @@ CONTEXT = [
     # printed it next to a plain count of resets, which read as though nine
     # resets had happened and none of them had been full.
     #
-    #   reset_on_rate_change      hw_params()'s own light retry (context "a
-    #                             rate change") did not bring the stream back
+    #   reset_on_rate_change      hw_params()'s own light retry (context
+    #                             "rate change") did not bring the stream back
     #   reset_after_urb_restart   prepare()'s capture-open light retry
     #                             (context "opening a capture stream") did not
     #   reset_after_playback_prepare
     #                             prepare()'s playback light retry (context
-    #                             "preparing a playback stream") did not --
-    #                             new in Stage 3; previously this branch never
-    #                             attempted recovery at all
+    #                             "preparing a playback stream") did not
     ("reset_on_rate_change",
      re.compile(r"(?:Playback|Capture) stream still stalled after URB restart; "
-                r"queuing full USB reset \(a rate change\)")),
+                r"queuing full USB reset \(rate change\)")),
     ("reset_after_urb_restart",
      re.compile(r"Capture stream still stalled after URB restart; queuing "
                 r"full USB reset \(opening a capture stream\)")),
@@ -1321,13 +1321,12 @@ def main():
     #
     #   reset_on_rate_change
     #              hw_params()'s own call to jockey3_recover_urb_stream()
-    #              (context "a rate change") tried the lightweight URB restart
+    #              (context "rate change") tried the lightweight URB restart
     #              first, it did not work, and it queued a full reset
     #   reset_after_urb_restart
     #              prepare()'s capture-open call did the same and also failed
     #   reset_after_playback_prepare
-    #              prepare()'s playback call did the same and also failed --
-    #              new in Stage 3; this path previously never attempted
+    #              prepare()'s playback call did the same and also failed
     #              recovery, so it could never have contributed a reset
     #
     # A URB restart that DID work is not counted: it is the outcome this metric

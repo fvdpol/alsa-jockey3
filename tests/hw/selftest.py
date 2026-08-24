@@ -191,28 +191,41 @@ def test_watchdog(rules):
 
 
 def test_recovery_giveup(rules):
-    """jockey3_recover_urb_stream()'s ladder, shared since Stage 3 by both
-    directions and all three call-site contexts (a rate change, opening a
-    capture stream, preparing a playback stream).
+    """jockey3_recover_urb_stream()'s ladder, shared since Stage 3 by all
+    four call-site contexts (rate change, opening a capture stream,
+    preparing a playback stream, watchdog) and both directions.
 
     Each step is benign and tracked on a healthy build; only the two give-up
     lines fail a run, since Stage 3 trimmed the watchdog's periodic heartbeat
     and these are what now turn a stall nothing is dealing with into a red
     run instead.
+
+    The fixture text for each context is copied verbatim from the format
+    string in jockey3_recover_urb_stream() plus the literal context argument
+    each call site passes -- not composed to read naturally -- because a
+    fixture that merely sounds right is exactly what let the watchdog
+    context ship with no coverage at all: rules.yaml matched "(the
+    watchdog)" while the driver has only ever logged "(watchdog)", and nothing
+    caught the mismatch until it misclassified a real run on arm64-prod
+    (2026-08-24).
     """
     print("\nrecovery-ladder signatures")
     c = kmsg.Classifier(rules)
     T = "[21337.057880] "
 
     light_retry = [
-        T + DRIVER + "Capture stream stalled (a rate change); restarting URBs "
+        T + DRIVER + "Capture stream stalled (rate change); restarting URBs "
                      "to recover",
-        T + DRIVER + "Playback stream stalled (a rate change); restarting URBs "
+        T + DRIVER + "Playback stream stalled (rate change); restarting URBs "
                      "to recover",
         T + DRIVER + "Capture stream stalled (opening a capture stream); "
                      "restarting URBs to recover",
         T + DRIVER + "Playback stream stalled (preparing a playback stream); "
                      "restarting URBs to recover",
+        T + DRIVER + "Capture stream stalled (watchdog); restarting URBs "
+                     "to recover",
+        T + DRIVER + "Playback stream stalled (watchdog); restarting URBs "
+                     "to recover",
     ]
     b, _ = c.classify(light_retry, [])
     check(not b[kmsg.UNEXPECTED] and not b[kmsg.UNCLASSIFIED],
@@ -220,7 +233,7 @@ def test_recovery_giveup(rules):
 
     escalate = [
         T + DRIVER + "Capture stream still stalled after URB restart; queuing "
-                     "full USB reset (a rate change)",
+                     "full USB reset (rate change)",
         T + DRIVER + "Playback stream still stalled after URB restart; queuing "
                      "full USB reset (opening a capture stream)",
         T + DRIVER + "Playback stream still stalled after URB restart; queuing "
@@ -233,7 +246,7 @@ def test_recovery_giveup(rules):
 
     giveup = [
         T + DRIVER + "Capture stream still stalled after full USB reset; "
-                     "hardware may need power-cycling (a rate change)",
+                     "hardware may need power-cycling (rate change)",
         T + DRIVER + "Playback stream still stalled after URB restart; "
                      "recovery budget exhausted, not resetting "
                      "(preparing a playback stream)",
@@ -251,9 +264,9 @@ def test_recovery_giveup(rules):
     # the other should have fired).
     b, _ = c.classify([
         T + DRIVER + "Capture stream still stalled after URB restart; "
-                     "queuing full USB reset (a rate change)",
+                     "queuing full USB reset (rate change)",
         T + DRIVER + "Capture stream still stalled after URB restart; "
-                     "recovery budget exhausted, not resetting (a rate change)",
+                     "recovery budget exhausted, not resetting (rate change)",
     ], [])
     check(len(b[kmsg.EXPECTED]) == 1 and len(b[kmsg.UNEXPECTED]) == 1,
           "escalation and budget-exhausted land in different buckets even "
@@ -1170,11 +1183,11 @@ def test_rate_change_case_runs():
                            "(playback_alive=1, capture_alive=0, "
                            "capture_open=1); attempting recovery")
                 log.append("[100.2] snd-reloop-jockey3 1-2.2:1.0: Capture "
-                           "stream stalled (a rate change); restarting URBs "
+                           "stream stalled (rate change); restarting URBs "
                            "to recover")
                 log.append("[100.3] snd-reloop-jockey3 1-2.2:1.0: Capture "
                            "stream still stalled after URB restart; queuing "
-                           "full USB reset (a rate change)")
+                           "full USB reset (rate change)")
             return types.SimpleNamespace(token=token, written=True,
                                          write=lambda: True)
 
@@ -1428,9 +1441,9 @@ def test_rate_change_log_attribution():
         "Capture URB has stalled.",
         "Rate change to 44100 Hz left a stream stalled (playback_alive=1, "
         "capture_alive=0, capture_open=1); attempting recovery",
-        "Capture stream stalled (a rate change); restarting URBs to recover",
+        "Capture stream stalled (rate change); restarting URBs to recover",
         "Capture stream still stalled after URB restart; queuing full USB "
-        "reset (a rate change)",
+        "reset (rate change)",
     ])
     check(seq == ["capture_stall_hw_params", "hw_params_light_retry",
                   "reset_on_rate_change"],

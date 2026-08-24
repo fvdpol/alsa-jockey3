@@ -191,7 +191,7 @@ benign:
       stall found by .prepare -- rather than by hw_params() immediately after a
       rate change -- now gets the same recovery attempt instead of only a log
       line.
-  - pattern: '(?:Playback|Capture) stream stalled \(a rate change\); restarting URBs to recover'
+  - pattern: '(?:Playback|Capture) stream stalled \(rate change\); restarting URBs to recover'
     metric: urb_restart_attempt
     why: >
       The lightweight first step of recovery, before any USB reset, triggered
@@ -203,7 +203,7 @@ benign:
     why: >
       Escalation from URB restart to a full reset. Expected sometimes; a rising
       proportion of restarts that escalate is the signal worth watching.
-  - pattern: 'Playback stream stalled \(the watchdog\); restarting URBs to recover'
+  - pattern: 'Playback stream stalled \(watchdog\); restarting URBs to recover'
     metric: playback_recovery_on_watchdog
     why: >
       The watchdog itself triggering recovery on a mid-stream stall with no PCM
@@ -211,7 +211,7 @@ benign:
       Recovery is attempted with xrun-reporting enabled; that does not by
       itself mean an xrun was delivered (jockey3_report_xrun() still requires
       the substream to be open and running).
-  - pattern: 'Capture stream stalled \(the watchdog\); restarting URBs to recover'
+  - pattern: 'Capture stream stalled \(watchdog\); restarting URBs to recover'
     metric: capture_recovery_on_watchdog
     why: >
       Symmetric counterpart, gated the same way hw_params() already gates its
