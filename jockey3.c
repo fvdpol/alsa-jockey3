@@ -1644,7 +1644,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 			 type, div_u64(outage_ns, NSEC_PER_MSEC));
 
 	if (log_onset && (direction == SNDRV_PCM_STREAM_PLAYBACK || open))
-		jockey3_recover_urb_stream(chip, direction, "the watchdog", true);
+		jockey3_recover_urb_stream(chip, direction, "watchdog", true);
 }
 
 /**
@@ -2296,14 +2296,14 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 
 		if (!playback_alive) {
 			ret = jockey3_recover_urb_stream(chip, SNDRV_PCM_STREAM_PLAYBACK,
-							 "a rate change", false);
+							 "rate change", false);
 			if (ret < 0)
 				return ret;
 		}
 
 		if (!capture_alive && capture_open) {
 			ret = jockey3_recover_urb_stream(chip, SNDRV_PCM_STREAM_CAPTURE,
-							 "a rate change", false);
+							 "rate change", false);
 			if (ret < 0)
 				return ret;
 		}
