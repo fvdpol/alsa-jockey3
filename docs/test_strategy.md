@@ -67,37 +67,11 @@ Tests are worth writing where failure is plausible. For this driver that is:
   rate change despite the control transfer reporting success. Recovery
   escalates from a lightweight URB restart to a full USB reset. This is the
   single most important area to test, and it has the most counter-intuitive
-  pass criterion (see §9).
-
-  As of 2026-08-15 it is also measured rather than suspected: across two
-  `JT-RATE-001` runs of 20 changes each, **every stall fell on a downward
-  transition and none on an upward one** (6/10 and 9/10 down, 0/9 up). The
-  headline figure is `resets_per_change_pct` — how often a rate change costs a
-  USB device reset — which must trend to zero. It read 30% and 45% on those two
-  runs of the same build, so a short run indicates rather than measures; the
-  statistically useful version is `JT-RATE-003`. Working document:
-  `re/rate_change_stall.md`.
-
-  **2026-08-23, x86_64-prod, bench build (watchdog self-healing +
-  concurrency fix, not yet released).** During `JT-AUDIO-002`, the 44.1→48kHz
-  transition — an *upward* change, contradicting the 2026-08-15 measurement
-  above that every observed stall fell on a downward one — failed outright at
-  EP0: `Firmware version read failed: -110` (`ETIMEDOUT`), `Rate change to
-  48000 failed: -110`, repeated three times over about 4 seconds. The
-  watchdog independently noticed Playback had stopped completing at the same
-  moment (same underlying cause), tried its light restart, that did not
-  hold, and escalated to a full USB reset — which itself ran long enough that
-  the driver's own 1000 ms wait bound gave up (`Timeout waiting for reset
-  completion`) while the real reset kept running via the USB core's own
-  workqueue and completed on its own after the driver had already moved on.
-  The device fully recovered: 88.2kHz and 96kHz worked cleanly in the same
-  run, and the next run passed outright. No concurrent-recovery collision
-  this time (contrast the bug fixed by "ALSA: jockey3: prevent concurrent
-  recovery ladders from racing each other") — this looks like the same
-  already-tracked hardware/firmware-timing instability as the rest of this
-  section, just caught by the watchdog directly rather than only by
-  `hw_params()`'s post-rate-change check, and with an occasionally slower
-  reset than the driver's internal timeout expects.
+  pass criterion (see §9). The headline figure is `resets_per_change_pct` —
+  how often a rate change costs a USB device reset — which must trend to
+  zero. Measured incidence, the direction dependence, the fix that drove it
+  to zero, and a later post-fix EP0 failure are all tracked in the working
+  document, **[`re/rate_change_stall.md`](../re/rate_change_stall.md)**.
 - **URB lifecycle.** The `callbacks_active` safe-zone counter, `sync_stop`
   draining with a 1000 ms cap, the `stopping` flag checked inside the same
   critical section that resubmits. Use-after-free lives here.
@@ -157,18 +131,13 @@ machine boots it, and the runner can be launched from any of them.
 
 ### A debug kernel cannot judge audio quality
 
-Measured on 2026-08-09, and worth stating plainly because the evidence is
-counter-intuitive. The same FLAC plays with a light continuous crackle on
-`x86_64-debug` and cleanly on `x86_64-prod`. On **both**, `xrun_counter` stays
-at zero and `avail_max` sits around 5500. Feeding `aplay` from a file instead
-of through a pipe changes nothing.
-
-So ALSA is equally comfortable on both, and the shortfall is entirely
-downstream of it. That is the free-running URB ring: KASAN inflates the
-completion handlers and the codec enough that URBs are resubmitted late, the
-device's packet stream gets gaps, and it is audible. Nothing in
-`/proc/asound` can observe past the point where the driver hands bytes to
-usbcore, which is why the defect is audible and unreported at the same time.
+Worth stating plainly because the evidence is counter-intuitive: the same
+audio plays with a light continuous crackle on `x86_64-debug` and cleanly on
+`x86_64-prod`, while every ALSA counter (`xrun_counter`, `avail_max`) reads
+identically clean on both. The shortfall is entirely downstream of ALSA, in
+the free-running URB ring, and is invisible to `/proc/asound`. See
+**[`re/debug_kernel_audio_quality.md`](../re/debug_kernel_audio_quality.md)**
+for the measurement and why the instrumentation cannot see it.
 
 The consequence for the suite is narrow but firm:
 
@@ -774,53 +743,15 @@ the plumbing end to end.
 These are not roadmap items. They are things the suite has already surfaced and
 nobody has resolved, recorded here so they are not quietly forgotten.
 
-**`PM: parent 1-13:1.0 should not be sleeping`** — seen four times per run,
-during `JT-PM-001`, on **two separate runs on a production kernel**
-(2026-08-09 and 2026-08-10). The lines name this device's own interfaces
-(`1-13:1.0`, `1-13:1.1`) and its own endpoints — `ep_05` playback, `ep_86`
-capture, `ep_83` MIDI in, plus `ep_02`. It is a `dev_warn` from
-`drivers/base/power/main.c`, emitted when a child device is resumed while its
-parent is still suspended.
+**`PM: parent 1-13:1.0 should not be sleeping`**, seen during `JT-PM-001`,
+deliberately left unclassified pending a decision: fix, or allowlist with a
+reason. See **[`re/pm_suspend_warning.md`](../re/pm_suspend_warning.md)**.
 
-It is deliberately left **unclassified** in `lib/rules.yaml` so it keeps being
-surfaced. Putting it in `unrelated` would hide a message about our own device
-during the one case that exercises suspend; putting it in `driver_fail` would
-assert a driver defect nobody has established — the ordering may be usbcore's
-rather than ours. What is needed is a look at the suspend and resume callbacks
-against the USB PM model, and then a decision: fix, or allowlist with a reason.
-Note it does not match the "ours" pattern, since the lines say `ep_05` rather
-than the module name, which is why it is not attributed automatically.
-
-**Mid-stream URB stall after hours of clean operation —
-`JT-PCM-008-1`, x86_64-prod, 2026-08-23
-(`tests/hw/results/x86_64-prod/20260823T034127Z-smoke`).** An 8h duplex soak at 44.1 kHz ran
-cleanly for 4.1h — 24 consecutive 10-minute checkpoints, zero xruns either
-direction, stable memory growth — then both rings went silent in the same
-instant: `Playback URB stream stalled: no completion for 717 ms` immediately
-followed by `Capture URB stream stalled: no completion for 838 ms`, both 8
-URBs in flight, no rate change or MIDI activity anywhere nearby. `arecord` and
-`aplay` both got `-EIO` and died together.
-
-One line immediately precedes it in dmesg, same jiffy: `perf: interrupt took
-too long (2502 > 2500), lowering kernel.perf_event_max_sample_rate to 79750`.
-That is the kernel's own NMI-watchdog safety valve tripping, i.e. evidence of
-a genuine host-side latency spike at the exact moment both rings stopped
-completing — worth watching for on future stalls, since it points at
-system/hardware-level jitter rather than a driver logic error. Whether this
-is the Jockey 3 hardware itself glitching under sustained load, or a host
-scheduling perturbation starving the URB completion path, is undecided; this
-is being tracked as a possible **general reliability pattern** rather than
-assumed to be a driver defect, pending more occurrences.
-
-Process gap to fix next time: the device was power-cycled the following
-morning, before its wedged state was inspected, so as to restart the test —
-the restart's own dmesg shows `-71` (`EPROTO`) noise from the fresh
-enumeration, and whatever the original wedge would have shown (compare
-finding 3's `-2`/`ENOENT` submit failures and `-110` EP0 timeouts) is gone.
-**Before power-cycling or restarting a hung device, capture its live state
-first** (`lsusb -v`, the driver's sysfs/debug state if any, a
-`journalctl -k` snapshot) — a power cycle is destructive to exactly the
-evidence a wedge investigation needs.
+**Mid-stream URB stall after hours of clean operation** — an 8h duplex soak
+that stalled on both rings after 4.1h of otherwise clean operation, alongside
+a process-gap lesson about capturing device state before power-cycling a
+wedged unit. See the 2026-08-23 entry in
+**[`re/playback_stall_wedge.md`](../re/playback_stall_wedge.md)**.
 
 **Nothing yet proves data integrity.** Every automated case measures timing or
 liveness. `xrun_counter`, `avail_max`, byte counts and stall counts all say

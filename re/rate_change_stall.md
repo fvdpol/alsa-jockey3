@@ -940,6 +940,34 @@ are very likely the same fault, and that is an assumption, not a measurement.
 A Linux capture of `96000<->48000` cycled until it stalls would settle it; it
 is added to "Captures needed" below.
 
+## 2026-08-23: an upward change fails outright at EP0, post-fix
+
+`x86_64-prod`, bench build (watchdog self-healing + the concurrent-recovery
+fix, not yet released). During `JT-AUDIO-002`, the 44.1->48kHz transition --
+an **upward** change, contradicting the 08-15 finding above that every
+observed stall fell on a downward one -- failed outright at EP0:
+`Firmware version read failed: -110` (`ETIMEDOUT`), `Rate change to 48000
+failed: -110`, repeated three times over about 4 seconds.
+
+The watchdog independently noticed Playback had stopped completing at the
+same moment (same underlying cause), tried its light restart, that did not
+hold, and escalated to a full USB reset -- which itself ran long enough that
+the driver's own 1000 ms wait bound gave up (`Timeout waiting for reset
+completion`) while the real reset kept running via the USB core's own
+workqueue and completed on its own after the driver had already moved on.
+
+The device fully recovered: 88.2kHz and 96kHz worked cleanly in the same run,
+and the next run passed outright. No concurrent-recovery collision this time
+(contrast the bug fixed by "ALSA: jockey3: prevent concurrent recovery
+ladders from racing each other") -- this looks like the same
+already-tracked hardware/firmware-timing instability as the rest of this
+document, just caught by the watchdog directly rather than only by
+`hw_params()`'s post-rate-change check, and with an occasionally slower
+reset than the driver's internal timeout expects. Whether an upward EP0
+failure is a genuinely separate mode from the downward capture-stall this
+document otherwise tracks, or the same instability surfacing a different
+way once the divide-ratio fix closed off the common path, is unresolved.
+
 ## Open questions, in the order worth attacking
 
 1. ~~Measure per-change incidence on each branch, one variable at a time.~~

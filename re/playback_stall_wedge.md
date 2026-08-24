@@ -108,6 +108,18 @@ time relative to the case's own start.
 | 2026-08-22 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260822T003117Z-smoke`) | `b0fcdb0` | 1.0.3 | 2812 B/s | 2249 B/s | 1801s | no | - | - |
 | 2026-08-23 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260823T034127Z-smoke`) | `e87418d` | 1.0.6 | no MIDI (0 B/s) | n/a | 4.1h (cut short -- planned 8.0h) | no | - | - |
 | 2026-08-23 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260823T122413Z-smoke`) | `e87418d` | 1.0.6 | no MIDI (0 B/s) | n/a | 8.0h | no | - | - |
+| 2026-08-23 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260823T222749Z-smoke`) | `e87418d` | 1.0.6 | 2812 B/s | 2249 B/s | 1800s | no | - | - |
+| 2026-08-23 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260823T233057Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 1s (cut short -- planned 36s) | **stall** | 0s | unknown |
+| 2026-08-23 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260823T234502Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 82s | no | - | - |
+| 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T003600Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 82s | no | - | - |
+| 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T004116Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 72s | **stall** | 1s | unknown |
+| 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T004530Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 8s (cut short -- planned 72s) | **stall** | 7s | unknown |
+| 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T004541Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 72s | **stall** | 7s | unknown |
+| 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T005105Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 8s (cut short -- planned 72s) | **stall** | 7s | unknown |
+| 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T005354Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 72s | **stall** | 7s | unknown |
+| 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T005518Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 8s (cut short -- planned 72s) | **stall** | 7s | unknown |
+| 2026-08-24 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260824T010429Z-smoke`) | `c221f88` | 1.0.6 | 2812 B/s | 2249 B/s | 1800s | no | - | - |
+| 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T030907Z-smoke`) | `c221f88` | 1.0.6 | no MIDI (0 B/s) | n/a | 8.0h | no | - | - |
 
 <!-- RUN-LOG:END -->
 
@@ -302,6 +314,42 @@ for every earlier run). `outcome: fail`, `duration_s: 281` against a planned
   so far, makes it the most promising one to characterize precisely next.
   No automated detection
   exists for it yet; it takes a person watching the device.
+
+### 2026-08-23 — fourth occurrence, x86_64-prod, mid-stream after hours of clean operation (`JT-PCM-008-1`)
+
+`x86_64-prod/20260823T034127Z-smoke`. An 8h duplex soak at 44.1 kHz ran
+cleanly for 4.1h -- 24 consecutive 10-minute checkpoints, zero xruns either
+direction, stable memory growth -- then both rings went silent in the same
+instant: `Playback URB stream stalled: no completion for 717 ms` immediately
+followed by `Capture URB stream stalled: no completion for 838 ms`, both 8
+URBs in flight, no rate change or MIDI activity anywhere nearby. `arecord`
+and `aplay` both got `-EIO` and died together. Note the run log above
+classifies this run's `Failure` column as "no" -- the auto-generated table
+only scans for the patterns `JT-MIDI-007`/`JT-PCM-008` failures are usually
+found by, and missed this one; `re/wedge_run_log.py` needs to learn this
+signature.
+
+One line immediately precedes it in dmesg, same jiffy: `perf: interrupt took
+too long (2502 > 2500), lowering kernel.perf_event_max_sample_rate to
+79750`. That is the kernel's own NMI-watchdog safety valve tripping, i.e.
+evidence of a genuine host-side latency spike at the exact moment both rings
+stopped completing -- worth watching for on future stalls, since it points
+at system/hardware-level jitter rather than a driver logic error. Whether
+this is the Jockey 3 hardware itself glitching under sustained load, or a
+host scheduling perturbation starving the URB completion path, is
+undecided; this is being tracked as a possible **general reliability
+pattern** rather than assumed to be a driver defect, pending more
+occurrences.
+
+**Process gap, to fix next time:** the device was power-cycled the following
+morning, before its wedged state was inspected, so as to restart the test --
+the restart's own dmesg shows `-71` (`EPROTO`) noise from the fresh
+enumeration, and whatever the original wedge would have shown (compare the
+2026-08-11 occurrence's `-2`/`ENOENT` submit failures and `-110` EP0
+timeouts) is gone. **Before power-cycling or restarting a hung device,
+capture its live state first** (`lsusb -v`, the driver's sysfs/debug state
+if any, a `journalctl -k` snapshot) -- a power cycle is destructive to
+exactly the evidence a wedge investigation needs.
 
 ### Test-harness rate-pacing bug, found and fixed 2026-08-19
 
