@@ -40,6 +40,16 @@ EOF
   echo -e "\n---\n*Report generated automatically by local CI runner on `hostname --long`*"
 } > "$DOC_PATH"
 
+
+# Ensure the current branch is main
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+if [ "$CURRENT_BRANCH" != "main" ]; then
+  echo "Error: You are currently on branch '$CURRENT_BRANCH'." >&2
+  echo "Skipping auto-commit to prevent committing to wrong branch." >&2
+  exit 1
+fi
+
+
 # 2. Check if there are ALREADY staged changes in the repository
 if ! git diff --cached --quiet; then
   echo "Error: Uncommitted staged changes detected. Skipping auto-commit to prevent committing WIP." >&2
