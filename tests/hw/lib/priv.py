@@ -122,6 +122,21 @@ def printk_console(level, timeout=20):
     return rc == 0, (err or "").strip()
 
 
+def trace_callbacks_start(timeout=20):
+    """Begin function_graph tracing of the two URB completion handlers."""
+    return call("trace-callbacks", "start", timeout=timeout)
+
+
+def trace_callbacks_collect(timeout=30):
+    """Stop tracing and return (rc, trace_text, err). Resets tracing state."""
+    return call("trace-callbacks", "collect", timeout=timeout)
+
+
+def trace_callbacks_stop(timeout=20):
+    """Reset tracing state with no output -- the error-path cleanup call."""
+    return call("trace-callbacks", "stop", timeout=timeout)
+
+
 def usb_power(action, *args, timeout=60):
     """Switch the hub port the Jockey 3 is plugged into.
 

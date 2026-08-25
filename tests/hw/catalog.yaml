@@ -41,6 +41,7 @@ areas:
   PM:      Suspend, resume, reset
   HOTPLUG: Disconnect, replug, power loss
   INTEROP: Interoperability and integration with other subsystems
+  PERF:    Host CPU, interrupt and power cost of the driver
 #  SOAK:    Endurance and high repetition  -- deprecated in favor of L5
 
 levels:
@@ -2016,3 +2017,61 @@ cases:
       scheme, whose L5 (endurance/stability) already covers what SOAK was
       standing in for; each former SOAK case moved into the area it actually
       belongs to and kept its level: L5.
+
+  # ------------------------------------------------------------------- PERF
+
+  - id: JT-PERF-001
+    title: Host interrupt/CPU baseline for continuous URB streaming
+    area: PERF
+    level: L3
+    mode: automated
+    status: implemented
+    per_target: true
+    requires: [device, quiet-machine]
+    exec: cases/perf_baseline.py
+    params:
+      rates: [44100, 48000, 88200, 96000]
+      sample_seconds: 10
+      settle_seconds: 2
+      # Set true on a target with no jockey3-testctl unbind/bind support, or
+      # where detaching the driver is otherwise undesirable. The rest of the
+      # case still runs; only the host-floor point is skipped.
+      skip_unbound: false
+    metrics:
+      - irq_per_s_unbound
+      - irq_per_s_idle
+      - cpu_pct_sys_irq_soft_unbound
+      - cpu_pct_sys_irq_soft_idle
+      - ns_per_playback_cb_idle
+      - ns_per_capture_cb_idle
+    pass: >
+      Metric-only, like JT-CODEC-005. Every point in params.rates additionally
+      emits its own irq_per_s_stream_<rate>, cpu_pct_sys_irq_soft_stream_<rate>,
+      ns_per_playback_cb_stream_<rate> and ns_per_capture_cb_stream_<rate> --
+      not listed above individually since the rate list is a parameter, not
+      fixed by the catalog.
+    notes: >
+      This is E1 of re/streaming_overhead_experiments.md: the baseline every
+      later experiment in that plan (transfer coalescing, idle rate downshift)
+      is measured against. Needs an otherwise-idle machine, same as
+      JT-CODEC-005, so it is not part of any profile -- invoke directly with
+      --case JT-PERF-001.
+
+      Three points per run: 'unbound' (driver detached from the device, a
+      portable proxy for "device unplugged" that needs no hub-power hardware
+      -- see the case's own docstring for why this was chosen over
+      usb-power), 'idle' (bound, URBs running, nothing open), and one
+      'stream_<rate>' per entry in params.rates (playback + capture both
+      open). ns_per_*_cb needs the trace-callbacks verb added to
+      tests/hw/priv/jockey3-testctl -- run priv/install.sh again on any
+      target where the metric is missing/blocked; the case still records
+      irq_per_s and cpu_pct_sys_irq_soft even where tracing is unavailable.
+
+      xhci interrupt moderation means irq_per_s is not directly comparable
+      between hosts, only within one -- see re/streaming_overhead.md Part 5.
+      cpu_pct_sys_irq_soft is the portable number.
+
+      C-state residency (turbostat/powertop) is not measured here -- x86-only,
+      needs root and a package (turbostat ships in Debian's linux-cpupower;
+      powertop is its own package), and neither is installed on the project's
+      rigs as of 2026-08-25. Left for a follow-up case rather than folded in.

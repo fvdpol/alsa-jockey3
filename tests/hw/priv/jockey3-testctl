@@ -59,6 +59,12 @@ DYNDBG=/sys/kernel/debug/dynamic_debug/control
 # only visible symptom was every run recording "firmware unknown".
 FW_MATCH='Firmware'
 
+# The two URB completion handlers trace-callbacks profiles, for JT-PERF-001.
+# Fixed here for the same reason FW_MATCH is: the caller names an ACTION
+# (start/collect/stop), never a target function -- an arbitrary function name
+# would let the suite point kernel tracing at anything.
+TRACE_FUNCS='jockey3_playback_callback jockey3_capture_callback'
+
 # The Jockey 3's own USB ids, for per-port power switching. Fixed here for the
 # same reason FW_MATCH is: the caller names an ACTION, never a target. A verb
 # taking a hub location and port would grant the suite the right to cut power
@@ -97,6 +103,13 @@ usage() {
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
 #   printk-console <1-8>   set the console loglevel
 #   xrun-debug 0|1        make the ALSA core log every xrun to the kernel log
+#   trace-callbacks start  begin function_graph tracing of the two URB
+#                          completion handlers (JT-PERF-001)
+#   trace-callbacks collect  stop tracing, print the trace buffer, reset
+#                          tracing state
+#   trace-callbacks stop  reset tracing state without printing anything
+#                          (cleanup path for a case that errored before
+#                          collect)
 #   rtcwake-mem <1-3600>   suspend to RAM and wake after N seconds
 #   usb-power status       report the ppps hub port the Jockey 3 is plugged into
 #   usb-power off|on       cut or restore power to that port
@@ -132,6 +145,17 @@ card_proc() {
 	n=$(awk '/Jockey3|Reloop Jockey 3/ {print $1; exit}' /proc/asound/cards 2>/dev/null)
 	[ -n "$n" ] && [ -d "/proc/asound/card$n" ] || return 1
 	printf '/proc/asound/card%s' "$n"
+}
+
+# tracefs moved out from under debugfs a while back; both mount points are
+# still seen in the wild depending on kernel/distro, so try the modern one
+# first.
+tracing_dir() {
+	local d
+	for d in /sys/kernel/tracing /sys/kernel/debug/tracing; do
+		[ -d "$d" ] && { printf '%s' "$d"; return 0; }
+	done
+	return 1
 }
 
 # Print the sysfs kernel name of the Jockey 3's interface 0 (e.g. "1-1:1.0"),
@@ -333,6 +357,64 @@ xrun-debug)
 	[ "$n" -gt 0 ] || die "no xrun_debug under $proc (CONFIG_SND_PCM_XRUN_DEBUG?)"
 	echo "xrun_debug=$1 on $n substream(s) of $(basename "$(readlink -f "$proc")")"
 	exit 0
+	;;
+
+trace-callbacks)
+	# ns-per-callback measurement for JT-PERF-001 (re/streaming_overhead.md):
+	# function_graph tracing restricted to the two URB completion handlers,
+	# which is what a kernel without CONFIG_FUNCTION_PROFILER (not set on any
+	# of this project's -prod configs) still gives for free -- no package,
+	# no config change, just CONFIG_FUNCTION_TRACER/FUNCTION_GRAPH_TRACER,
+	# both already on. The two function names are fixed above (TRACE_FUNCS),
+	# never taken from the caller.
+	[ $# -eq 1 ] || die "trace-callbacks needs start, collect or stop"
+	tdir=$(tracing_dir) || die "tracefs not mounted"
+
+	case "$1" in
+	start)
+		for fn in $TRACE_FUNCS; do
+			grep -qx "$fn" "$tdir/available_filter_functions" \
+				|| die "function '$fn' not traceable -- driver not loaded, or renamed/inlined since this verb was written"
+		done
+		echo 0 > "$tdir/tracing_on" || die "cannot stop tracing to reset it"
+		: > "$tdir/trace" || die "cannot clear trace buffer"
+		echo nop > "$tdir/current_tracer" || die "cannot reset current_tracer"
+		: > "$tdir/set_ftrace_filter" || die "cannot clear set_ftrace_filter"
+		for fn in $TRACE_FUNCS; do
+			echo "$fn" >> "$tdir/set_ftrace_filter" \
+				|| die "cannot filter on $fn"
+		done
+		# Best-effort: a per-CPU buffer generous enough that a busy interval
+		# at 96 kHz does not wrap and silently drop entries before collect
+		# reads them. Not fatal if the kernel refuses a larger size.
+		echo 32768 > "$tdir/buffer_size_kb" 2>/dev/null || true
+		echo function_graph > "$tdir/current_tracer" \
+			|| die "cannot select function_graph tracer"
+		echo 1 > "$tdir/tracing_on" || die "cannot start tracing"
+		exit 0
+		;;
+	collect)
+		echo 0 > "$tdir/tracing_on" || die "cannot stop tracing"
+		cat "$tdir/trace" || die "cannot read trace buffer"
+		echo nop > "$tdir/current_tracer" 2>/dev/null || true
+		: > "$tdir/set_ftrace_filter" 2>/dev/null || true
+		: > "$tdir/trace" 2>/dev/null || true
+		exit 0
+		;;
+	stop)
+		# Cleanup with no output, for a case that errored before it reached
+		# collect -- leaves the host's tracing state as it found it rather
+		# than stuck mid-trace for whoever uses ftrace next.
+		echo 0 > "$tdir/tracing_on" 2>/dev/null || true
+		echo nop > "$tdir/current_tracer" 2>/dev/null || true
+		: > "$tdir/set_ftrace_filter" 2>/dev/null || true
+		: > "$tdir/trace" 2>/dev/null || true
+		exit 0
+		;;
+	*)
+		die "trace-callbacks takes start, collect or stop"
+		;;
+	esac
 	;;
 
 usb-power)
