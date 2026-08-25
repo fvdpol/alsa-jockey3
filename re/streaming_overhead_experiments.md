@@ -50,6 +50,18 @@ makes the device crackle audibly while every ALSA counter stays clean
 
 ## E1 -- Baseline the load properly
 
+**Status: tooling implemented and merged to `main` (`572b677`), not this
+study's branch.** `JT-PERF-001` / `cases/perf_baseline.py` is general-purpose
+regression-monitoring infrastructure -- the natural way to notice if a future
+change makes the driver's host cost worse, independent of anything in this
+study -- so it lives on `main` rather than `dev/streaming-overhead`, unlike
+E2-E4 below which are about this study's own levers. Smoke-tested end to end
+on `alsa-test`: idle and streaming completion rates already match the model
+in `re/streaming_overhead.md` almost exactly (idle 9927.5/s vs. 9,923
+theoretical at 44.1 kHz; streaming 19854.4/s vs. 19,845 theoretical at
+88.2 kHz) -- see the case's own commit messages for the full readout. Not yet
+run as a proper baseline sweep across targets; that run is still open.
+
 **Question:** what does the Jockey 3 actually cost its host, per platform, per
 rate, idle and streaming?
 
