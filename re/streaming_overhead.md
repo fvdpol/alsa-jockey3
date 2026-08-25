@@ -564,8 +564,14 @@ sample, not a validated pattern, but the picture is consistent, not mixed.
 
 ### E2c preliminary result: minimum period doubles at N=2, MIDI OUT throughput unaffected
 
-Both on `x86_64-prod`, confirming the two predictions the touch-point list
-made in advance.
+On `x86_64-prod`, confirming the two predictions the touch-point list made
+in advance -- and repeated on `arm64-prod` with the same result to within a
+few bytes/sec (`JT-PCM-007`: 240/288 B minimum, same as `x86_64-prod`;
+`JT-MIDI-004`: 2496-2497 B/s at all four rates, same as `x86_64-prod`).
+Both effects are platform-independent, as expected -- neither depends on
+host CPU or interrupt behavior, just on the sub-packet/period-size
+arithmetic and the MIDI rate limiter, both fixed by the protocol and the
+driver's own constants regardless of host.
 
 **`JT-PCM-007` (achievable latency sweep) confirms the minimum period grows
 with N, exactly as predicted.** 120 B (playback) and 144 B (capture) --
