@@ -72,32 +72,78 @@ completion rate is fixed by the sample rate:
 Plus one MIDI IN URB on EP 0x83, whose completion rate is data-driven and
 currently unmeasured.
 
-### Checked against the one real measurement we have
+### Checked against E1's own measurements (`JT-PERF-001`)
 
-`pi1test`, `vmstat 1`, from `re/pi1test_platform_notes.md`. The board carries
-a known baseline of 8,000 interrupts/s from the dwc2 SOF latch, independent of
-this driver:
+Superseding the `vmstat`-based table this section originally carried (kept
+below for the record): E1's tooling produces a clean per-rate measurement
+directly, and a full sweep ran on `x86_64-prod`, `arm64-prod` and
+`armhf-prod` (`pi1test`) on 2026-08-25/26.
+
+**`x86_64-prod` and `arm64-prod` confirm the flat per-URB model closely at
+every rate**, with no SOF-latch term needed (neither board has one): observed
+`irq_per_s` at idle and each streaming rate lands within a few percent of the
+`playback_pkt/s + capture_pkt/s` table above (e.g. `x86_64-prod`
+`stream_88200` measured 19,850/s against 19,845 theoretical; `stream_96000`
+21,569/s against 21,600). `cpu_pct_sys_irq_soft` scales smoothly and
+sub-linearly with rate on both -- streaming never approaches saturation on
+either board (`arm64-prod` peaked at 1.21% at 96 kHz; `x86_64-prod` at 3.67%,
+oddly higher despite typically being the faster core -- not yet explained,
+worth a look before trusting cross-platform CPU% comparisons).
+
+**`armhf-prod` (`pi1test`) confirms the model at low rates and breaks it
+badly at high ones:**
+
+| point | model (driver + 8,000 SOF) | observed `irq_per_s` | ratio |
+|---|---|---|---|
+| idle / 44100 | 17,923 | 16,591 / 16,530 | 0.92-0.93x |
+| 48000 | 18,800 | 17,176 | 0.91x |
+| 88200 | 27,845 | **54,995** | **2.0x** |
+| 96000 | 29,600 | **92,565** | **3.1x** |
+
+44.1 and 48 kHz land within 10% of the additive model (driver completions
+plus the board's own 8,000/s dwc2 SOF-latch baseline), matching the earlier
+`vmstat` reading almost exactly (16,591-17,176 here against 16,700-16,900
+before) and confirming the model is right at rates the board can keep up
+with. At 88.2 and 96 kHz the observed rate is two to three times the flat
+model, alongside `cpu_pct_sys_irq_soft` of 97% and 95% -- a board at those
+rates is not just busier, it is saturated, and "one interrupt per URB
+completion" stops holding. The most likely mechanism, not yet confirmed
+against dmesg from the same run: a feedback loop where a CPU too slow to
+service URB completions on schedule trips the watchdog's stall detection
+(`JOCKEY3_WATCHDOG_STALL_MS`, `jockey3.c`), which restarts the URB ring or
+escalates to a full reset -- both of which are themselves more interrupt
+traffic, on a CPU that was already the bottleneck. If confirmed, the excess
+at high rates is a symptom of recovery activity compounding the load it was
+triggered by, not a second, larger baseline term the flat model is simply
+missing.
+
+This does not change the study's recommendation or its scope: `armhf-prod`'s
+bar is "does not crash, hang, or oops" (`docs/test_strategy.md`), not
+"stays fast", and none of the four levers here is being pursued to fix pi1
+specifically. But it is worth folding into any future revision of the
+completion-rate model: flat and multiplicative below some saturation
+threshold, non-linear and recovery-driven above it, and that threshold is a
+property of the host, not of the driver.
+
+<details>
+<summary>Superseded: the original single `vmstat` reading (kept for the record)</summary>
+
+`pi1test`, `vmstat 1`, from `re/pi1test_platform_notes.md`, before E1's
+tooling existed:
 
 | State | Model (driver + 8,000 SOF) | Observed | Residual |
 |---|---|---|---|
 | 44100 Hz streaming | 17,923/s | 16,700-16,900/s | -1,000 to -1,200 (~7%) |
 | 88200 Hz streaming | 27,845/s | 30,000-33,000/s | *not a clean baseline* |
 
-**Only the 44.1 kHz row is usable.** It was taken after the recovery, with
-both directions streaming normally, and the model lands within about 7% of it.
-
 The 88.2 kHz reading was taken **during the `JT-AUDIO-002` wedge** -- `arecord`
 stuck in D state, five playback watchdog stalls, bursts of `Failed to resubmit
-playback/capture URB: -19`, and recovery cycles running. Capture may not have
-been streaming normally at all, so that number measures a fault rather than a
-baseline, and no residual should be computed from it. (Same principle as the
-standing rule that reset counts logged while a device is unresponsive are not
-failure-rate data.)
+playback/capture URB: -19`, and recovery cycles running -- so it measured a
+fault, not a baseline, which is exactly why E1 was built rather than trusting
+hand-run `vmstat` further. The 44.1 kHz reading holds up against E1's own
+measurement at the same rate.
 
-So: **one clean data point, model within ~7%, unvalidated at high rates.**
-"One host-controller interrupt per URB completion" is a working approximation
-that has been checked once, at one rate, on one board. Closing that gap is
-exactly what experiment E1 is for.
+</details>
 
 ### What "interrupt rate" does and does not tell you
 
@@ -519,9 +565,13 @@ Part 3 settled one way or the other.
 
 ## What this study does not claim
 
-- That the interrupt-per-URB model is validated. It has been checked against
-  exactly one clean measurement, at one rate, on one board, where it lands
-  within ~7% (Part 1).
+- That the interrupt-per-URB model is universally valid. E1's full sweep
+  (Part 1) confirms it closely on `x86_64-prod` and `arm64-prod` at every
+  rate, and on `armhf-prod` at 44.1/48 kHz -- but on `armhf-prod` at
+  88.2/96 kHz the observed rate runs 2-3x the flat model, most likely from
+  recovery activity feeding back into the load that triggered it. The model
+  holds below a saturation threshold and breaks above it; that threshold is a
+  property of the host.
 - That coalescing is free. The latency, period-size and ring-depth
   consequences in Part 2 are real and need measuring, not assuming.
 - That lever 3 is impossible. It is unquantified and, after levers 2 and 4,
