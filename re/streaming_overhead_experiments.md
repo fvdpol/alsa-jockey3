@@ -246,6 +246,30 @@ Beyond the E1 metrics, three things specific to this change:
   rate, the chosen N and why, the latency cost, and -- if it failed -- exactly
   how.
 
+### Future direction (post-E2c): N derived from the requested period size
+
+Frank's idea, worth recording before it's lost even though it's out of scope
+for E2b/E2c: instead of a fixed compile-time N, derive it per PCM open from
+the period size the application actually requested, so an application asking
+for a large low-latency-tolerant buffer gets the full coalescing saving, and
+one asking for a tiny period (real-time processing chasing minimum latency)
+falls back to N=1 -- today's uncoalesced behavior -- automatically rather than
+being handed a fixed URB span it did not ask for.
+
+This fits the existing teardown/rebuild path used for rate changes
+(`jockey3_pcm_hw_params()` already tears down and re-creates the URB ring),
+so it is not a new mechanism, just a new input to the existing one. The open
+design question is the mapping itself: `period_bytes_min` today is a
+compile-time `N x subpacket_bytes`; with N derived instead of fixed, the
+relationship inverts -- pick the largest N such that `N x subpacket_bytes <=`
+the period size actually negotiated, floored at N=1 -- and that constraint
+has to be enforced during `hw_params()` rather than declared statically in
+`jockey3_pcm_hw_playback`/`jockey3_pcm_hw_capture`.
+
+Deliberately not pursued now: it only pays for its added complexity if E2c's
+N=1-vs-N=2 numbers show the saving is worth chasing per-application rather
+than as one fixed driver-wide choice.
+
 **Exit criterion:** either a merged change with numbers behind it, or a
 written-up reason it cannot be done.
 
