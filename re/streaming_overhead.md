@@ -125,6 +125,35 @@ completion-rate model: flat and multiplicative below some saturation
 threshold, non-linear and recovery-driven above it, and that threshold is a
 property of the host, not of the driver.
 
+**The `unbound` point independently confirms the SOF-latch hypothesis.** With
+the driver detached and no URBs submitted at all, `irq_per_s_unbound` still
+read 8,014/s on `armhf-prod` (0 on `x86_64-prod` and `arm64-prod`, neither of
+which has this latch) -- matching the platform notes' figure for the dwc2
+SOF-interrupt latch almost exactly. This is a clean, driver-independent
+measurement of a board property the earlier writeup could only infer from
+`vmstat` during an active fault.
+
+**And a second, live data point for the recovery-feedback hypothesis, from
+the same run.** `JT-PERF-001` itself tries to leave the device at 44.1 kHz
+when it finishes (`restore_resting_rate()`, added after the first pi1test
+run); on this run that attempt itself timed out immediately after the
+96 kHz point, with the board still at ~95% CPU. The case gave up on it after
+10s (now reported as a case failure, not a buried note) and exited -- but the
+runner's own next step then hung for several more minutes, clearing
+**immediately** the moment the device was physically unplugged. Since
+unplugging removes only the device's own traffic and not the board's
+independent 8,000/s SOF baseline, a hang that clears that fast points at
+something the *device* was still doing after the case's own process had
+already exited -- consistent with an in-flight recovery/reset ladder
+(`jockey3_recover_urb_stream()`, `usb_queue_reset_device()`) still running in
+kernel context, unaffected by the userspace process that triggered it having
+been killed. Not confirmed against dmesg (pi1test's small `log_buf_len`
+lost it, same gap noted in the platform notes), but if right, it means a
+rate change issued immediately after a saturating high-rate stream is not
+reliably clean on this board -- a concrete, load-bearing data point for
+however lever 2 (idle rate downshift) ends up gating itself in Part 3, not
+just a test-tooling wrinkle.
+
 <details>
 <summary>Superseded: the original single `vmstat` reading (kept for the record)</summary>
 
