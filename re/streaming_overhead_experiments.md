@@ -266,6 +266,21 @@ the period size actually negotiated, floored at N=1 -- and that constraint
 has to be enforced during `hw_params()` rather than declared statically in
 `jockey3_pcm_hw_playback`/`jockey3_pcm_hw_capture`.
 
+**Refinement (also Frank's): restrict N to powers of two.** With N a
+compile-time constant, as in E2b, the compiler already folds every
+`N x PLOYTEC_PKT_SIZE` and sub-packet-offset multiply into a shift, since
+`PLOYTEC_PKT_SIZE` (512) is itself a power of two -- N's own value doesn't
+matter for that today. It starts to matter the moment N becomes a runtime
+value chosen per PCM open: the compiler can no longer fold a multiply by a
+variable, so a power-of-two-only N (stored as a shift count, `1 << n_shift`)
+keeps `JOCKEY3_*_XFER_SIZE` and the sub-packet loop's offset arithmetic
+shift-only on every architecture, not just ones with a barrel shifter. The
+cost is coarser granularity -- N can only be 1, 2, 4, 8, not 3 or 5 -- but
+that costs nothing here: coalescing's payoff comes from fewer, larger URBs
+regardless of exact period fit, since the device paces the wire itself
+either way (study, Part 2) -- there is no reason to prefer landing on an
+odd N over rounding down to the next power of two.
+
 Deliberately not pursued now: it only pays for its added complexity if E2c's
 N=1-vs-N=2 numbers show the saving is worth chasing per-application rather
 than as one fixed driver-wide choice.
