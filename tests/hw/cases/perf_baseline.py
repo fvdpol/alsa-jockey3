@@ -176,8 +176,14 @@ def restore_resting_rate(c, device, rate):
     that persisted until the operator power-cycled the device by hand
     (documented in re/pi1test_platform_notes.md's 2026-08-25 entry as the
     same fix, done manually, for the same symptom). This is the automated
-    version of that fix, run unconditionally so a JT-PERF-001 run never
-    leaves the rig worse off than it found it.
+    version of that fix, run unconditionally so a JT-PERF-001 run does not
+    leave the rig worse off than it found it -- and if the restore itself
+    cannot complete (2026-08-26: it timed out on pi1test right after the
+    96 kHz point, at 95% CPU, and the run only recovered once the operator
+    physically unplugged the device), that is reported as a case failure
+    rather than a note nobody reads, per the driver's own "never hide a
+    fault" rule (re/streaming_overhead.md and jockey3.c's fault-handling
+    convention alike).
     """
     c.progress(f"restoring the device to {rate} Hz before finishing")
     p = subprocess.Popen(
@@ -188,12 +194,27 @@ def restore_resting_rate(c, device, rate):
         _out, err = p.communicate(timeout=10)
     except subprocess.TimeoutExpired:
         p.kill()
-        p.communicate()
-        c.note(f"restoring to {rate} Hz timed out after 10s -- device may "
+        # kill() only delivers SIGKILL; it does not free a process blocked in
+        # an uninterruptible kernel wait (D state) -- pi1test has a documented
+        # arecord stuck like that for ~46 minutes (re/pi1test_platform_notes.md,
+        # 2026-08-25). A second unbounded communicate() here would make this
+        # case hang the same way, on exactly the platform where a saturated
+        # aplay -r 44100 open() is most likely to actually be stuck rather
+        # than just slow. Bounded, and the failure is reported either way.
+        try:
+            p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            c.fail(f"restoring to {rate} Hz: aplay would not die after "
+                   f"SIGKILL -- likely stuck in an uninterruptible kernel "
+                   f"wait, not just slow. Device is left at whatever rate "
+                   f"the last streaming point used; may need manual "
+                   f"recovery (see re/pi1test_platform_notes.md)")
+            return
+        c.fail(f"restoring to {rate} Hz timed out after 10s -- device may "
                f"still be at whatever rate the last streaming point used")
         return
     if p.returncode != 0:
-        c.note(f"restoring to {rate} Hz: aplay exited {p.returncode}: "
+        c.fail(f"restoring to {rate} Hz: aplay exited {p.returncode}: "
                f"{(err or '').strip()[:200]}")
 
 
