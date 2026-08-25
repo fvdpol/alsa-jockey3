@@ -63,6 +63,7 @@ CAPTURE_CHANNELS = 6               # fixed by the driver: min == max
 FORMAT = "S24_3LE"
 TRACE_FUNCTIONS = ("jockey3_playback_callback", "jockey3_capture_callback")
 MARGIN_SECONDS = 5                 # extra runtime given to aplay/arecord -d
+RESTORE_RATE = 44100               # the device's own power-on default
 
 
 def start_stream_pair(device_out, device_in, rate, duration_s):
@@ -163,6 +164,39 @@ def sample_point(c, name, hcd, settle_seconds, sample_seconds):
     return metrics, durations
 
 
+def restore_resting_rate(c, device, rate):
+    """Bring the device back to a low, cheap rate before the case exits.
+
+    URBs run free for the device's lifetime regardless of PCM open/close
+    (jockey3.c's own DOC comment), so whatever rate the last streaming point
+    used is exactly what the device keeps blasting at afterwards -- forever,
+    until something else changes it. On a weak host that is not a cosmetic
+    loose end: the 2026-08-26 pi1test run of this case left the board parked
+    at 96 kHz once its own measurement was done, at ~96% sys+irq+soft, and
+    that persisted until the operator power-cycled the device by hand
+    (documented in re/pi1test_platform_notes.md's 2026-08-25 entry as the
+    same fix, done manually, for the same symptom). This is the automated
+    version of that fix, run unconditionally so a JT-PERF-001 run never
+    leaves the rig worse off than it found it.
+    """
+    c.progress(f"restoring the device to {rate} Hz before finishing")
+    p = subprocess.Popen(
+        ["aplay", "-D", device, "-r", str(rate), "-c", str(CHANNELS),
+         "--format", FORMAT, "-d", "1", "/dev/zero"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    try:
+        _out, err = p.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.communicate()
+        c.note(f"restoring to {rate} Hz timed out after 10s -- device may "
+               f"still be at whatever rate the last streaming point used")
+        return
+    if p.returncode != 0:
+        c.note(f"restoring to {rate} Hz: aplay exited {p.returncode}: "
+               f"{(err or '').strip()[:200]}")
+
+
 def save_raw_trace(c, name, durations):
     if not durations:
         return
@@ -233,29 +267,39 @@ def main():
     save_raw_trace(c, "idle", durations)
 
     # --------------------------------------------------------- streaming
-    for rate in rates:
-        name = f"stream_{rate}"
-        c.progress(f"{name}: playback + capture open at {rate} Hz")
-        duration_s = settle_seconds + sample_seconds
-        procs = start_stream_pair(device, device, rate, duration_s)
-        # A device that refuses this rate fails fast, well inside the
-        # settling time below -- catch that here rather than measuring a
-        # stream that never actually opened. Once past this point every
-        # process is deliberately cut short by stop_stream_pair() when the
-        # sample window ends, so no exit-code check is meaningful after it.
-        time.sleep(0.5)
-        for p, label in zip(procs, ("aplay", "arecord")):
-            if p.poll() is not None and p.returncode != 0:
-                _out, err = p.communicate()
-                c.note(f"{name}: {label} exited {p.returncode} before "
-                       f"streaming started: {(err or '').strip()[:200]}")
-        try:
-            metrics, durations = sample_point(
-                c, name, hcd, settle_seconds, sample_seconds)
-        finally:
-            stop_stream_pair(procs)
-        all_metrics[name] = metrics
-        save_raw_trace(c, name, durations)
+    try:
+        for rate in rates:
+            name = f"stream_{rate}"
+            c.progress(f"{name}: playback + capture open at {rate} Hz")
+            duration_s = settle_seconds + sample_seconds
+            procs = start_stream_pair(device, device, rate, duration_s)
+            # A device that refuses this rate fails fast, well inside the
+            # settling time below -- catch that here rather than measuring a
+            # stream that never actually opened. Once past this point every
+            # process is deliberately cut short by stop_stream_pair() when
+            # the sample window ends, so no exit-code check is meaningful
+            # after it.
+            time.sleep(0.5)
+            for p, label in zip(procs, ("aplay", "arecord")):
+                if p.poll() is not None and p.returncode != 0:
+                    _out, err = p.communicate()
+                    c.note(f"{name}: {label} exited {p.returncode} before "
+                           f"streaming started: {(err or '').strip()[:200]}")
+            try:
+                metrics, durations = sample_point(
+                    c, name, hcd, settle_seconds, sample_seconds)
+            finally:
+                stop_stream_pair(procs)
+            all_metrics[name] = metrics
+            save_raw_trace(c, name, durations)
+    finally:
+        # Unconditional, even on an exception mid-sweep: whatever rate the
+        # last completed streaming point used is what the device keeps
+        # running at indefinitely once this process exits -- see
+        # restore_resting_rate()'s docstring.
+        if not bool(c.params.get("skip_restore_rate", False)):
+            restore_resting_rate(
+                c, device, int(c.params.get("restore_rate", RESTORE_RATE)))
 
     # ------------------------------------------------------------- report
     for point, metrics in all_metrics.items():

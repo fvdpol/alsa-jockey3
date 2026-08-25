@@ -2037,6 +2037,15 @@ cases:
       # where detaching the driver is otherwise undesirable. The rest of the
       # case still runs; only the host-floor point is skipped.
       skip_unbound: false
+      # The rate the device is left at when the case exits. URBs run free
+      # regardless of PCM open/close, so whatever rate the last streaming
+      # point used is what the device keeps running at indefinitely once
+      # this process exits -- confirmed the hard way on pi1test 2026-08-26,
+      # left parked at 96 kHz (~96% cpu_pct_sys_irq_soft) until the operator
+      # power-cycled it by hand. Runs unconditionally, even after a failure
+      # mid-sweep; skip_restore_rate: true disables it.
+      restore_rate: 44100
+      skip_restore_rate: false
     metrics:
       - irq_per_s_unbound
       - irq_per_s_idle
