@@ -373,6 +373,33 @@ real sub-packet processing loop, filling every sub-packet with live data) is
 next. Higher N (4x, 8x) has not yet been probed and should not be assumed
 clean on this evidence alone.
 
+### E2b result: a pre-existing rate-change stall, not a coalescing bug
+
+E2b (real per-sub-packet coalescing, N=2 both directions) sounded clean on
+first listen -- the E2a-era distortion was gone -- and `JT-AUDIO-002`,
+`JT-MIDI-002`, MIDI OUT responsiveness, `JT-PERF-001` and `arecord` all
+passed clean on `alsa-test`. But `JT-AUDIO-002` (which sweeps all four
+sample rates) followed immediately by `JT-MIDI-001` reproduced a playback
+URB stream stall 2 out of 4 times: the free-running idle playback stream
+(no PCM open) stops completing URBs for 400-500 ms, the watchdog's first
+restart attempt fails too, and it escalates to a full USB reset. One
+occurrence hit mid-`JT-AUDIO-002` itself, with capture stalling
+simultaneously.
+
+**This reproduces identically at N=1** -- an N=1 build (byte-for-byte the
+pre-coalescing code path per E2b's own regression requirement) hit the same
+stall on the same `JT-AUDIO-002` -> `JT-MIDI-001` sequence. **It is not an
+E2b/coalescing bug.** It is the rate-change fragility `implementation_plan.md`
+Milestone 13 already tracks (there marked "root-caused and fixed; cleanup in
+progress" for capture specifically) -- this evidence shows it also affects
+Playback, and that both directions can stall together, neither of which the
+existing Milestone 13 writeup covers. Worth reconciling there, separately
+from E2.
+
+**Conclusion: E2b is not blocked by this.** The coalescing change itself
+(N=2, both directions) is clean; the stall is a pre-existing, orthogonal
+reliability issue this testing happened to surface. E2c can proceed.
+
 ### What it costs
 
 Completion rate with 80 frames per URB in both directions:
