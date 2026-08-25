@@ -133,6 +133,36 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 
 #define JOCKEY3_N_URBS 8
 
+/*
+ * E2a probe (re/streaming_overhead_experiments.md): does the firmware accept
+ * a multi-packet bulk transfer at all, before any real coalescing work is
+ * built? Undefined by default -- normal builds are byte-for-byte unchanged.
+ * A bench-only knob per docs/ (dev-time hooks are fine if they never ship);
+ * MUST NOT be defined, and this whole block MUST be gone, before this code
+ * goes anywhere near submission.
+ *
+ * With it defined, playback and capture URBs carry 2 Ploytec sub-packets
+ * instead of 1. Deliberately not "real" coalescing: the second sub-packet's
+ * sample area is left silent (never written after the initial kzalloc) and
+ * jockey3_process_out_packet()/jockey3_process_in_packet() still only see
+ * the first -- audio content is not the question here. What IS tested: does
+ * usb_submit_urb() succeed and complete cleanly at 2x size, does the driver
+ * keep streaming afterward with no URB errors, and (the capture-specific
+ * question) what does urb->actual_length come back as -- 512 (device always
+ * terminates a logical transfer at one sub-packet, coalescing is dead) or
+ * 1024 (device fills the whole request, coalescing is live). See the sync/
+ * MIDI-idle framing added to jockey3_init_out_packet() and
+ * jockey3_playback_callback() below, needed so BOTH sub-packets look like
+ * valid idle Ploytec frames to the firmware, not just the first.
+ */
+#undef JOCKEY3_E2A_COALESCE_PROBE
+#ifdef JOCKEY3_E2A_COALESCE_PROBE
+#define JOCKEY3_E2A_N 2
+#define JOCKEY3_E2A_XFER_SIZE (JOCKEY3_E2A_N * PLOYTEC_PKT_SIZE)
+#else
+#define JOCKEY3_E2A_XFER_SIZE PLOYTEC_PKT_SIZE
+#endif
+
 /* Consecutive URB transport errors tolerated before a direction is given up on */
 #define JOCKEY3_MAX_URB_ERRORS 8
 
@@ -805,6 +835,20 @@ static void jockey3_capture_callback(struct urb *urb)
 		data_valid = false;
 	}
 
+#ifdef JOCKEY3_E2A_COALESCE_PROBE
+	/*
+	 * The actual question E2a asks on the capture side: with a
+	 * JOCKEY3_E2A_XFER_SIZE (1024 B) transfer requested, does the device
+	 * fill the whole thing, or does it always terminate at one 512 B
+	 * sub-packet regardless of what was asked for? Rate-limited -- this
+	 * fires at several thousand/sec at any real sample rate.
+	 */
+	if (data_valid)
+		dev_info_ratelimited(&chip->intf0->dev,
+				      "E2a: capture actual_length=%d (requested %d)\n",
+				      urb->actual_length, JOCKEY3_E2A_XFER_SIZE);
+#endif
+
 	/* Step 1: Safely fetch the pointer and join the safe zone */
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		if (data_valid)
@@ -935,8 +979,19 @@ static void jockey3_silence_out_packet(u8 *buf)
  */
 static void jockey3_init_out_packet(u8 *buf)
 {
+#ifdef JOCKEY3_E2A_COALESCE_PROBE
+	int sp;
+
+	for (sp = 0; sp < JOCKEY3_E2A_N; sp++) {
+		u8 *sub = buf + sp * PLOYTEC_PKT_SIZE;
+
+		sub[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
+		sub[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
+	}
+#else
 	buf[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
 	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
+#endif
 }
 
 static void jockey3_playback_callback(struct urb *urb)
@@ -995,6 +1050,31 @@ static void jockey3_playback_callback(struct urb *urb)
 	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
 	for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
 		buf[i] = 0x00;
+
+#ifdef JOCKEY3_E2A_COALESCE_PROBE
+	/*
+	 * E2a: every sub-packet beyond the first needs the same idle framing
+	 * -- real content is not the point of this probe (see the
+	 * JOCKEY3_E2A_COALESCE_PROBE comment above JOCKEY3_N_URBS), only
+	 * whether the firmware accepts and completes a transfer this size at
+	 * all. PLOYTEC_MIDI_IDLE_BYTE here, not another jockey3_get_next_midi_out_byte()
+	 * call: MIDI OUT throughput is unaffected by sub-packet count (one
+	 * real byte per URB, not per sub-packet), so the extra slot(s) just
+	 * report idle.
+	 */
+	{
+		int sp;
+
+		for (sp = 1; sp < JOCKEY3_E2A_N; sp++) {
+			u8 *sub = buf + sp * PLOYTEC_PKT_SIZE;
+
+			sub[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
+			sub[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
+			for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
+				sub[i] = 0x00;
+		}
+	}
+#endif
 
 	/*
 	 * Step 2: Safe Zone. ALSA core can't free 'substream' because
@@ -2565,7 +2645,7 @@ static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
 	int i, ret;
 
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
-		chip->playback.bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
+		chip->playback.bufs[i] = kzalloc(JOCKEY3_E2A_XFER_SIZE, GFP_KERNEL);
 		if (!chip->playback.bufs[i])
 			return -ENOMEM;
 		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
@@ -2585,7 +2665,7 @@ static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
 
 		usb_fill_bulk_urb(chip->playback.urbs[i], dev,
 				  usb_sndbulkpipe(dev, PLOYTEC_EP_NUM_PCM_OUT),
-				  chip->playback.bufs[i], PLOYTEC_PKT_SIZE,
+				  chip->playback.bufs[i], JOCKEY3_E2A_XFER_SIZE,
 				  jockey3_playback_callback, chip);
 	}
 
@@ -2599,7 +2679,7 @@ static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
 	int i, ret;
 
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
-		chip->capture.bufs[i] = kzalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
+		chip->capture.bufs[i] = kzalloc(JOCKEY3_E2A_XFER_SIZE, GFP_KERNEL);
 		if (!chip->capture.bufs[i])
 			return -ENOMEM;
 		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
@@ -2617,7 +2697,7 @@ static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
 
 		usb_fill_bulk_urb(chip->capture.urbs[i], dev,
 				  usb_rcvbulkpipe(dev, PLOYTEC_EP_NUM_PCM_IN),
-				  chip->capture.bufs[i], PLOYTEC_PKT_SIZE,
+				  chip->capture.bufs[i], JOCKEY3_E2A_XFER_SIZE,
 				  jockey3_capture_callback, chip);
 	}
 
