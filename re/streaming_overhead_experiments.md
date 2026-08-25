@@ -307,6 +307,33 @@ than as one fixed driver-wide choice.
 **Exit criterion:** either a merged change with numbers behind it, or a
 written-up reason it cannot be done.
 
+### Run ID cross-reference: which N a given hardware run used
+
+`N` is a compile-time constant (`JOCKEY3_PLAYBACK_N`/`JOCKEY3_CAPTURE_N`,
+`jockey3.c`); nothing in `run.json`/`result.json` records it, since the test
+framework has no way to see a value that does not exist until compile time.
+Frank has been noting it alongside each run id in his reports since the N=4
+work started -- collected here as the authoritative index rather than left
+scattered across chat history. Update this table (don't just append below
+it) whenever a new run's N is known.
+
+| N | Platform | Test(s) | Run ID(s) |
+|---|---|---|---|
+| 1 (baseline, pre-`dev/streaming-overhead`) | x86_64-prod | JT-PERF-001 | `20260825T154430Z-smoke`, `20260825T161559Z-smoke`, `20260825T170234Z-smoke` |
+| 1 | arm64-prod | JT-PERF-001 | `20260825T154735Z-functional`, `20260825T161340Z-functional`, `20260825T170721Z-functional` |
+| 1 | armhf-prod | JT-PERF-001 | `20260825T155503Z-smoke`, `20260825T161240Z-smoke` (canonical), `20260825T170435Z-smoke` (noisy, excluded -- post-96kHz restore-timeout contamination) |
+| 2 (`3974582`/`854f7a8`) | x86_64-prod | JT-PERF-001, JT-PCM-007, JT-MIDI-004 | `20260825T195732Z-smoke`, `20260825T220718Z-functional`, `20260825T221542Z-functional` |
+| 2 | arm64-prod | JT-PERF-001, JT-PCM-007, JT-MIDI-004 | `20260825T211430Z-functional`, `20260825T222215Z-functional`, `20260825T222515Z-functional` |
+| 2 | armhf-prod | JT-PERF-001 (x4) | `20260825T212251Z-smoke` (clean), `20260825T213832Z-smoke` (2 self-recovered stalls), `20260825T214550Z-smoke` (clean), `20260825T215242Z-smoke` (clean) |
+| 4 (`9317476`/`b6e5c86`) | arm64-prod | JT-MIDI-004, JT-PCM-007, JT-AUDIO-002, JT-RATE-001 | `20260825T230043Z-functional`, `20260825T231128Z-functional`, `20260825T231624Z-functional`, `20260825T231814Z-functional` |
+| 4 | x86_64-prod | (in progress) | -- |
+
+Not yet run: a `JT-RATE-001`-scale (dozens of changes) comparison at N=1
+and N=2, same board as the N=4 run above, to control for whether the
+post-rate-change stall rate found at N=4 is N=4-specific or was already
+elevated at lower N. N=8 planned next, both platforms, once N=4 on
+x86_64-prod finishes.
+
 ---
 
 ## E3 -- The on-demand gate question, and only this question
