@@ -13,15 +13,17 @@ series quietly measures the configuration rather than the driver.
 | `x86_64-debug.config` | `x86_64-debug` — KASAN, lockdep, kmemleak, codec KUnit at module load |
 | `x86_64-prod.config` | `x86_64-prod` — derived from the above, debugging off |
 | `arm64-debug.config` / `arm64-prod.config` | Same pair, for `arm64` |
+| `armhf-debug.config` / `armhf-prod.config` | Same pair, for `armhf`; only `armhf-prod` is an active hardware target (see `tests/hw/targets.yaml`) |
+| `i386-debug.config` / `i386-prod.config` | Same pair, for `i386`; only `i386-prod` is an active hardware target. `i386-debug` cannot carry `KASAN` — mainline x86 KASAN has only ever supported `X86_64` — so `config-flags.sh`'s `DEBUG_REQUIRED_EXEMPT` excuses those three symbols from the debug-completeness check on this one architecture |
 | `config-flags.sh` | Symbol lists shared by `derive-prod.sh` and `check-debug-config.sh`, so the two can't disagree about what "debug" means |
 | `derive-prod.sh` | Regenerates a `-prod` config from the matching `-debug` one |
 | `check-debug-config.sh` | Validates a `-debug`/`-prod` pair against `config-flags.sh`, independent of how the files were produced |
 
-Every target gets both a `-debug` and a `-prod` config, even ones with no
-hardware to validate against yet (`i386`, `armhf`) — the pair is cheap to
-keep in step via `derive-prod.sh`, and a lone hand-maintained `-prod` config
-has no check against drifting from what the other targets mean by "prod".
-The starting point for a new target is typically the distro's shipped
+Every target gets both a `-debug` and a `-prod` config, even when hardware
+only exercises one of the pair (`armhf`, `i386`) or none yet — the pair is
+cheap to keep in step via `derive-prod.sh`, and a lone hand-maintained `-prod`
+config has no check against drifting from what the other targets mean by
+"prod". The starting point for a new target is typically the distro's shipped
 config, refreshed to mainline with `make ARCH=<karch> olddefconfig`; from
 there set the `-debug` symbols listed below and let `derive-prod.sh` produce
 the `-prod` sibling.

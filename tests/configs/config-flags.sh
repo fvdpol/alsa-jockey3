@@ -39,6 +39,18 @@ DEBUG_REQUIRED=(
 	KUNIT SND_USB_JOCKEY3_CODEC_KUNIT_TEST
 )
 
+# DEBUG_REQUIRED symbols that a specific architecture's Kconfig can never
+# provide -- not a misconfiguration, an actual absence of the feature there.
+# "arch:SYMBOL" pairs, checked against DEBUG_REQUIRED by check-debug-config.sh
+# and config_check.py before either treats an unset symbol as a failure.
+#
+# i386: mainline x86 KASAN has only ever supported X86_64
+# (`select HAVE_ARCH_KASAN if X86_64` in arch/x86/Kconfig) -- 32-bit x86 has
+# no KASAN, generic or otherwise, and never will short of upstream adding it.
+DEBUG_REQUIRED_EXEMPT=(
+	i386:KASAN i386:KASAN_GENERIC i386:KASAN_INLINE
+)
+
 # Live under DEBUG_KERNEL but stay on in both -debug and -prod: the test
 # framework depends on these rather than merely benefiting from them. See
 # tests/configs/README.md for what breaks without each one.

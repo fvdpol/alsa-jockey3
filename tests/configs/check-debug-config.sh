@@ -62,7 +62,18 @@ check_arch() { # arch
 	[ "$lv" = "-alsa-debug" ] || {
 		echo "$arch-debug: LOCALVERSION is \"$lv\", want \"-alsa-debug\""; fail=1; }
 
-	check_symbols "$debug" "$arch-debug" "${DEBUG_REQUIRED[@]}" || fail=1
+	# Symbols this architecture's Kconfig can never provide (e.g. i386 has
+	# no KASAN) are not checked as required, even though they still stay in
+	# DEBUG_ONLY and so are still required to be OFF on the -prod side.
+	local required=() sym exempt skip
+	for sym in "${DEBUG_REQUIRED[@]}"; do
+		skip=0
+		for exempt in "${DEBUG_REQUIRED_EXEMPT[@]}"; do
+			[ "$exempt" = "$arch:$sym" ] && skip=1
+		done
+		[ "$skip" = 1 ] || required+=("$sym")
+	done
+	check_symbols "$debug" "$arch-debug" "${required[@]}" || fail=1
 	check_symbols "$debug" "$arch-debug" "${ALWAYS_ON[@]}" || fail=1
 	check_off "$debug" "$arch-debug" "${ALWAYS_OFF[@]}" || fail=1
 

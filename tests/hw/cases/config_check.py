@@ -26,6 +26,9 @@ from lib.case import Case          # noqa: E402
 from lib import env                # noqa: E402
 
 REQUIRED_LISTS = ("DEBUG_ONLY", "DEBUG_REQUIRED", "ALWAYS_ON", "ALWAYS_OFF")
+# Present in config-flags.sh but not on every check that used to exist before
+# it was added, so it is parsed but not required.
+OPTIONAL_LISTS = ("DEBUG_REQUIRED_EXEMPT",)
 
 
 def parse_flag_lists(path):
@@ -37,7 +40,7 @@ def parse_flag_lists(path):
     """
     text = open(path, encoding="utf-8").read()
     lists = {}
-    for name in REQUIRED_LISTS:
+    for name in REQUIRED_LISTS + OPTIONAL_LISTS:
         m = re.search(rf"^{name}=\((.*?)^\)", text, re.S | re.M)
         if not m:
             continue
@@ -90,7 +93,15 @@ def main():
             c.fail(f"CONFIG_{sym} must never be on, but is")
 
     if flavor == "debug":
+        arch = kernel.get("arch")
+        exempt = {
+            pair.split(":", 1)[1]
+            for pair in lists.get("DEBUG_REQUIRED_EXEMPT", [])
+            if pair.split(":", 1)[0] == arch
+        }
         for sym in lists["DEBUG_REQUIRED"]:
+            if sym in exempt:
+                continue
             if not is_on(sym):
                 c.fail(f"CONFIG_{sym} should be on for a debug kernel "
                        f"but is not")

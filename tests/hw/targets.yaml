@@ -204,12 +204,11 @@ targets:
     arch: i386
     flavor: prod
     localversion: '-alsa-prod'
-    config: tests/configs/i386-prod.config       # not created yet
-    typical_machine: Not yet set up -- planned as multi-boot on the EliteDesk
+    config: tests/configs/i386-prod.config
+    typical_machine: >
+      HP EliteDesk 800 G2 (tiny), i5-6500 -- the alsa-test box's 32-bit boot
+      environment, not a separate machine.
     verify:
       kconfig_none: [KASAN, KASAN_GENERIC, PROVE_LOCKING]
     role: >
-      The 32-bit codec on a fast machine. Currently covered only by L1 and L2;
-      hardware bring-up is planned before submission, not before it is
-      convenient.
-    status: not-yet-available
+      The 32-bit codec on a fast machine.

@@ -238,9 +238,11 @@ Placeholders, so they are visible rather than rediscovered:
 - **No bootstrap for a new test machine.** Installing the helper, the tools and
   the right kernel is a checklist nobody has written down. `priv/install.sh`
   covers only the privilege part.
-- **Only `x86_64-debug` exists.** `tests/configs/` has no `arm64-*`,
-  `armhf-prod` or `i386-prod` config yet, so `build_kernel.sh` cannot build
-  them (see `tests/configs/README.md`).
+- **`i386-debug` and `armhf-debug` have no hardware target.** `tests/configs/`
+  carries both configs for every architecture, but `tests/hw/targets.yaml`
+  only lists `-prod` as an active target for `i386` and `armhf` — the debug
+  pair exists for `check-debug-config.sh` parity and for L1/L2 builds, not
+  because a debug kernel runs on that hardware.
 - **`~/sound`'s config drifts.** Nothing keeps its `.config` in step with what
   it is used for, and `build_jockey3.sh` does not check. The gates do not
   depend on it, but the stale `kernelrelease` it produces is a standing trap
