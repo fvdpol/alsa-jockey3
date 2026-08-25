@@ -373,7 +373,12 @@ trace-callbacks)
 	case "$1" in
 	start)
 		for fn in $TRACE_FUNCS; do
-			grep -qx "$fn" "$tdir/available_filter_functions" \
+			# A module's symbols are listed as "name [module]", not bare, so
+			# an exact-line match here always missed -- match the first
+			# whitespace-delimited field instead, which is the symbol name
+			# whether or not a module suffix follows it.
+			awk -v f="$fn" '$1==f{found=1} END{exit !found}' \
+				"$tdir/available_filter_functions" \
 				|| die "function '$fn' not traceable -- driver not loaded, or renamed/inlined since this verb was written"
 		done
 		echo 0 > "$tdir/tracing_on" || die "cannot stop tracing to reset it"
