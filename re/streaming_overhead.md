@@ -596,6 +596,60 @@ per URB (E2b's implementation section): had that been wrong, this is
 exactly where it would have shown up, as throughput divided by roughly
 `JOCKEY3_PLAYBACK_N`.
 
+### E2 exploratory: N=4 on `arm64-prod` -- post-rate-change stalls are frequent, but every one self-recovers
+
+N=4 (both directions) is not yet gated by an E2a-style acceptance probe --
+E2a only tested N=2 -- and this is the first look at it, on `arm64-prod`.
+`JT-MIDI-004` passed clean (2496-2497 B/s MIDI throughput, same as N=2).
+Audio verified clean by ear. Firmware accepts the 4x512B (2048B) transfer
+without incident.
+
+**`JT-PCM-007` passed, but not exactly as the simple model predicts.**
+Capture's clean minimum is 576 B (32 frames) -- exactly `N x
+subpacket_bytes`, matching the model precisely, same as N=2's exact match
+at 288 B. **Playback's theoretical minimum, 480 B (`period_bytes_min` = 4
+x 120), is legally accepted by `hw_params()` but produced 1 xrun in
+practice** -- the actual clean minimum needed doubling to 960 B (80
+frames, 1.814 ms). At N=2 the theoretical minimum (240 B) *was* the clean
+minimum, with zero xruns right at the boundary. **This extra playback-only
+headroom requirement is new at N=4, not present at N=2** -- whatever
+margin `period_bytes_min`'s simple `N x subpacket_bytes` formula assumes
+is sufficient, it is not, for playback, once N reaches 4.
+
+**But `JT-AUDIO-002` and `JT-RATE-001` both show a real, consistent pattern:
+a brief Playback stall, always self-recovered, after a large fraction of
+rate changes.** Counted directly from the two runs' full dmesg:
+
+- `JT-AUDIO-002` (4 rate changes): 1 stall -- 25%.
+- `JT-RATE-001` (60 rate changes): 16 stalls -- **26.7%**, tightly
+  clustered (detected at 20-23 ms, always just past
+  `JOCKEY3_WATCHDOG_STALL_MS`; recovered at 24-26 ms). Zero Capture
+  stalls. Zero escalations to a full reset -- every single one recovered
+  on the watchdog's first light URB restart.
+
+That is a large jump from arm64-prod's own documented N=1 rate-change
+baseline: 12 playback stalls out of 4,000 changes (0.3%) from the
+Milestone 13 endurance run (`re/rate_change_stall.md`). **Coalescing
+appears to make this board hit its light watchdog-restart path roughly
+two orders of magnitude more often right after a rate change, at N=4.**
+Whether this is N=4-specific or already present, less visibly, at N=2 is
+not yet established -- the earlier N=2 `JT-AUDIO-002` run on this board
+also showed one stall in its 4 rate changes (also 25%), which in hindsight
+is not obviously consistent with the 0.3% N=1 baseline either, but that
+run's dmesg was not saved with a comparable rate-change count to N=4's
+60-change `JT-RATE-001` run, so this is not yet a controlled comparison.
+
+**This does not (yet) look like a reliability regression** -- every
+occurrence stayed on the light, self-healing path the same way
+`armhf-prod`'s did, and nothing here contradicts the E2b finding that the
+underlying playback-stall mechanism itself is pre-existing (Milestone 13),
+not introduced by coalescing. What has changed, and needs an honest
+answer before recommending any N: **how much more often that pre-existing
+mechanism triggers as N grows.** A `JT-RATE-001`-scale run (dozens of rate
+changes, full dmesg) at N=1 and N=2 on the same board would settle whether
+this is proportional to N, a step change at some threshold, or was already
+this frequent and simply never sampled at this scale before.
+
 ### What it costs
 
 Completion rate with 80 frames per URB in both directions:
