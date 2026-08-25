@@ -1,0 +1,2 @@
+  33: 1499932648  ARMCTRL-level   41 Edge      20980000.usb, dwc2_hsotg:usb1
+  88:          5  smsc95xx         0 Edge    -phy       usb-001:003:01

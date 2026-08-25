@@ -161,7 +161,7 @@ KASAN, which is why §4 already puts those on `x86_64-prod`.
 | `x86_64-prod` | Same class of machine | Realistic timing, latency figures, long soaks. |
 | `arm64-prod` | Raspberry Pi 4B, 2 GB | Second architecture, and a different USB host controller (dwc2, not xhci) — a behavioral difference, not a detail. |
 | `arm64-debug` | Raspberry Pi 4B, 2 GB | Lock and memory checking on dwc2. Slow, so reserved for URB-lifetime and reset changes. |
-| `armhf-prod` | Raspberry Pi 1B, 512 MB | 32-bit codec path, uniprocessor, no preemption. Sleeping in atomic context is fatal here and benign elsewhere. Slow; kernel switching is painful. |
+| `armhf-prod` | Raspberry Pi 1B, 512 MB | 32-bit codec path, uniprocessor, no preemption. Sleeping in atomic context is fatal here and benign elsewhere. Slow; kernel switching is painful. Board-specific findings tracked in **[`re/pi1test_platform_notes.md`](../re/pi1test_platform_notes.md)**. |
 | `i386-prod` | Not yet set up — planned via multi-boot on the EliteDesk | The 32-bit codec on a fast machine. Currently covered only by L1/L2. |
 
 ### The kernel names its own target

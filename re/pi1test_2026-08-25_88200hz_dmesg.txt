@@ -1,0 +1,80 @@
+[165292.666707] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165292.666822] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165292.666917] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165292.667014] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165292.667121] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165292.667207] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165292.667281] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165292.667396] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165292.667451] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165292.667565] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165292.667643] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165292.667691] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165292.667818] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165292.679971] usb 1-1.5.1: USB disconnect, device number 20
+[165297.182774] usb 1-1.5.1: new high-speed USB device number 21 using dwc2
+[165297.280199] usb 1-1.5.1: New USB device found, idVendor=200c, idProduct=1037, bcdDevice= 1.00
+[165297.282556] usb 1-1.5.1: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[165297.282649] usb 1-1.5.1: Product: Jockey 3 Remix
+[165297.282679] usb 1-1.5.1: Manufacturer: reloop
+[165297.282705] usb 1-1.5.1: SerialNumber: no serial number
+[165297.543414] snd-reloop-jockey3 1-1.5.1:1.0: Firmware 0x31 v1.0.6
+[165309.811233] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165309.811385] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165309.811507] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165309.811601] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165309.811703] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165309.811857] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165309.811934] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165309.812078] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165309.812127] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165309.812249] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165309.812317] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165309.812412] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165309.812503] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165309.812566] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit capture URB: -19
+[165309.812617] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165309.812706] snd-reloop-jockey3 1-1.5.1:1.0: Failed to resubmit playback URB: -19
+[165309.839567] usb 1-1.5.1: USB disconnect, device number 21
+[165314.281636] usb 1-1.5.1: new high-speed USB device number 22 using dwc2
+[165314.379741] usb 1-1.5.1: New USB device found, idVendor=200c, idProduct=1037, bcdDevice= 1.00
+[165314.382329] usb 1-1.5.1: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[165314.382403] usb 1-1.5.1: Product: Jockey 3 Remix
+[165314.382454] usb 1-1.5.1: Manufacturer: reloop
+[165314.382482] usb 1-1.5.1: SerialNumber: no serial number
+[165314.642961] snd-reloop-jockey3 1-1.5.1:1.0: Firmware 0x31 v1.0.6
+[165325.906730] JT-MARK JT-PCM-002#1 6ccdaea8fe49
+[165352.807334] JT-MARK JT-PCM-004#1 d0beb90b7556
+[165372.378710] JT-MARK JT-RATE-001#1 f4587d53b1e9
+[165387.888712] JT-MARK JT-RATE-001#change1-48000 3f0d951228fe
+[165450.250550] JT-MARK JT-RATE-001#gap1 48b7ec747e13
+[165452.752883] JT-MARK JT-RATE-001#change2-44100 77cb43d42e75
+[165503.768883] JT-MARK JT-RATE-001#gap2 cbf36f47e2a4
+[165505.965994] JT-MARK JT-RATE-001#change3-48000 846b5ea93828
+[165566.291402] JT-MARK JT-RATE-001#gap3 ae24686c6237
+[165568.797006] JT-MARK JT-RATE-001#change4-44100 4daa6c8a1c14
+[165619.438083] JT-MARK JT-RATE-001#gap4 fc6c15836f50
+[165621.630644] JT-MARK JT-RATE-001#change5-48000 ee3b9dd165f2
+[165622.461803] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream stalled: no completion for 21 ms (8 URBs in flight, substream idle)
+[165622.461915] snd-reloop-jockey3 1-1.5.1:1.0: Playback stream stalled (watchdog); restarting URBs to recover
+[165622.463564] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream restarted after stalling for 23 ms
+[165690.271724] JT-MARK JT-RATE-001#gap5 c96d0c03d33c
+[165695.199456] JT-MARK JT-RATE-001#change6-44100 44b1228caaec
+[165760.655235] JT-MARK JT-RATE-001#gap6 db55c658683c
+[165768.757685] JT-MARK JT-AUDIO-002#1 de4c57010360
+[166803.210316] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream stalled: no completion for 85 ms (8 URBs in flight, substream idle)
+[166803.210432] snd-reloop-jockey3 1-1.5.1:1.0: Playback stream stalled (watchdog); restarting URBs to recover
+[166803.212890] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream restarted after stalling for 87 ms
+[167186.030363] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream stalled: no completion for 38 ms (8 URBs in flight, substream open)
+[167186.100324] snd-reloop-jockey3 1-1.5.1:1.0: Playback stream stalled (watchdog); restarting URBs to recover
+[167186.102476] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream restarted after stalling for 110 ms
+[168285.374252] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream stalled: no completion for 50 ms (8 URBs in flight, substream idle)
+[168285.428351] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream recovered after 524 ms
+[168288.906547] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream stalled: no completion for 32 ms (8 URBs in flight, substream idle)
+[168288.937313] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream recovered after 62 ms
+[168291.637404] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream stalled: no completion for 99 ms (8 URBs in flight, substream idle)
+[168291.667317] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream recovered after 457 ms
+[168295.940462] snd-reloop-jockey3 1-1.5.1:1.0: Capture URB stream stalled: no completion for 110 ms (8 URBs in flight, substream open)
+[168295.988937] snd-reloop-jockey3 1-1.5.1:1.0: Capture URB stream recovered after 159 ms
+[168299.756957] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream stalled: no completion for 107 ms (8 URBs in flight, substream idle)
+[168299.791214] snd-reloop-jockey3 1-1.5.1:1.0: Playback URB stream recovered after 141 ms

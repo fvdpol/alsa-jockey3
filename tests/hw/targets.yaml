@@ -198,6 +198,16 @@ targets:
         timing check is impossible here without a high rate at all: 44.1 and 48
         differ by 8%, below JT-RATE-001's tolerance, so "low rates only" and "a
         meaningful rate-change check" cannot both hold on this target.
+
+        Partial data point, 2026-08-25: an 88200 Hz capture during JT-AUDIO-002
+        left an arecord process stuck in an uninterruptible kernel wait for
+        ~46 minutes and the board briefly unreachable over ssh, clearing only
+        after a rate change back to 44100 Hz (no power cycle needed). See
+        re/pi1test_platform_notes.md for the full writeup. This is evidence the
+        exclusion has real teeth at 88200 Hz specifically, at least in the
+        loopback case's sequence -- it is not the clean codec-throughput
+        measurement this note calls for, and does not by itself confirm or
+        rule out 96 kHz or other cases at high rates.
       - No Mixxx, no benchmarking.
 
   i386-prod:
