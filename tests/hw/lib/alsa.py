@@ -220,7 +220,7 @@ class watch_pcm(threading.Thread):
         super().__init__(daemon=True)
         self.index, self.pcm, self.sub = index, pcm, sub
         self.interval = interval
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self.samples = 0
         self.xruns = 0
         self.avail_max = 0
@@ -234,7 +234,7 @@ class watch_pcm(threading.Thread):
         self.state = None
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             st = pcm_status(self.index, self.pcm, self.sub)
             if st:
                 self.saw_open = True
@@ -249,10 +249,10 @@ class watch_pcm(threading.Thread):
                     self.trace.append((time.monotonic(), st["hw_ptr"]))
                 if not self.hw_params:
                     self.hw_params = hw_params(self.index, self.pcm, self.sub)
-            self._stop.wait(self.interval)
+            self._stop_event.wait(self.interval)
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
         self.join(timeout=2)
         return self
 
