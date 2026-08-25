@@ -846,14 +846,9 @@ static void jockey3_capture_callback(struct urb *urb)
 			 * visible instead of silently discarded audio (see
 			 * CLAUDE.md's fault-handling principle).
 			 */
-			static bool warned;
-
-			if (!warned) {
-				dev_warn(&chip->intf0->dev,
-					 "Capture URB length %d not a multiple of %d, using %d sub-packet(s)\n",
-					 urb->actual_length, PLOYTEC_PKT_SIZE, n_subpkts);
-				warned = true;
-			}
+			dev_warn_once(&chip->intf0->dev,
+				      "Capture URB length %d not a multiple of %d, using %d sub-packet(s)\n",
+				      urb->actual_length, PLOYTEC_PKT_SIZE, n_subpkts);
 		}
 	}
 
@@ -1612,7 +1607,15 @@ static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *
 	if (!last_time)
 		return false;
 
-	/* alive if we had activity within the last 1 ms = 1,000,000 ns */
+	/*
+	 * Alive if we had activity within the last 1 ms = 1,000,000 ns. This
+	 * window must exceed one URB span (JOCKEY3_PLAYBACK_N or
+	 * JOCKEY3_CAPTURE_N packet intervals) or a perfectly healthy stream
+	 * could sample as dead between completions. At the current N=2 the
+	 * worst case is 453.6 us (playback, 44100 Hz) -- still under half
+	 * this window, but that headroom shrinks as N grows and needs
+	 * rechecking if either constant is raised further.
+	 */
 	return (ktime_get_mono_fast_ns() - last_time <= NSEC_PER_MSEC);
 }
 
