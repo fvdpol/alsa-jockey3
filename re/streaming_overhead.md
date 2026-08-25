@@ -302,6 +302,14 @@ Two consequences:
    (`re/usb/openvizsla/buffer size tests.md`) that the wire "is still using
    the 512 byte Ploytec framing" regardless of the CoreAudio buffer size is
    correct and remains correct -- it just does not answer this question.
+   Confirmed again independently: `re/usb/openvizsla/capture_2026-08-17_macos_ratechange.md`
+   documents a real 50.3-51.4 ms "quiet window" in vendor traces, initially
+   worth checking as a possible coalescing tell -- it turned out to be
+   pacing between register writes inside the EP0 rate-change control-transfer
+   handshake, unrelated to the PCM bulk endpoints, and already spent on
+   fixing Milestone 13's original capture-stall bug (`re/rate_change_stall.md`).
+   No gap, burst pattern or timing signature on the wire distinguishes
+   coalesced from uncoalesced bulk transfers, in any capture examined so far.
 2. **It does not need to.** Because the device paces, an N-packet URB simply
    takes N packet intervals to retire and produces one completion instead of
    N. The wire traffic is byte-for-byte identical. The device cannot tell the
