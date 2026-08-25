@@ -170,7 +170,10 @@ def sample_point(c, name, hcd, settle_seconds, sample_seconds):
         if values:
             metrics[f"ns_per_{short}_cb"] = round(perf.mean(values), 1)
             metrics[f"{short}_cb_calls"] = len(values)
-        elif traced:
+        elif traced and name != "unbound":
+            # 0 calls is the CORRECT answer for "unbound": no URBs are
+            # submitted with the driver detached, so the completion handlers
+            # cannot fire. Only worth a note anywhere else.
             c.note(f"{name}: traced but recovered 0 calls for {fn} -- "
                    f"see the raw trace saved for this point")
 
