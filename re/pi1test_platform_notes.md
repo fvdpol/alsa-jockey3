@@ -209,6 +209,21 @@ clears the state -- this occurrence only has state from before the fix, not
 during the actual wedge, so which specific wait it was stuck in is still
 unknown.
 
+### Follow-on: the load itself became its own investigation
+
+The interrupt/system-time numbers in this section are the motivating
+observation behind `re/streaming_overhead.md` (the study) and
+`re/streaming_overhead_experiments.md` (the E1-E4 plan), which look at
+reducing the host cost of the driver's continuous URB streaming in general --
+transfer coalescing, idle rate downshift, on-demand streaming. Two cautions
+for anyone quoting numbers from here:
+
+- **The 88.2 kHz `vmstat` reading above was taken during the wedge**, with
+  `arecord` in D state and recovery cycles running. It measures a fault, not a
+  streaming baseline, and no interrupt-rate model should be fitted to it. The
+  44.1 kHz reading taken after the recovery is the clean one.
+- Establishing proper baselines is exactly what experiment E1 exists for.
+
 ### What this settles, and what it doesn't
 
 - This is now real, first-hand evidence for the `armhf-prod` "high sample
