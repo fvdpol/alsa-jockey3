@@ -93,12 +93,23 @@ worth a look before trusting cross-platform CPU% comparisons).
 **`armhf-prod` (`pi1test`) confirms the model at low rates and breaks it
 badly at high ones:**
 
-| point | model (driver + 8,000 SOF) | observed `irq_per_s` | ratio |
-|---|---|---|---|
-| idle / 44100 | 17,923 | 16,591 / 16,530 | 0.92-0.93x |
-| 48000 | 18,800 | 17,176 | 0.91x |
-| 88200 | 27,845 | **54,995** | **2.0x** |
-| 96000 | 29,600 | **92,565** | **3.1x** |
+| point | driver traffic | model (driver + 8,000 SOF) | observed `irq_per_s` | ratio |
+|---|---|---|---|---|
+| unbound | none (driver detached) | 8,000 | 8,014 | 1.00x |
+| idle | device operational, no audio stream open, URBs running at 44100 (last-set rate) | 17,923 | 16,591 | 0.93x |
+| stream 44100 | audio open at 44100 | 17,923 | 16,530 | 0.92x |
+| stream 48000 | audio open at 48000 | 18,800 | 17,176 | 0.91x |
+| stream 88200 | audio open at 88200 | 27,845 | **54,995** | **2.0x** |
+| stream 96000 | audio open at 96000 | 29,600 | **92,565** | **3.1x** |
+
+`unbound` is the true zero: no URBs at all, and it lands on the SOF-latch
+figure alone almost exactly -- the cleanest confirmation available that the
+8,000/s baseline is a property of the board, not of this driver. `idle` (URBs
+running, nothing open) and `stream_44100` (a substream open, at the same
+44100 Hz the device already happened to be at) are conceptually different
+states -- one is the device's resting condition, the other is actively
+carrying audio -- but they share the same completion rate, since URBs run
+free regardless of PCM open/close, and both land close to the model.
 
 44.1 and 48 kHz land within 10% of the additive model (driver completions
 plus the board's own 8,000/s dwc2 SOF-latch baseline), matching the earlier
@@ -125,13 +136,8 @@ completion-rate model: flat and multiplicative below some saturation
 threshold, non-linear and recovery-driven above it, and that threshold is a
 property of the host, not of the driver.
 
-**The `unbound` point independently confirms the SOF-latch hypothesis.** With
-the driver detached and no URBs submitted at all, `irq_per_s_unbound` still
-read 8,014/s on `armhf-prod` (0 on `x86_64-prod` and `arm64-prod`, neither of
-which has this latch) -- matching the platform notes' figure for the dwc2
-SOF-interrupt latch almost exactly. This is a clean, driver-independent
-measurement of a board property the earlier writeup could only infer from
-`vmstat` during an active fault.
+(`x86_64-prod` and `arm64-prod` both measured `irq_per_s_unbound` as 0 --
+neither has a SOF latch, so their true zero really is zero.)
 
 **And a second, live data point for the recovery-feedback hypothesis, from
 the same run.** `JT-PERF-001` itself tries to leave the device at 44.1 kHz
@@ -188,15 +194,38 @@ Per completion the driver does: the host controller's own IRQ entry and event
 processing, a softirq dispatch, `jockey3_playback_callback()` /
 `jockey3_capture_callback()` (URB status check, one atomic decrement, one
 `ktime_get_mono_fast_ns()`, a spinlock round trip, the codec conversion of
-10 or 8 frames, and a resubmit through `usb_submit_urb()`).
+10 or 8 frames, and a resubmit through `usb_submit_urb()`). On top of that,
+whenever a PCM substream is actually open, `aplay`/`arecord` are issuing a
+steady stream of `read()`/`write()` syscalls to move data through the ALSA
+ring buffer -- kernel-context time on every call, invisible to `irq_per_s`.
 
-Only the codec conversion scales with *bytes*. Everything else scales with
-*URB count*. This is the crux:
+Only the codec conversion and the read/write syscall traffic scale with
+*bytes processed*. Everything else -- IRQ entry, softirq dispatch, the
+completion handler's own fixed-cost bookkeeping, resubmission -- scales with
+*URB count* alone. This is the crux, and it decides what coalescing (lever 4)
+can and cannot reach:
 
-- Lever 4 (coalescing) removes the per-URB overhead -- the majority of the cost
-  -- and leaves the codec work unchanged. It is a large win on a slow CPU with
-  expensive interrupt entry (pi1), and still a real win on x86.
+- Lever 4 removes the per-URB fixed cost and leaves both the codec work and
+  the syscall traffic unchanged -- fewer, larger transfers move the same
+  bytes through the same encode/decode path and the same `read()`/`write()`
+  calls.
 - Levers 2 and 3 reduce the byte rate as well, but only while idle.
+
+**Measured, not just reasoned about: the per-frame component is not small.**
+`JT-PERF-001` on `armhf-prod` (`re/streaming_overhead_experiments.md` E1)
+caught `idle` and `stream_44100` at the *same* completion rate (URBs run free
+regardless of PCM open/close, so opening a stream at whatever rate is already
+running changes nothing about `irq_per_s`) -- 16,591 vs 16,530/s, statistically
+identical. `cpu_pct_sys_irq_soft` was not: 12.09% idle, 26.46% streaming.
+That entire 14.4-point gap is the per-frame component (codec conversion plus
+`read()`/`write()` overhead) at a rate lever 4 does not touch, and it is
+*larger* than the per-URB component this one data point can isolate (idle's
+12.09%). This does not overturn the recommendation -- lever 4 is still real
+money on the per-URB share of the cost, on every platform tested -- but it
+means coalescing's payoff should not be assumed proportional to its ~89%
+completion-rate reduction; on this data point roughly half the streaming CPU
+cost survives it untouched. Worth measuring directly (E2c) rather than
+projected from the idle numbers alone.
 
 ---
 
