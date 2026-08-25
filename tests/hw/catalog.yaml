@@ -259,6 +259,16 @@ cases:
     exec: cases/probe_cycle.py
     params:
       iterations_per_run: 3
+      # Pause after a load, before attempting unload. Default 0: on the
+      # targets this was written against, nothing outlives the load fast
+      # enough to make rmmod fail. armhf-prod (pi1test) overrides this to a
+      # few seconds in profiles.yaml -- see re/pi1test_platform_notes.md for
+      # why: on that single-core board, udev's own brief open of a
+      # newly-appeared card's control node (no sound server runs there) can
+      # still be in flight when rmmod would otherwise fire immediately after
+      # load, and "Module ... is in use" is udev's transient hold, not the
+      # driver's.
+      settle_delay_s: 0
     metrics: [probe_ms, load_ms, unload_ms]
     pass: >
       The card appears with a playback and a capture substream and one rawmidi

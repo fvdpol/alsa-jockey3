@@ -40,6 +40,7 @@ def main():
         c.blocked(f"cannot load or unload the module: {why}")
 
     iterations = int(c.params.get("iterations_per_run", 3))
+    settle_delay_s = float(c.params.get("settle_delay_s", 0))
 
     # The firmware message is a dev_dbg, and the only place the firmware
     # revision appears -- there is no sysfs attribute, and adding one would be
@@ -78,6 +79,9 @@ def main():
             c.fail(f"iteration {i}: no capture substream")
         if not subs["rawmidi"]:
             c.fail(f"iteration {i}: no rawmidi device")
+
+        if settle_delay_s:
+            time.sleep(settle_delay_s)
 
         t0 = time.time()
         rc, _out, err = priv.unload_module()

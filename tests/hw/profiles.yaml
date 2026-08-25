@@ -50,6 +50,10 @@ profiles:
       - {id: JT-AUDIO-005, iterations: 1, params: {iterations_per_run: 3}}
     overrides:
       armhf-prod:
+        # See re/pi1test_platform_notes.md: udev's own brief hold on a
+        # newly-appeared card's control node can outlive load on this
+        # single-core board, making rmmod fail with "Module ... is in use".
+        JT-PROBE-001: {params: {settle_delay_s: 3}}
         JT-PCM-002: {params: {rates: [44100], seconds: 2}}
         # Stays at the rates this target's constraints allow. The 8% step
         # between them is below JT-RATE-001's timing tolerance, so the rate
@@ -59,6 +63,13 @@ profiles:
         # and belongs in a measurement of its own, not in a silent change to
         # this profile.
         JT-RATE-001: {params: {rates: [44100, 48000], iterations_per_run: 3}}
+        # 2026-08-25: an 88200 Hz capture during JT-AUDIO-002 left an
+        # unkillable arecord stuck for ~46 minutes and the board unreachable
+        # over ssh (sustained ~30k interrupts/s) until a rate change to
+        # 44100 Hz cleared it -- see re/pi1test_platform_notes.md. `functional`
+        # already restricted this case's rates for the same reason; smoke
+        # hadn't been updated to match.
+        JT-AUDIO-002: {params: {rates: [44100, 48000]}}
       x86_64-debug:
         JT-PROBE-001: {iterations: 5}
 
@@ -106,6 +117,10 @@ profiles:
         JT-CODEC-001: {iterations: 0}
         JT-CODEC-002: {iterations: 0}
         JT-MIDI-006:  {iterations: 0}
+        # See re/pi1test_platform_notes.md: udev's own brief hold on a
+        # newly-appeared card's control node can outlive load on this
+        # single-core board, making rmmod fail with "Module ... is in use".
+        JT-PROBE-001: {params: {settle_delay_s: 3}}
         JT-PROBE-002: {iterations: 0}
         # Power-cycling is slow on a Pi 1B and re-enumeration is the slowest
         # part of it. Three cycles still catches a slot leak, which increments
@@ -207,9 +222,16 @@ profiles:
     overrides:
       armhf-prod:
         # The Pi 1B does not get a regression pass. Use `functional`.
+        # See re/pi1test_platform_notes.md: udev's own brief hold on a
+        # newly-appeared card's control node can outlive load on this
+        # single-core board, making rmmod fail with "Module ... is in use".
+        JT-PROBE-001: {params: {settle_delay_s: 3}}
         JT-RATE-001: {iterations: 0}
         JT-PCM-001:  {iterations: 0}
         JT-PROBE-002: {iterations: 0}
+        # See re/pi1test_platform_notes.md: an 88200 Hz capture wedged an
+        # arecord process for ~46 minutes during a smoke run.
+        JT-AUDIO-002: {params: {rates: [44100, 48000]}}
         # No onboard RTC, no suspend-to-RAM support -- see the note under
         # `functional`.
         JT-PM-001:   {iterations: 0}
@@ -252,6 +274,10 @@ profiles:
       - {id: JT-AUDIO-005, iterations: 1, params: {iterations_per_run: 30}}
     overrides:
       armhf-prod:
+        # See re/pi1test_platform_notes.md: udev's own brief hold on a
+        # newly-appeared card's control node can outlive load on this
+        # single-core board, making rmmod fail with "Module ... is in use".
+        JT-PROBE-001: {params: {settle_delay_s: 3}}
         JT-PCM-008: {params: {hours: 2, rate: 44100}}
         JT-RATE-003: {params: {iterations_per_run: 500}}
         JT-PROBE-005: {iterations: 0}
