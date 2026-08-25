@@ -3,9 +3,11 @@
 Options for cutting the CPU, interrupt and power cost the Jockey 3 imposes on
 its host: transfer coalescing, idle rate downshift, and on-demand streaming.
 
-**Status: analysis only. No code changed, no hardware run.** The companion
-document `re/streaming_overhead_experiments.md` is the executable plan for the
-experiments this study calls for.
+**Status: E1 (baseline measurement) and E2a (firmware acceptance gate) done,
+both on real hardware. E2a passed at N=2 in both directions -- see Part 2.**
+The companion document `re/streaming_overhead_experiments.md` is the
+executable plan for the experiments this study calls for and tracks
+per-experiment status in more detail.
 
 This started as a narrower question -- "should the driver stop streaming when
 the device is idle?" -- and the answer reframes it, which is why the title is
@@ -334,6 +336,42 @@ playback / 6 capture channels. The precedent shows that the Ploytec 512-byte
 sub-packet framing *as a design* tolerates multi-packet bulk transfers -- it
 does **not** establish that this particular firmware accepts a 4096-byte bulk
 OUT. That is the real open risk, and it is the first thing E2 tests.
+
+### E2a result: gate passed at N=2, on real Jockey 3 hardware
+
+Tested on `alsa-test`, `dev/streaming-overhead` branch, with a build-time
+probe (`JOCKEY3_E2A_COALESCE_PROBE`, `jockey3.c`) that widens both a single
+playback and a single capture URB from 512 to 1024 bytes (N=2), leaving
+everything else -- ring depth, callback structure, period accounting --
+untouched. Sub-packet 0 still carries real audio via the existing path;
+sub-packet 1 is filled with idle/sync framing only, since the real
+per-sub-packet loop is E2b's job, not this probe's.
+
+- **Capture: clean.** `actual_length` reported 1024 (the full requested
+  transfer, not a short one) for 35+ seconds continuously on the first run,
+  and again from device init on a second run, with zero errors. The device
+  does not truncate a multi-sub-packet capture URB to one sub-packet.
+- **Playback: clean on the decisive run.** The first hardware run showed one
+  isolated self-recovered stall (`restarted after stalling for 80 ms`) early
+  on; a second, longer run completed a full playback with **zero kernel
+  messages** -- no stalls, no URB errors. The one stall did not reproduce and
+  is treated as noise, not a firmware limitation.
+- **Audible distortion during the probe (ring-modulated / half-speed sound)
+  is expected and is not a correctness signal.** It is a direct consequence
+  of sub-packet 1 carrying silence instead of real audio in this
+  acceptance-only probe, not evidence of a wire or firmware problem. It
+  should disappear once E2b fills every sub-packet with real data.
+- Both runs' termination via an EPROTO storm + "USB disconnect" was traced to
+  a deliberate manual power-off of the device between runs, not a firmware
+  fault -- see the standing lesson in `.claude/session-state.md` about not
+  reading that dmesg signature as a protocol failure without first ruling out
+  a physical power event.
+
+**Conclusion: N=2 multi-packet bulk transfers are protocol-viable on real
+Jockey 3 firmware, in both directions.** This clears E2a's gate; E2b (the
+real sub-packet processing loop, filling every sub-packet with live data) is
+next. Higher N (4x, 8x) has not yet been probed and should not be assumed
+clean on this evidence alone.
 
 ### What it costs
 

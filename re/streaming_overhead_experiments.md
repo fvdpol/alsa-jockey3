@@ -173,6 +173,15 @@ constraint (capture must handle `actual_length / PLOYTEC_PKT_SIZE`
 sub-packets, not blindly N) -- but it changes the arithmetic if it happens
 routinely.
 
+**Result: PASSED at N=2, both directions.** Tested on `alsa-test` hardware,
+`dev/streaming-overhead` (`JOCKEY3_E2A_COALESCE_PROBE`, never merges to
+`main`). Capture returned full `actual_length=1024` (no short transfers) for
+35+ seconds continuously across two runs. Playback showed one isolated
+self-recovered stall on the first run, not reproduced on a second, longer
+run that completed with zero kernel messages. Full writeup in
+`re/streaming_overhead.md`, Part 2 ("E2a result"). N=4 and N=8 not yet
+probed -- do not assume clean on this evidence. Next: E2b.
+
 ### E2b -- the prototype
 
 `N` configurable at build time, separately per direction. The per-packet
