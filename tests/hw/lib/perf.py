@@ -100,18 +100,33 @@ def cpu_pct_sys_irq_soft(before, after):
 
 # --- function_graph trace parsing -------------------------------------
 
+# A module's own symbols carry a "[module]" suffix in real ftrace output,
+# right where a bare kernel-internal function name would end -- confirmed
+# against a live trace_alsa-test capture, 2026-08-26:
+#   " 0)   1.890 us    |  jockey3_capture_callback [snd_reloop_jockey3]();"
+# Optional here because a built-in kernel function never carries one.
+_MODULE_SUFFIX = r'(?:\s*\[[^\]]+\])?'
+
+# ftrace marks a call slower than its threshold with a leading '+' (>10us) or
+# '!' (>100us) BEFORE the duration number, not after:
+#   " 0) + 17.934 us   |  jockey3_playback_callback [snd_reloop_jockey3]();"
+_SLOW_MARK = r'\s*[+!]?\s*'
+
 # Collapsed leaf form, no traced children:
 #   " 3)   0.653 us    |  jockey3_playback_callback();"
 _LEAF_RE = re.compile(
-    r'^\s*(\d+)\)\s+([\d.]+)\s*(us|ms)\s*[+!]?\s*\|\s+(\w+)\(\);\s*$')
+    r'^\s*(\d+)\)' + _SLOW_MARK + r'([\d.]+)\s*(us|ms)\s*\|\s+(\w+)' +
+    _MODULE_SUFFIX + r'\(\);\s*$')
 
 # Entry of a nested call:
 #   " 3)               |  jockey3_playback_callback() {"
-_ENTRY_RE = re.compile(r'^\s*(\d+)\)\s*\|?\s*(\w+)\(\)\s*\{\s*$')
+_ENTRY_RE = re.compile(
+    r'^\s*(\d+)\)\s*\|?\s*(\w+)' + _MODULE_SUFFIX + r'\(\)\s*\{\s*$')
 
 # Close of a nested call, duration on the closing brace:
 #   " 3)   1.204 us    |  }"
-_EXIT_RE = re.compile(r'^\s*(\d+)\)\s+([\d.]+)\s*(us|ms)\s*[+!]?\s*\|\s*\}\s*$')
+_EXIT_RE = re.compile(
+    r'^\s*(\d+)\)' + _SLOW_MARK + r'([\d.]+)\s*(us|ms)\s*\|\s*\}\s*$')
 
 # Any other line with a "N)" CPU column, to track nesting depth per CPU
 # without needing to understand what the line is (spinlocks, ktime_get,
