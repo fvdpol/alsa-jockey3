@@ -155,6 +155,7 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * jockey3_playback_callback() below, needed so BOTH sub-packets look like
  * valid idle Ploytec frames to the firmware, not just the first.
  */
+//#undef JOCKEY3_E2A_COALESCE_PROBE
 #undef JOCKEY3_E2A_COALESCE_PROBE
 #ifdef JOCKEY3_E2A_COALESCE_PROBE
 #define JOCKEY3_E2A_N 2
@@ -840,13 +841,26 @@ static void jockey3_capture_callback(struct urb *urb)
 	 * The actual question E2a asks on the capture side: with a
 	 * JOCKEY3_E2A_XFER_SIZE (1024 B) transfer requested, does the device
 	 * fill the whole thing, or does it always terminate at one 512 B
-	 * sub-packet regardless of what was asked for? Rate-limited -- this
-	 * fires at several thousand/sec at any real sample rate.
+	 * sub-packet regardless of what was asked for?
+	 *
+	 * Logged once per distinct value rather than ratelimited: at several
+	 * thousand calls/sec, even a ratelimited print floods dmesg badly
+	 * enough over a run of any real length to be unusable on its own
+	 * (2026-08-26, alsa-test -- Frank cut a run short over exactly this).
+	 * The steady-state answer only needs saying once; what is worth
+	 * seeing is a CHANGE -- e.g. actual_length dropping to 512 partway
+	 * through a run, which this still catches.
 	 */
-	if (data_valid)
-		dev_info_ratelimited(&chip->intf0->dev,
-				      "E2a: capture actual_length=%d (requested %d)\n",
-				      urb->actual_length, JOCKEY3_E2A_XFER_SIZE);
+	if (data_valid) {
+		static int e2a_last_logged = -1;
+
+		if (urb->actual_length != e2a_last_logged) {
+			dev_info(&chip->intf0->dev,
+				 "E2a: capture actual_length=%d (requested %d)\n",
+				 urb->actual_length, JOCKEY3_E2A_XFER_SIZE);
+			e2a_last_logged = urb->actual_length;
+		}
+	}
 #endif
 
 	/* Step 1: Safely fetch the pointer and join the safe zone */
@@ -2895,6 +2909,12 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->intf0 = intf;
 	chip->intf1 = intf1;
 	chip->flags = 0;
+
+#ifdef JOCKEY3_E2A_COALESCE_PROBE
+	dev_info(&chip->intf0->dev, "JOCKEY3_E2A_COALESCE_PROBE EXPERIMENTAL BUILD: N=%d, XFER_SIZE=%d\n",
+		 JOCKEY3_E2A_N, JOCKEY3_E2A_XFER_SIZE);
+#endif
+
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback.lock);
 	spin_lock_init(&chip->capture.lock);
