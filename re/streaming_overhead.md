@@ -408,6 +408,58 @@ from E2.
 (N=2, both directions) is clean; the stall is a pre-existing, orthogonal
 reliability issue this testing happened to surface. E2c can proceed.
 
+### E2c preliminary result: `x86_64-prod`, N=1 vs N=2, halved completion rate confirmed
+
+The N=2 `JT-PERF-001` run already collected while testing E2b
+(`tests/hw/results/x86_64-prod/20260825T195732Z-smoke`) can be compared
+directly against the N=1 baseline runs E1 already collected on the same
+board (`.../20260825T170234Z-smoke`, with `.../154430Z` and `.../161559Z` as
+consistency checks on `stream` alone -- `idle_R` metrics didn't exist yet
+when those two ran). No new hardware pass was needed for this first look.
+
+`irq_per_s` halves almost exactly at every rate, as the flat per-URB model
+predicts (N=2's one completion now carries two sub-packets):
+
+| Rate | `irq_per_s` N=1 (stream) | `irq_per_s` N=2 (stream) | ratio |
+|---|---|---|---|
+| 44100 | 9,924 (avg of 3 runs) | 4,957.1 | 0.500 |
+| 48000 | 10,794 (avg of 3 runs) | 5,390.9 | 0.500 |
+| 88200 | 19,850 (avg of 3 runs) | 9,925.2 | 0.500 |
+| 96000 | 21,577 (avg of 3 runs) | 10,796.5 | 0.500 |
+
+`cpu_pct_sys_irq_soft` tells the more interesting story -- the saving is
+real but not flat across rates, and is largest exactly where the study
+predicted (Part 1's "the per-frame gap is real" finding for `x86_64-prod`):
+
+| Rate | cpu% N=1 idle | cpu% N=2 idle | cpu% N=1 stream (avg) | cpu% N=2 stream |
+|---|---|---|---|---|
+| 44100 | 0.12 | 0.17 | 1.04 | 1.07 |
+| 48000 | 0.20 | 0.12 | 1.20 | 0.68 |
+| 88200 | 2.30 | 0.12 | 3.14 | 1.25 |
+| 96000 | 2.27 | 0.17 | 2.73 | 1.07 |
+
+At 44.1/48 kHz the CPU saving is within measurement noise -- both N=1 and
+N=2 sit near the measurement floor there, and the codec/copy work
+coalescing does not touch already dominates whatever is left. At 88.2/96
+kHz the effect is large and unambiguous: idle CPU drops roughly **15-19x**,
+not the 2x the completion-rate halving alone would suggest. This is the
+first direct evidence for the mechanism Part 1 flagged but could not
+explain (`x86_64-prod`'s oddly elevated 88.2/96 kHz CPU%, "not yet
+explained, worth a look before trusting cross-platform CPU% comparisons") --
+consistent with per-completion fixed cost (interrupt entry, softirq
+dispatch, URB resubmission) dominating at these rates on this board, which
+is exactly the cost coalescing removes and codec work is not.
+
+**Not yet done, before calling E2c complete:** this is one board, one run
+each side, `stream` only lightly cross-checked (3 N=1 runs, 1 N=2 run) and
+`idle` only single-run each side. Still missing: `arm64-prod` and
+`armhf-prod`, the xrun sweep at small periods, MIDI OUT jitter
+measurement, and the full `functional`/`regression` profile (particularly
+`JT-RATE-001`, given the E2b section above). But directionally, at the two
+rates where it was ever going to matter, the payoff is real and roughly an
+order of magnitude larger than the naive completion-rate model alone
+would have predicted.
+
 ### What it costs
 
 Completion rate with 80 frames per URB in both directions:
