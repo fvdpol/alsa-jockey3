@@ -535,10 +535,20 @@ on this same board.
 88.2/96 kHz (87-97%), it just no longer appears to be compounding that
 saturation into extra recovery traffic. This is consistent with, not a
 replacement for, the study's standing position that `armhf-prod`'s bar is
-"does not crash, hang, or oops," not "stays fast" -- coalescing looks like
-a genuine reliability improvement here, not just a performance one, but
-that has not been confirmed against dmesg from this run (not yet pulled)
-and is one clean run, not a validated pattern.
+"does not crash, hang, or oops," not "stays fast."
+
+**Confirmed against dmesg (2026-08-25, `run#20260825T212251Z`): zero stall,
+resubmit-failure, or reset messages across the entire run**, enumeration
+through all four rates and back down -- the only two driver log lines in
+the whole capture are the firmware-version announcement at device attach
+and a second one at the very end, from `restore_resting_rate()`'s normal
+rate change back to 44.1 kHz, not a fault. At N=1 this exact sequence (a
+sweep through 88.2/96 kHz on this board) reliably produced stalls,
+`Failed to resubmit ... URB` bursts and resets (Part 1, and the earlier
+`JT-AUDIO-002` wedge). **Coalescing looks like a genuine reliability
+improvement here, not just a performance one** -- still one clean run, not
+yet a validated pattern, but a real, confirmed data point rather than an
+inference from completion-rate numbers alone.
 
 ### What it costs
 
