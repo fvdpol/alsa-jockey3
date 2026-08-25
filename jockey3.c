@@ -147,8 +147,8 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * keyed off these constants below is written to degenerate to the original
  * single sub-packet code path at N=1.
  */
-#define JOCKEY3_PLAYBACK_N	2
-#define JOCKEY3_CAPTURE_N	2
+#define JOCKEY3_PLAYBACK_N	4
+#define JOCKEY3_CAPTURE_N	4
 
 #define JOCKEY3_PLAYBACK_XFER_SIZE	(JOCKEY3_PLAYBACK_N * PLOYTEC_PKT_SIZE)
 #define JOCKEY3_CAPTURE_XFER_SIZE	(JOCKEY3_CAPTURE_N * PLOYTEC_PKT_SIZE)
@@ -1611,10 +1611,15 @@ static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *
 	 * Alive if we had activity within the last 1 ms = 1,000,000 ns. This
 	 * window must exceed one URB span (JOCKEY3_PLAYBACK_N or
 	 * JOCKEY3_CAPTURE_N packet intervals) or a perfectly healthy stream
-	 * could sample as dead between completions. At the current N=2 the
-	 * worst case is 453.6 us (playback, 44100 Hz) -- still under half
-	 * this window, but that headroom shrinks as N grows and needs
-	 * rechecking if either constant is raised further.
+	 * could sample as dead between completions. At the current N=4 the
+	 * worst case is 907.2 us (playback, 44100 Hz) -- only ~9% margin
+	 * left against this 1 ms window, down from ~55% at N=2. Real
+	 * scheduling jitter (workqueue/softirq latency under host load) could
+	 * plausibly eat that margin and produce a false "not alive" reading
+	 * right where jockey3_pcm_hw_params()'s post-rate-change check and
+	 * jockey3_pcm_prepare()'s liveness check use it. Needs hardware
+	 * confirmation at N=4 specifically, and the window (or this
+	 * function's granularity) likely needs raising before N=8.
 	 */
 	return (ktime_get_mono_fast_ns() - last_time <= NSEC_PER_MSEC);
 }
