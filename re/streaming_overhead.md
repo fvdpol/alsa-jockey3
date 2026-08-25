@@ -546,9 +546,21 @@ rate change back to 44.1 kHz, not a fault. At N=1 this exact sequence (a
 sweep through 88.2/96 kHz on this board) reliably produced stalls,
 `Failed to resubmit ... URB` bursts and resets (Part 1, and the earlier
 `JT-AUDIO-002` wedge). **Coalescing looks like a genuine reliability
-improvement here, not just a performance one** -- still one clean run, not
-yet a validated pattern, but a real, confirmed data point rather than an
-inference from completion-rate numbers alone.
+improvement here, not just a performance one.**
+
+**Three more N=2 runs, same board, same day:** two came back byte-for-byte
+as clean as the first (only the two firmware-version log lines). The third
+hit two brief Playback stalls -- 25 ms and 24 ms, each self-recovered by the
+watchdog's light URB restart in under 3 ms, with `substream open` (i.e.
+during a `stream_R` point, not `idle_R`) -- and nothing else. **4 runs: 3
+clean, 1 with two brief self-healing stalls, zero full USB resets in any
+of them.** That is a different failure mode from N=1's, not just a rarer
+one: N=1's stalls ran 400-500+ ms and needed a full reset to clear; N=2's
+worst case so far self-heals in under 30 ms without ever escalating.
+Coalescing has not been shown to eliminate watchdog activity on this board
+outright, but every occurrence observed so far stayed inside the *light*
+recovery path, never reaching the *hard* one -- four runs is still a small
+sample, not a validated pattern, but the picture is consistent, not mixed.
 
 ### What it costs
 
