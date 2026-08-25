@@ -8,22 +8,35 @@ platform, per sample rate, idle and streaming? Everything in that study's
 Part 6 experiment ladder (transfer coalescing, idle rate downshift) is a
 before/after against the numbers this case produces.
 
-Three points, always sampled in this order:
+1 + 2*len(params.rates) points, always sampled in this order:
 
-  unbound   the driver detached from the device's interface -- no URBs
-            submitted, nothing this driver does can be contributing. This is
-            a proxy for "device unplugged", chosen over usb-power hub
-            switching (JT-HOTPLUG's mechanism) because it needs no hub
-            hardware and is available on every target, and because cutting
-            bus power leaves the driver bound and repeatedly retrying against
-            a vanished device -- which is its own noise source, not a clean
-            floor. Skipped if usb-power IS available and the params ask for
-            it instead (unplugged_via=usb-power); see notes in catalog.yaml.
-  idle      driver bound, URBs running free (this driver's normal resting
-            state -- see jockey3.c's "URBs run free for the device's
-            lifetime" DOC comment), nothing open.
-  stream_R  playback and capture both open at rate R, for every R in
-            params.rates.
+  unbound     the driver detached from the device's interface -- no URBs
+              submitted, nothing this driver does can be contributing. This
+              is a proxy for "device unplugged", chosen over usb-power hub
+              switching (JT-HOTPLUG's mechanism) because it needs no hub
+              hardware and is available on every target, and because cutting
+              bus power leaves the driver bound and repeatedly retrying
+              against a vanished device -- which is its own noise source, not
+              a clean floor.
+  idle_R      for every R in params.rates: URBs running at R (this driver's
+              normal resting state -- see jockey3.c's "URBs run free for the
+              device's lifetime" DOC comment), nothing open --
+              jockey3_silence_out_packet()'s memset path.
+  stream_R    immediately after idle_R, at the same rate: playback and
+              capture both open -- ploytec_encode_batch()'s codec path, plus
+              aplay/arecord's own read()/write() syscall traffic.
+
+idle_R and stream_R share the same completion rate (URBs run free regardless
+of PCM open/close), so any cpu_pct_sys_irq_soft difference between them at a
+given rate is specifically the per-frame codec/syscall cost, not per-URB
+overhead -- which unbound vs. idle_R already isolates instead. This
+decomposition is the point: transfer coalescing (streaming_overhead.md's
+lever 4) only touches the per-URB share, so idle_R vs. stream_R is what tells
+whether coalescing's completion-rate reduction will translate into a
+proportional CPU saving, or a smaller one. A single unqualified "idle" point
+measured once, at whatever rate the device happened to be left at, could not
+make this comparison at every rate -- replaced 2026-08-26 for exactly that
+reason.
 
 At each point: HCD-line interrupts/s from /proc/interrupts (lib/perf.py,
 not /proc/interrupts's aggregate line -- and not vmstat's aggregate 'in',
@@ -164,28 +177,28 @@ def sample_point(c, name, hcd, settle_seconds, sample_seconds):
     return metrics, durations
 
 
-def restore_resting_rate(c, device, rate):
-    """Bring the device back to a low, cheap rate before the case exits.
+def set_device_rate(c, device, rate, label):
+    """Trigger a rate change with a brief silent playback open, then close.
 
-    URBs run free for the device's lifetime regardless of PCM open/close
-    (jockey3.c's own DOC comment), so whatever rate the last streaming point
-    used is exactly what the device keeps blasting at afterwards -- forever,
-    until something else changes it. On a weak host that is not a cosmetic
-    loose end: the 2026-08-26 pi1test run of this case left the board parked
-    at 96 kHz once its own measurement was done, at ~96% sys+irq+soft, and
-    that persisted until the operator power-cycled the device by hand
-    (documented in re/pi1test_platform_notes.md's 2026-08-25 entry as the
-    same fix, done manually, for the same symptom). This is the automated
-    version of that fix, run unconditionally so a JT-PERF-001 run does not
-    leave the rig worse off than it found it -- and if the restore itself
-    cannot complete (2026-08-26: it timed out on pi1test right after the
-    96 kHz point, at 95% CPU, and the run only recovered once the operator
-    physically unplugged the device), that is reported as a case failure
-    rather than a note nobody reads, per the driver's own "never hide a
-    fault" rule (re/streaming_overhead.md and jockey3.c's fault-handling
-    convention alike).
+    Used both to bring the device to a rate before an idle_R point (URBs run
+    free at whatever rate was last set, regardless of PCM open/close --
+    jockey3.c's "URBs run free for the device's lifetime" DOC comment -- so
+    this is the only way to control which rate idle_R actually measures) and
+    to restore a low resting rate before the case exits (restore_resting_rate()
+    below).
+
+    Returns True on success. A failure is reported with c.fail(), not
+    c.note(): 2026-08-26 on pi1test, this exact operation (there, the final
+    restore) timed out right after a 96 kHz point at 95% CPU, and the failure
+    sat in a JSON note field while the operator diagnosed and manually
+    power-cycled the device -- exactly the fault this driver holds itself to
+    never hiding (jockey3.c's fault-handling convention). kill() only
+    delivers SIGKILL; it does not free a process blocked in an
+    uninterruptible kernel wait (D state) -- pi1test has a documented
+    arecord stuck like that for ~46 minutes
+    (re/pi1test_platform_notes.md, 2026-08-25) -- so the post-kill wait is
+    bounded too, rather than risking the same wedge here.
     """
-    c.progress(f"restoring the device to {rate} Hz before finishing")
     p = subprocess.Popen(
         ["aplay", "-D", device, "-r", str(rate), "-c", str(CHANNELS),
          "--format", FORMAT, "-d", "1", "/dev/zero"],
@@ -194,28 +207,41 @@ def restore_resting_rate(c, device, rate):
         _out, err = p.communicate(timeout=10)
     except subprocess.TimeoutExpired:
         p.kill()
-        # kill() only delivers SIGKILL; it does not free a process blocked in
-        # an uninterruptible kernel wait (D state) -- pi1test has a documented
-        # arecord stuck like that for ~46 minutes (re/pi1test_platform_notes.md,
-        # 2026-08-25). A second unbounded communicate() here would make this
-        # case hang the same way, on exactly the platform where a saturated
-        # aplay -r 44100 open() is most likely to actually be stuck rather
-        # than just slow. Bounded, and the failure is reported either way.
         try:
             p.communicate(timeout=10)
         except subprocess.TimeoutExpired:
-            c.fail(f"restoring to {rate} Hz: aplay would not die after "
-                   f"SIGKILL -- likely stuck in an uninterruptible kernel "
-                   f"wait, not just slow. Device is left at whatever rate "
-                   f"the last streaming point used; may need manual "
+            c.fail(f"{label}: aplay would not die after SIGKILL -- likely "
+                   f"stuck in an uninterruptible kernel wait, not just slow. "
+                   f"Device is left at an unknown rate; may need manual "
                    f"recovery (see re/pi1test_platform_notes.md)")
-            return
-        c.fail(f"restoring to {rate} Hz timed out after 10s -- device may "
-               f"still be at whatever rate the last streaming point used")
-        return
+            return False
+        c.fail(f"{label}: timed out after 10s -- device may still be at "
+               f"whatever rate it was at before")
+        return False
     if p.returncode != 0:
-        c.fail(f"restoring to {rate} Hz: aplay exited {p.returncode}: "
+        c.fail(f"{label}: aplay exited {p.returncode}: "
                f"{(err or '').strip()[:200]}")
+        return False
+    return True
+
+
+def restore_resting_rate(c, device, rate):
+    """Bring the device back to a low, cheap rate before the case exits.
+
+    URBs run free for the device's lifetime regardless of PCM open/close, so
+    whatever rate the last streaming point used is exactly what the device
+    keeps blasting at afterwards -- forever, until something else changes it.
+    On a weak host that is not a cosmetic loose end: the 2026-08-26 pi1test
+    run of this case left the board parked at 96 kHz once its own measurement
+    was done, at ~96% sys+irq+soft, and that persisted until the operator
+    power-cycled the device by hand (documented in
+    re/pi1test_platform_notes.md's 2026-08-25 entry as the same fix, done
+    manually, for the same symptom). This is the automated version of that
+    fix, run unconditionally so a JT-PERF-001 run does not leave the rig
+    worse off than it found it.
+    """
+    c.progress(f"restoring the device to {rate} Hz before finishing")
+    set_device_rate(c, device, rate, label=f"restoring to {rate} Hz")
 
 
 def save_raw_trace(c, name, durations):
@@ -277,19 +303,39 @@ def main():
                     c.fail("card did not come back live after rebind")
                     c.done()
 
-    # ------------------------------------------------------------- idle
-    c.progress("idle: driver bound, URBs running, nothing open")
-    if not alsa.wait_for_card_live(c.card, timeout=10.0):
-        c.fail("card not live for the idle point")
-        c.done()
-    metrics, durations = sample_point(
-        c, "idle", hcd, settle_seconds, sample_seconds)
-    all_metrics["idle"] = metrics
-    save_raw_trace(c, "idle", durations)
-
-    # --------------------------------------------------------- streaming
+    # ------------------------------------------------- idle_R / stream_R
+    #
+    # For each rate, two points back to back: idle_R (URBs running at this
+    # rate, nothing open -- jockey3_silence_out_packet()'s memset path) then
+    # stream_R (a real substream open -- ploytec_encode_batch()'s codec path
+    # plus aplay/arecord's own read()/write() syscall traffic). Both share
+    # the same irq_per_s at a given rate (URBs run free regardless of PCM
+    # open/close), so any cpu_pct_sys_irq_soft difference between the two is
+    # specifically the per-frame codec/syscall cost -- not per-URB overhead,
+    # which idle_R vs. unbound already isolates. Kept adjacent in time
+    # (rather than all idle_R then all stream_R) so the two share as much of
+    # the same thermal/load state as possible. This is what tells lever 4
+    # (transfer coalescing, which only touches the per-URB share) apart from
+    # lever 2/3 (which also touch the per-frame share, but only while idle).
+    # A single unqualified "idle" point measured once, at whatever rate the
+    # device happened to be left at, could not make this comparison at every
+    # rate -- this replaced that design 2026-08-26.
     try:
         for rate in rates:
+            if set_device_rate(c, device, rate, label=f"setting {rate} Hz"):
+                name = f"idle_{rate}"
+                c.progress(f"{name}: driver bound, URBs running at "
+                           f"{rate} Hz, nothing open")
+                if not alsa.wait_for_card_live(c.card, timeout=10.0):
+                    c.fail(f"card not live for {name}")
+                    c.done()
+                metrics, durations = sample_point(
+                    c, name, hcd, settle_seconds, sample_seconds)
+                all_metrics[name] = metrics
+                save_raw_trace(c, name, durations)
+            else:
+                c.note(f"idle_{rate} skipped: could not set {rate} Hz")
+
             name = f"stream_{rate}"
             c.progress(f"{name}: playback + capture open at {rate} Hz")
             duration_s = settle_seconds + sample_seconds
@@ -315,8 +361,8 @@ def main():
             save_raw_trace(c, name, durations)
     finally:
         # Unconditional, even on an exception mid-sweep: whatever rate the
-        # last completed streaming point used is what the device keeps
-        # running at indefinitely once this process exits -- see
+        # last completed point used is what the device keeps running at
+        # indefinitely once this process exits -- see
         # restore_resting_rate()'s docstring.
         if not bool(c.params.get("skip_restore_rate", False)):
             restore_resting_rate(
@@ -327,7 +373,10 @@ def main():
         for key, value in metrics.items():
             c.metric(f"{key}_{point}", value)
 
-    for point in ("idle",) + tuple(f"stream_{r}" for r in rates):
+    report_points = ["unbound"]
+    for rate in rates:
+        report_points += [f"idle_{rate}", f"stream_{rate}"]
+    for point in report_points:
         m = all_metrics.get(point, {})
         irq = m.get("irq_per_s", "?")
         cpu = m.get("cpu_pct_sys_irq_soft", "?")

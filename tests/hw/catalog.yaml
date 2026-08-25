@@ -2048,17 +2048,13 @@ cases:
       skip_restore_rate: false
     metrics:
       - irq_per_s_unbound
-      - irq_per_s_idle
       - cpu_pct_sys_irq_soft_unbound
-      - cpu_pct_sys_irq_soft_idle
-      - ns_per_playback_cb_idle
-      - ns_per_capture_cb_idle
     pass: >
-      Metric-only, like JT-CODEC-005. Every point in params.rates additionally
-      emits its own irq_per_s_stream_<rate>, cpu_pct_sys_irq_soft_stream_<rate>,
-      ns_per_playback_cb_stream_<rate> and ns_per_capture_cb_stream_<rate> --
-      not listed above individually since the rate list is a parameter, not
-      fixed by the catalog.
+      Metric-only, like JT-CODEC-005. For every rate R in params.rates,
+      additionally emits irq_per_s_idle_R, cpu_pct_sys_irq_soft_idle_R,
+      ns_per_playback_cb_idle_R, ns_per_capture_cb_idle_R and the same four
+      as _stream_R -- not listed above individually since the rate list is a
+      parameter, not fixed by the catalog.
     notes: >
       This is E1 of re/streaming_overhead_experiments.md: the baseline every
       later experiment in that plan (transfer coalescing, idle rate downshift)
@@ -2066,15 +2062,28 @@ cases:
       JT-CODEC-005, so it is not part of any profile -- invoke directly with
       --case JT-PERF-001.
 
-      Three points per run: 'unbound' (driver detached from the device, a
-      portable proxy for "device unplugged" that needs no hub-power hardware
-      -- see the case's own docstring for why this was chosen over
-      usb-power), 'idle' (bound, URBs running, nothing open), and one
-      'stream_<rate>' per entry in params.rates (playback + capture both
-      open). ns_per_*_cb needs the trace-callbacks verb added to
+      1 + 2*len(rates) points per run: 'unbound' (driver detached from the
+      device, a portable proxy for "device unplugged" that needs no hub-power
+      hardware -- see the case's own docstring for why this was chosen over
+      usb-power), then for every rate R an 'idle_R' (bound, URBs running at
+      R, nothing open) immediately followed by 'stream_R' (playback + capture
+      both open at R). idle_R and stream_R are measured back to back and
+      share the same completion rate, so the cpu_pct_sys_irq_soft difference
+      between them at a given R isolates the per-frame codec/syscall cost
+      from the per-URB overhead that unbound vs. idle_R isolates instead --
+      added 2026-08-26, replacing a single unqualified 'idle' point that
+      could only make this comparison at whatever rate was last set. See
+      re/streaming_overhead.md Part 2 for why this decomposition matters for
+      transfer coalescing specifically.
+
+      ns_per_*_cb needs the trace-callbacks verb added to
       tests/hw/priv/jockey3-testctl -- run priv/install.sh again on any
       target where the metric is missing/blocked; the case still records
       irq_per_s and cpu_pct_sys_irq_soft even where tracing is unavailable.
+      On pi1test specifically, every trace-callbacks call timed out once
+      streaming started (2026-08-25/26 runs) -- likely this board's
+      documented sudo/PAM latency compounding with load, not the matching
+      bug; ns_per_*_cb may simply be impractical there under load.
 
       xhci interrupt moderation means irq_per_s is not directly comparable
       between hosts, only within one -- see re/streaming_overhead.md Part 5.
