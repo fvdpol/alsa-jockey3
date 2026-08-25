@@ -452,13 +452,44 @@ is exactly the cost coalescing removes and codec work is not.
 
 **Not yet done, before calling E2c complete:** this is one board, one run
 each side, `stream` only lightly cross-checked (3 N=1 runs, 1 N=2 run) and
-`idle` only single-run each side. Still missing: `arm64-prod` and
-`armhf-prod`, the xrun sweep at small periods, MIDI OUT jitter
-measurement, and the full `functional`/`regression` profile (particularly
-`JT-RATE-001`, given the E2b section above). But directionally, at the two
-rates where it was ever going to matter, the payoff is real and roughly an
-order of magnitude larger than the naive completion-rate model alone
-would have predicted.
+`idle` only single-run each side. But directionally, at the two rates where
+it was ever going to matter, the payoff is real and roughly an order of
+magnitude larger than the naive completion-rate model alone would have
+predicted.
+
+### E2c preliminary result: `arm64-prod`, N=1 vs N=2 -- rate halves, but the x86_64 non-linearity does not appear
+
+Same comparison, `arm64-prod` N=2 run
+(`tests/hw/results/arm64-prod/20260825T211430Z-functional`) against the N=1
+baseline (`.../20260825T170721Z-functional`, with `154735Z`/`161340Z` as
+`stream`-only consistency checks -- same `idle_R` availability gap as the
+`x86_64-prod` runs above).
+
+`irq_per_s` halves just as cleanly as on `x86_64-prod` (0.499-0.501 at every
+rate) -- the completion-rate model is platform-independent, as expected.
+
+`cpu_pct_sys_irq_soft`, by contrast, does **not** show `x86_64-prod`'s
+dramatic non-linearity:
+
+| Rate | cpu% N=1 idle | cpu% N=2 idle | cpu% N=1 stream | cpu% N=2 stream |
+|---|---|---|---|---|
+| 44100 | 0.65 | 0.32 | 0.72 (avg 0.49-0.84) | 0.67 |
+| 48000 | 0.50 | 0.25 | 0.84 (avg 0.79-0.96) | 0.79 |
+| 88200 | 0.65 | 0.45 | 1.73 (avg 0.87-1.73) | 1.31 |
+| 96000 | 0.97 | 0.30 | 1.73 (avg 1.21-2.0) | 1.01 |
+
+The saving on `arm64-prod` is real but modest -- roughly 1.4-3.2x at idle,
+close to what the completion-rate halving alone predicts, and `stream`
+barely moves at 44.1/48 kHz. **The 15-19x idle-CPU collapse seen on
+`x86_64-prod` at 88.2/96 kHz is specific to that board, not a general
+property of coalescing.** This fits Part 1's standing observation that
+`x86_64-prod`'s per-frame CPU cost was oddly elevated relative to `arm64-prod`
+in the first place (`arm64-prod` peaked at 1.21% at 96 kHz against
+`x86_64-prod`'s 3.67% in the N=1 baseline) -- whatever fixed per-completion
+cost `x86_64-prod` was paying, `arm64-prod` was not paying nearly as much of
+it to begin with, so coalescing has correspondingly less to remove there.
+The payoff from lever 4 should be expected to vary by host, not assumed
+uniform.
 
 ### What it costs
 

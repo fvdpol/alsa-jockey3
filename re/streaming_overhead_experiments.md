@@ -223,13 +223,18 @@ at a time.
 Against E1's baseline, at N = 1, 2, 4, 8 (N=1 must reproduce the baseline; if
 it does not, the harness is wrong, not the driver).
 
-**Preliminary result (x86_64-prod, N=1 vs N=2 at all four rates): `main`,
-see `re/streaming_overhead.md` "E2c preliminary result".** `irq_per_s` halves
-almost exactly at every rate, as predicted. `cpu_pct_sys_irq_soft` saving is
-noise-level at 44.1/48 kHz but real and large at 88.2/96 kHz -- idle CPU
-drops roughly 15-19x, well beyond what completion-rate halving alone
-predicts. One board, one run each side so far -- everything below this line
-is still open.
+**Preliminary results, N=1 vs N=2 at all four rates: `main`, see
+`re/streaming_overhead.md`'s "E2c preliminary result" sections.**
+`irq_per_s` halves almost exactly at every rate on both boards measured so
+far, as predicted -- the completion-rate model is platform-independent.
+`cpu_pct_sys_irq_soft` is where the platforms diverge: `x86_64-prod` shows a
+15-19x idle-CPU drop at 88.2/96 kHz, `arm64-prod` only 1.4-3.2x at the same
+rates (closer to the naive 2x model) -- the payoff is real on both but not
+uniform, and should not be assumed to transfer from one host to another.
+`armhf-prod`'s N=2 build failed to even probe (-71 on early control
+transfers, unrelated code path, cause not yet determined -- separate from
+this measurement). Still open: xrun sweep, MIDI OUT jitter, full
+regression.
 
 Beyond the E1 metrics, three things specific to this change:
 
