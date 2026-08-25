@@ -491,6 +491,55 @@ it to begin with, so coalescing has correspondingly less to remove there.
 The payoff from lever 4 should be expected to vary by host, not assumed
 uniform.
 
+### E2c preliminary result: `armhf-prod` (pi1test) -- the saturation feedback loop appears to be gone
+
+Same comparison, on the board Part 1 flagged as the one where the flat
+completion-rate model breaks down: N=2 run
+(`tests/hw/results/armhf-prod/20260825T212251Z-smoke`) against the N=1
+reference run already cited in Part 1's model-validation table
+(`.../20260825T161240Z-smoke`; `155503Z` and `170435Z` are noisier N=1 runs,
+the latter contaminated by the same post-96kHz restore-timeout condition
+Part 1 already documents, and excluded here for that reason).
+
+| point | `irq_per_s` N=1 | `irq_per_s` N=2 | cpu% N=1 | cpu% N=2 |
+|---|---|---|---|---|
+| unbound | 8,014.0 | 8,005.2 | 1.19 | 0.0 |
+| idle/stream 44100 | 16,591.1 / 16,529.5 | 12,565.5 / 12,560.6 | 12.09 / 26.46 | 4.56 / 10.33 |
+| stream 48000 | 17,176.4 | 12,875.3 (idle 12,927.7) | 62.69 | 27.81 (idle 11.22) |
+| stream 88200 | **54,994.5** | **16,274.4** (idle 16,290.0) | 97.03 | 87.46 (idle 97.62) |
+| stream 96000 | **92,565.2** | **17,044.4** (idle 17,212.1) | 95.16 | 97.12 (idle 96.53) |
+
+(N=1's `idle` was a single pre-redesign measurement rather than per-rate,
+hence the 44100-only comparison there; N=2 uses the current `idle_R`/
+`stream_R` protocol throughout.)
+
+**44.1/48 kHz show a real, non-trivial saving** -- roughly 2.3-2.6x on
+`cpu_pct_sys_irq_soft`, larger than the ~24% `irq_per_s` drop alone would
+suggest (pi1's fixed 8,000/s SOF-latch term dilutes the raw completion-rate
+ratio, but the driver's own share of the CPU budget shrinks by more).
+
+**88.2/96 kHz is the headline result.** At N=1 these were **2.0x and 3.1x**
+the flat model's prediction (Part 1's "recovery-feedback loop" hypothesis:
+a CPU too slow to service completions on schedule trips the watchdog,
+which restarts or resets the URB ring, which is itself more interrupt
+traffic, compounding the load that triggered it). At N=2, `irq_per_s` at
+both rates comes back to within ~9% of the flat model
+(`(packets/s / 2) + 8,000`) -- matching the well-behaved 44.1/48 kHz fit
+instead of the runaway 2-3x multiplier. **The completion-rate reduction
+appears to have broken the feedback loop, not just halved its input.** This
+also matches the operational observation: this run finished in 314.1s,
+against the 615.7s (with a runner hang after PASS) the N=1 baseline needed
+on this same board.
+
+**What N=2 does not fix:** the board is still fully CPU-saturated at
+88.2/96 kHz (87-97%), it just no longer appears to be compounding that
+saturation into extra recovery traffic. This is consistent with, not a
+replacement for, the study's standing position that `armhf-prod`'s bar is
+"does not crash, hang, or oops," not "stays fast" -- coalescing looks like
+a genuine reliability improvement here, not just a performance one, but
+that has not been confirmed against dmesg from this run (not yet pulled)
+and is one clean run, not a validated pattern.
+
 ### What it costs
 
 Completion rate with 80 frames per URB in both directions:
