@@ -212,20 +212,59 @@ can and cannot reach:
 - Levers 2 and 3 reduce the byte rate as well, but only while idle.
 
 **Measured, not just reasoned about: the per-frame component is not small.**
-`JT-PERF-001` on `armhf-prod` (`re/streaming_overhead_experiments.md` E1)
-caught `idle` and `stream_44100` at the *same* completion rate (URBs run free
-regardless of PCM open/close, so opening a stream at whatever rate is already
-running changes nothing about `irq_per_s`) -- 16,591 vs 16,530/s, statistically
-identical. `cpu_pct_sys_irq_soft` was not: 12.09% idle, 26.46% streaming.
-That entire 14.4-point gap is the per-frame component (codec conversion plus
-`read()`/`write()` overhead) at a rate lever 4 does not touch, and it is
-*larger* than the per-URB component this one data point can isolate (idle's
-12.09%). This does not overturn the recommendation -- lever 4 is still real
-money on the per-URB share of the cost, on every platform tested -- but it
-means coalescing's payoff should not be assumed proportional to its ~89%
-completion-rate reduction; on this data point roughly half the streaming CPU
-cost survives it untouched. Worth measuring directly (E2c) rather than
-projected from the idle numbers alone.
+The first pi1test run caught `idle` and `stream_44100` at the *same*
+completion rate (URBs run free regardless of PCM open/close, so opening a
+stream at whatever rate is already running changes nothing about
+`irq_per_s`) -- 16,591 vs 16,530/s, statistically identical.
+`cpu_pct_sys_irq_soft` was not: 12.09% idle, 26.46% streaming. That entire
+14.4-point gap is the per-frame component at a rate lever 4 does not touch.
+This does not overturn the recommendation, but it means coalescing's payoff
+should not be assumed proportional to its ~89% completion-rate reduction.
+
+**Follow-up, 2026-08-25/26: `JT-PERF-001` redesigned to measure `idle_R` and
+`stream_R` at every rate, not once.** A single unqualified `idle` point,
+measured at whatever rate happened to be left over, could only make the
+idle-vs-streaming comparison incidentally. The case now sets each rate
+explicitly, samples idle there, then immediately opens a stream at the same
+rate -- giving the per-frame component at every rate, on every platform, in
+one run. Full results in `re/streaming_overhead_experiments.md`; the
+headline findings:
+
+- **On `x86_64-prod`, the per-frame `cpu_pct_sys_irq_soft` gap is real at
+  every rate but small and shrinking** -- roughly +1.0 point at 44.1 kHz,
+  down to +0.08 at 96 kHz, against idle baselines themselves only 0.1-2.3%.
+  At these magnitudes a single un-repeated 10 s sample is close to the noise
+  floor; treat the shrinking trend as suggestive, not established, until
+  E1 gets a repeated-sampling option.
+- **`ns_per_playback_cb`/`ns_per_capture_cb` are not comparable across
+  platforms.** `x86_64-prod` measured 1,400-1,650 ns/call; `arm64-prod`
+  measured 6,000-9,700 ns/call at the exact same rates -- a 4-7x gap that
+  contradicts `arm64-prod`'s *lower* `cpu_pct_sys_irq_soft` at the same
+  completion rate (the open question from the first sweep, still open). The
+  likely explanation is that `ns_per_*_cb` is measured through
+  `function_graph` tracing (E1's `trace-callbacks` verb), and ftrace's own
+  per-call instrumentation overhead is itself architecture-dependent and can
+  differ substantially between x86_64 and arm64. Until measured independently
+  of tracing, `ns_per_*_cb` should be read as *within one platform, one run*
+  only -- `cpu_pct_sys_irq_soft`, taken with tracing off, remains the
+  portable number.
+- **`armhf-prod`'s same-day re-run is not usable as clean data.** CPU was
+  already at 96-99% by the *first* `idle_44100` point, before any streaming
+  had happened, and `stream_44100`'s CPU (42.84%) then read *lower* than the
+  `idle_44100` that preceded it -- the wrong direction for a real
+  idle-vs-streaming comparison, and a strong sign the board was still working
+  through leftover load from something else (see the recovery-storm
+  hypothesis above) rather than measuring a clean resting state.
+  `idle_96000` failed outright (`could not set 96000 Hz`). Given this, and
+  the confounds already known for `armhf-prod` at high rates, no
+  per-frame/per-URB split should be drawn from this run's pi1test numbers.
+- **The post-PASS runner hang reproduced.** On this same `armhf-prod` run,
+  once results were being written the runner hung again, and the operator
+  again unpowered the device rather than wait it out -- the second such
+  occurrence in two days, in the same place (after the sweep, before the
+  runner finishes its own post-case work). Two for two is enough to call this
+  a reproducible symptom of this board under this case's load pattern, not a
+  one-off; still not confirmed against dmesg.
 
 ---
 
