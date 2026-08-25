@@ -562,6 +562,34 @@ outright, but every occurrence observed so far stayed inside the *light*
 recovery path, never reaching the *hard* one -- four runs is still a small
 sample, not a validated pattern, but the picture is consistent, not mixed.
 
+### E2c preliminary result: minimum period doubles at N=2, MIDI OUT throughput unaffected
+
+Both on `x86_64-prod`, confirming the two predictions the touch-point list
+made in advance.
+
+**`JT-PCM-007` (achievable latency sweep) confirms the minimum period grows
+with N, exactly as predicted.** 120 B (playback) and 144 B (capture) --
+the pre-coalescing minimum, still what the test's own legal range assumes
+-- are now refused by `hw_params()` (`period_bytes_min` is now
+`N x subpacket_bytes`, per the E2b implementation). The smallest period
+that succeeds is exactly double: 240 B / 0.454 ms playback, 288 B / 0.363
+ms capture -- matching 20/16 frames at 44.1 kHz, against 10/8 frames
+(0.227/0.181 ms) at N=1. The test reports this as a FAIL because its
+expectations predate coalescing, not because anything behaved incorrectly;
+it needs updating for N=2 rather than the driver needing a fix. This is
+the real, quantified cost side of the ledger: **the minimum achievable
+latency roughly doubles**, which any latency-sensitive application
+negotiating a small period will feel directly.
+
+**`JT-MIDI-004` (MIDI OUT throughput per rate) confirms the leaky-bucket
+fix holds.** 2496-2497 B/s achieved against a 2500 B/s target at all four
+rates -- within the same +/-5% band N=1 always measured, no throughput
+loss from N=2. This is the direct validation of pulling
+`jockey3_get_next_midi_out_byte()` once per sub-packet rather than once
+per URB (E2b's implementation section): had that been wrong, this is
+exactly where it would have shown up, as throughput divided by roughly
+`JOCKEY3_PLAYBACK_N`.
+
 ### What it costs
 
 Completion rate with 80 frames per URB in both directions:

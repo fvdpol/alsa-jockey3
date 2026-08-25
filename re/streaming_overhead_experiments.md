@@ -231,15 +231,21 @@ far, as predicted -- the completion-rate model is platform-independent.
 15-19x idle-CPU drop at 88.2/96 kHz, `arm64-prod` only 1.4-3.2x at the same
 rates (closer to the naive 2x model) -- the payoff is real on both but not
 uniform, and should not be assumed to transfer from one host to another.
-`armhf-prod`'s N=2 build failed to even probe (-71 on early control
-transfers, unrelated code path, cause not yet determined -- separate from
-this measurement). Still open: xrun sweep, MIDI OUT jitter, full
-regression.
+`armhf-prod` also shows a real reliability improvement: N=1's 88.2/96 kHz
+completion rate was 2-3x the flat model (a recovery-feedback loop), N=2's
+lands within ~9%, and across 4 runs there were zero full USB resets against
+N=1's reliable stall-then-reset pattern. **Confirmed with the achievable-
+latency sweep and MIDI OUT throughput check, both on `x86_64-prod`:**
+minimum period doubles at N=2 (120/144 B -> 240/288 B) exactly as predicted;
+MIDI OUT throughput holds at 2496-2497 B/s against a 2500 B/s target at all
+four rates, confirming the per-sub-packet MIDI byte pull did its job. Still
+open: full regression profile.
 
 Beyond the E1 metrics, three things specific to this change:
 
 - **xruns at small periods.** The minimum usable period grows with N. Sweep it
-  (`JT-PCM-*`, `pcm_latency_sweep.py`) rather than assuming.
+  (`JT-PCM-*`, `pcm_latency_sweep.py`) rather than assuming. **Confirmed:**
+  see the study's "minimum period doubles" result above.
 - **MIDI OUT jitter.** Throughput is unchanged -- every sub-packet still
   carries its own byte -- but a byte handed over just after an URB was filled
   waits up to one URB span. Expected to be inside the noise against the
