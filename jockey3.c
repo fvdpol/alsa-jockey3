@@ -134,35 +134,24 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_N_URBS 8
 
 /*
- * E2a probe (re/streaming_overhead_experiments.md): does the firmware accept
- * a multi-packet bulk transfer at all, before any real coalescing work is
- * built? Undefined by default -- normal builds are byte-for-byte unchanged.
- * A bench-only knob per docs/ (dev-time hooks are fine if they never ship);
- * MUST NOT be defined, and this whole block MUST be gone, before this code
- * goes anywhere near submission.
+ * Sub-packets per URB, per direction (E2 -- transfer coalescing,
+ * re/streaming_overhead.md Part 2). E2a probed the firmware with a
+ * throwaway build-time toggle and found it accepts 2 x 512 B bulk transfers
+ * cleanly in both directions; this is that finding turned into the real
+ * per-sub-packet implementation. Kept as two separate constants, not one,
+ * because E2a's hardware run showed the two directions can have independent
+ * answers to "does this firmware accept N x 512 B".
  *
- * With it defined, playback and capture URBs carry 2 Ploytec sub-packets
- * instead of 1. Deliberately not "real" coalescing: the second sub-packet's
- * sample area is left silent (never written after the initial kzalloc) and
- * jockey3_process_out_packet()/jockey3_process_in_packet() still only see
- * the first -- audio content is not the question here. What IS tested: does
- * usb_submit_urb() succeed and complete cleanly at 2x size, does the driver
- * keep streaming afterward with no URB errors, and (the capture-specific
- * question) what does urb->actual_length come back as -- 512 (device always
- * terminates a logical transfer at one sub-packet, coalescing is dead) or
- * 1024 (device fills the whole request, coalescing is live). See the sync/
- * MIDI-idle framing added to jockey3_init_out_packet() and
- * jockey3_playback_callback() below, needed so BOTH sub-packets look like
- * valid idle Ploytec frames to the firmware, not just the first.
+ * N=1 in both directions must be byte-for-byte identical to the
+ * pre-coalescing driver -- this is E2c's regression gate, and every loop
+ * keyed off these constants below is written to degenerate to the original
+ * single sub-packet code path at N=1.
  */
-//#undef JOCKEY3_E2A_COALESCE_PROBE
-#undef JOCKEY3_E2A_COALESCE_PROBE
-#ifdef JOCKEY3_E2A_COALESCE_PROBE
-#define JOCKEY3_E2A_N 2
-#define JOCKEY3_E2A_XFER_SIZE (JOCKEY3_E2A_N * PLOYTEC_PKT_SIZE)
-#else
-#define JOCKEY3_E2A_XFER_SIZE PLOYTEC_PKT_SIZE
-#endif
+#define JOCKEY3_PLAYBACK_N	2
+#define JOCKEY3_CAPTURE_N	2
+
+#define JOCKEY3_PLAYBACK_XFER_SIZE	(JOCKEY3_PLAYBACK_N * PLOYTEC_PKT_SIZE)
+#define JOCKEY3_CAPTURE_XFER_SIZE	(JOCKEY3_CAPTURE_N * PLOYTEC_PKT_SIZE)
 
 /* Consecutive URB transport errors tolerated before a direction is given up on */
 #define JOCKEY3_MAX_URB_ERRORS 8
@@ -170,13 +159,15 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 /*
  * URB liveness watchdog.
  *
- * One URB carries one Ploytec packet, so a healthy stream completes one URB per
- * packet interval: PLOYTEC_PLAYBACK_FRAMES (10) or PLOYTEC_CAPTURE_FRAMES (8)
- * PCM frames' worth of time. That is 226.8 us per playback packet at 44100 Hz,
- * the slowest supported rate, down to 83.3 us per capture packet at 96000 Hz.
- * JOCKEY3_WATCHDOG_STALL_MS of silence is therefore at least 800 consecutive
- * missed packets, and no scheduling delay or bus contention produces that on a
- * device that is still streaming.
+ * One URB carries JOCKEY3_PLAYBACK_N (playback) or JOCKEY3_CAPTURE_N
+ * (capture) Ploytec sub-packets, so a healthy stream completes one URB every
+ * N packet intervals: PLOYTEC_PLAYBACK_FRAMES (10) or PLOYTEC_CAPTURE_FRAMES
+ * (8) PCM frames' worth of time, per sub-packet. A single sub-packet interval
+ * is 226.8 us at 44100 Hz, the slowest supported rate, down to 83.3 us at
+ * 96000 Hz; multiply by the relevant N for the actual URB span.
+ * JOCKEY3_WATCHDOG_STALL_MS of silence is therefore many consecutive missed
+ * URBs at any supported rate and N, and no scheduling delay or bus
+ * contention produces that on a device that is still streaming.
  *
  * The threshold is sized against ALSA core's own stall timeout
  * (wait_for_avail() in sound/core/pcm_lib.c, roughly buffer_size * 1100 / rate
@@ -230,9 +221,10 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  *
  * .prepare runs on every xrun recovery, so a false positive there would disrupt
  * a stream that is working. A healthy direction confirms itself within one
- * packet interval -- under 230 us at any supported rate -- so the normal cost is
- * nil, while 50 ms of complete silence is more than 220 consecutive missed
- * packets and cannot happen on a stream that is still running.
+ * URB span -- N packet intervals, comfortably under 1 ms at the current
+ * JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N and any supported rate -- so the
+ * normal cost is nil, while 50 ms of complete silence is many consecutive
+ * missed URBs and cannot happen on a stream that is still running.
  */
 #define JOCKEY3_PREPARE_CONFIRM_MS	50
 
@@ -245,7 +237,8 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * @substream: the open ALSA substream, or NULL; @lock
  * @anchor: anchor holding the submitted URBs, for stop/kill
  * @urbs: the URB ring
- * @bufs: transfer buffer for each URB, PLOYTEC_PKT_SIZE bytes each
+ * @bufs: transfer buffer for each URB, JOCKEY3_PLAYBACK_XFER_SIZE or
+ *	JOCKEY3_CAPTURE_XFER_SIZE bytes each, as appropriate for the direction
  * @urbs_in_flight: number of submitted URBs; diagnostic, must reach 0 after a stop
  * @last_callback_time: ktime of the last completion, for stall detection. Zeroed
  *	by jockey3_stop_urbs() so a stopped stream is not reported as alive.
@@ -801,11 +794,12 @@ static void jockey3_capture_callback(struct urb *urb)
 	struct jockey3_chip *chip = urb->context;
 	struct jockey3_pcm_urb_stream *urb_stream = &chip->capture;
 	struct snd_pcm_substream *substream = NULL;
+	int n_subpkts = 0;
 	bool period_elapsed = false;
 	bool data_valid = true;
 	bool active = false;
 	bool stopping;
-	int ret;
+	int sp, ret;
 
 	atomic_dec(&urb_stream->urbs_in_flight);
 	atomic64_set(&urb_stream->last_callback_time, ktime_get_mono_fast_ns());
@@ -829,39 +823,39 @@ static void jockey3_capture_callback(struct urb *urb)
 	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
 
-	if (data_valid &&
-	    unlikely(urb->actual_length < PLOYTEC_CAPTURE_FRAMES * PLOYTEC_CAPTURE_FRAME_SIZE)) {
-		dev_err(&chip->intf0->dev, "Capture URB too small: %d; required: %d\n",
-			urb->actual_length, PLOYTEC_CAPTURE_FRAMES * PLOYTEC_CAPTURE_FRAME_SIZE);
-		data_valid = false;
-	}
-
-#ifdef JOCKEY3_E2A_COALESCE_PROBE
 	/*
-	 * The actual question E2a asks on the capture side: with a
-	 * JOCKEY3_E2A_XFER_SIZE (1024 B) transfer requested, does the device
-	 * fill the whole thing, or does it always terminate at one 512 B
-	 * sub-packet regardless of what was asked for?
-	 *
-	 * Logged once per distinct value rather than ratelimited: at several
-	 * thousand calls/sec, even a ratelimited print floods dmesg badly
-	 * enough over a run of any real length to be unusable on its own
-	 * (2026-08-26, alsa-test -- Frank cut a run short over exactly this).
-	 * The steady-state answer only needs saying once; what is worth
-	 * seeing is a CHANGE -- e.g. actual_length dropping to 512 partway
-	 * through a run, which this still catches.
+	 * E2a found the firmware fills a multi-sub-packet capture URB
+	 * completely rather than always terminating at one 512 B sub-packet
+	 * (re/streaming_overhead.md, "E2a result"), so the expected case is
+	 * actual_length == JOCKEY3_CAPTURE_XFER_SIZE. Derive the count from
+	 * what actually came back rather than assuming N, in case that
+	 * changes under load or on other firmware revisions.
 	 */
 	if (data_valid) {
-		static int e2a_last_logged = -1;
+		n_subpkts = urb->actual_length / PLOYTEC_PKT_SIZE;
+		if (unlikely(n_subpkts == 0)) {
+			dev_err(&chip->intf0->dev, "Capture URB too small: %d; required at least %d\n",
+				urb->actual_length, PLOYTEC_PKT_SIZE);
+			data_valid = false;
+		} else if (unlikely(urb->actual_length % PLOYTEC_PKT_SIZE)) {
+			/*
+			 * A short trailing partial sub-packet: use the
+			 * complete ones and drop the rest, but this should
+			 * not happen on firmware behaving as E2a found it to
+			 * -- log it once so a change in device behavior is
+			 * visible instead of silently discarded audio (see
+			 * CLAUDE.md's fault-handling principle).
+			 */
+			static bool warned;
 
-		if (urb->actual_length != e2a_last_logged) {
-			dev_info(&chip->intf0->dev,
-				 "E2a: capture actual_length=%d (requested %d)\n",
-				 urb->actual_length, JOCKEY3_E2A_XFER_SIZE);
-			e2a_last_logged = urb->actual_length;
+			if (!warned) {
+				dev_warn(&chip->intf0->dev,
+					 "Capture URB length %d not a multiple of %d, using %d sub-packet(s)\n",
+					 urb->actual_length, PLOYTEC_PKT_SIZE, n_subpkts);
+				warned = true;
+			}
 		}
 	}
-#endif
 
 	/* Step 1: Safely fetch the pointer and join the safe zone */
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
@@ -872,8 +866,11 @@ static void jockey3_capture_callback(struct urb *urb)
 		    urb_stream->running && urb_stream->substream) {
 			urb_stream->callbacks_active++;
 			active = true;
-			period_elapsed = jockey3_process_in_packet(chip, urb->transfer_buffer);
 			substream = urb_stream->substream;
+
+			for (sp = 0; sp < n_subpkts; sp++)
+				period_elapsed |= jockey3_process_in_packet(chip,
+					urb->transfer_buffer + sp * PLOYTEC_PKT_SIZE);
 		}
 	}
 
@@ -993,19 +990,14 @@ static void jockey3_silence_out_packet(u8 *buf)
  */
 static void jockey3_init_out_packet(u8 *buf)
 {
-#ifdef JOCKEY3_E2A_COALESCE_PROBE
 	int sp;
 
-	for (sp = 0; sp < JOCKEY3_E2A_N; sp++) {
+	for (sp = 0; sp < JOCKEY3_PLAYBACK_N; sp++) {
 		u8 *sub = buf + sp * PLOYTEC_PKT_SIZE;
 
 		sub[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
 		sub[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
 	}
-#else
-	buf[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
-	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
-#endif
 }
 
 static void jockey3_playback_callback(struct urb *urb)
@@ -1018,7 +1010,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	bool data_valid = true;
 	bool active = false;
 	bool stopping;
-	int i, ret;
+	int i, sp, ret;
 
 	atomic_dec(&urb_stream->urbs_in_flight);
 	atomic64_set(&urb_stream->last_callback_time, ktime_get_mono_fast_ns());
@@ -1050,45 +1042,35 @@ static void jockey3_playback_callback(struct urb *urb)
 		    urb_stream->running && urb_stream->substream) {
 			urb_stream->callbacks_active++;
 			active = true;
-			period_elapsed = jockey3_process_out_packet(chip, buf);
 			substream = urb_stream->substream;
+
+			for (sp = 0; sp < JOCKEY3_PLAYBACK_N; sp++)
+				period_elapsed |= jockey3_process_out_packet(chip,
+					buf + sp * PLOYTEC_PKT_SIZE);
 		} else {
-			jockey3_silence_out_packet(buf);
+			for (sp = 0; sp < JOCKEY3_PLAYBACK_N; sp++)
+				jockey3_silence_out_packet(buf + sp * PLOYTEC_PKT_SIZE);
 		}
 	}
 
-	/* The outgoing MIDI data is encapsulated in the playback stream */
-	buf[PLOYTEC_MIDI_OUT_OFFSET] = jockey3_get_next_midi_out_byte(chip);
-
-	/* Ploytec Sync byte and gap padding */
-	buf[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
-	for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
-		buf[i] = 0x00;
-
-#ifdef JOCKEY3_E2A_COALESCE_PROBE
 	/*
-	 * E2a: every sub-packet beyond the first needs the same idle framing
-	 * -- real content is not the point of this probe (see the
-	 * JOCKEY3_E2A_COALESCE_PROBE comment above JOCKEY3_N_URBS), only
-	 * whether the firmware accepts and completes a transfer this size at
-	 * all. PLOYTEC_MIDI_IDLE_BYTE here, not another jockey3_get_next_midi_out_byte()
-	 * call: MIDI OUT throughput is unaffected by sub-packet count (one
-	 * real byte per URB, not per sub-packet), so the extra slot(s) just
-	 * report idle.
+	 * The outgoing MIDI data is encapsulated in the playback stream, one
+	 * real (rate-limited) byte per sub-packet: jockey3_get_next_midi_out_byte()'s
+	 * leaky-bucket limiter is calibrated on @midi_rate_divisor, which
+	 * assumes exactly one call per sub-packet interval. Calling it once
+	 * per URB instead of once per sub-packet would silently divide MIDI
+	 * OUT throughput by JOCKEY3_PLAYBACK_N.
 	 */
-	{
-		int sp;
+	for (sp = 0; sp < JOCKEY3_PLAYBACK_N; sp++) {
+		u8 *sub = buf + sp * PLOYTEC_PKT_SIZE;
 
-		for (sp = 1; sp < JOCKEY3_E2A_N; sp++) {
-			u8 *sub = buf + sp * PLOYTEC_PKT_SIZE;
+		sub[PLOYTEC_MIDI_OUT_OFFSET] = jockey3_get_next_midi_out_byte(chip);
 
-			sub[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
-			sub[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
-			for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
-				sub[i] = 0x00;
-		}
+		/* Ploytec Sync byte and gap padding */
+		sub[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
+		for (i = PLOYTEC_SYNC_BYTE_OFFSET + 1; i < PLOYTEC_PKT_SIZE; i++)
+			sub[i] = 0x00;
 	}
-#endif
 
 	/*
 	 * Step 2: Safe Zone. ALSA core can't free 'substream' because
@@ -1989,8 +1971,14 @@ static const struct snd_pcm_hardware jockey3_pcm_hw_playback = {
 	.channels_min		= 4,
 	.channels_max		= 4,
 	.buffer_bytes_max	= 1024 * 1024,
-	/* One playback URB carries 10 frames * 4 channels * 3 bytes = 120 bytes */
-	.period_bytes_min	= PLOYTEC_PLAYBACK_FRAMES * 4 * 3,
+	/*
+	 * One playback URB carries JOCKEY3_PLAYBACK_N sub-packets of
+	 * 10 frames * 4 channels * 3 bytes = 120 bytes each. period_elapsed
+	 * is OR'd across the sub-packet loop in jockey3_playback_callback(),
+	 * so the minimum must cover a whole URB or two period boundaries in
+	 * one URB would collapse into a single notification.
+	 */
+	.period_bytes_min	= JOCKEY3_PLAYBACK_N * PLOYTEC_PLAYBACK_FRAMES * 4 * 3,
 	.period_bytes_max	= 512 * 1024,
 	.periods_min		= 2,
 	.periods_max		= 1024,
@@ -2005,8 +1993,13 @@ static const struct snd_pcm_hardware jockey3_pcm_hw_capture = {
 	.channels_min		= 6,
 	.channels_max		= 6,
 	.buffer_bytes_max	= 1024 * 1024,
-	/* One capture URB carries 8 frames * 6 channels * 3 bytes = 144 bytes */
-	.period_bytes_min	= PLOYTEC_CAPTURE_FRAMES * 6 * 3,
+	/*
+	 * One capture URB carries up to JOCKEY3_CAPTURE_N sub-packets of
+	 * 8 frames * 6 channels * 3 bytes = 144 bytes each; see the playback
+	 * .period_bytes_min comment above for why the minimum must cover a
+	 * whole URB.
+	 */
+	.period_bytes_min	= JOCKEY3_CAPTURE_N * PLOYTEC_CAPTURE_FRAMES * 6 * 3,
 	.period_bytes_max	= 512 * 1024,
 	.periods_min		= 2,
 	.periods_max		= 1024,
@@ -2659,7 +2652,7 @@ static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
 	int i, ret;
 
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
-		chip->playback.bufs[i] = kzalloc(JOCKEY3_E2A_XFER_SIZE, GFP_KERNEL);
+		chip->playback.bufs[i] = kzalloc(JOCKEY3_PLAYBACK_XFER_SIZE, GFP_KERNEL);
 		if (!chip->playback.bufs[i])
 			return -ENOMEM;
 		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
@@ -2679,7 +2672,7 @@ static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
 
 		usb_fill_bulk_urb(chip->playback.urbs[i], dev,
 				  usb_sndbulkpipe(dev, PLOYTEC_EP_NUM_PCM_OUT),
-				  chip->playback.bufs[i], JOCKEY3_E2A_XFER_SIZE,
+				  chip->playback.bufs[i], JOCKEY3_PLAYBACK_XFER_SIZE,
 				  jockey3_playback_callback, chip);
 	}
 
@@ -2693,7 +2686,7 @@ static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
 	int i, ret;
 
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
-		chip->capture.bufs[i] = kzalloc(JOCKEY3_E2A_XFER_SIZE, GFP_KERNEL);
+		chip->capture.bufs[i] = kzalloc(JOCKEY3_CAPTURE_XFER_SIZE, GFP_KERNEL);
 		if (!chip->capture.bufs[i])
 			return -ENOMEM;
 		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
@@ -2711,7 +2704,7 @@ static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
 
 		usb_fill_bulk_urb(chip->capture.urbs[i], dev,
 				  usb_rcvbulkpipe(dev, PLOYTEC_EP_NUM_PCM_IN),
-				  chip->capture.bufs[i], JOCKEY3_E2A_XFER_SIZE,
+				  chip->capture.bufs[i], JOCKEY3_CAPTURE_XFER_SIZE,
 				  jockey3_capture_callback, chip);
 	}
 
@@ -2909,11 +2902,6 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->intf0 = intf;
 	chip->intf1 = intf1;
 	chip->flags = 0;
-
-#ifdef JOCKEY3_E2A_COALESCE_PROBE
-	dev_info(&chip->intf0->dev, "JOCKEY3_E2A_COALESCE_PROBE EXPERIMENTAL BUILD: N=%d, XFER_SIZE=%d\n",
-		 JOCKEY3_E2A_N, JOCKEY3_E2A_XFER_SIZE);
-#endif
 
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback.lock);
