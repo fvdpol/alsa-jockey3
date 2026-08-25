@@ -153,6 +153,20 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_PLAYBACK_XFER_SIZE	(JOCKEY3_PLAYBACK_N * PLOYTEC_PKT_SIZE)
 #define JOCKEY3_CAPTURE_XFER_SIZE	(JOCKEY3_CAPTURE_N * PLOYTEC_PKT_SIZE)
 
+/*
+ * jockey3_check_urb_stream_alive()'s liveness window, per direction, scaled
+ * by that direction's own N: the worst-case URB span scales linearly with N
+ * (N packet intervals instead of one), so scaling the window the same way
+ * keeps the same margin against it at any N instead of eating into a fixed
+ * margin as N grows (a fixed 1 ms window left ~77% margin at N=1 but only
+ * ~9% at N=4). JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N happen to be powers of
+ * two today, which would make this a shift rather than a multiply if N ever
+ * became a runtime value (re/streaming_overhead_experiments.md's "N derived
+ * from period size" future direction) -- not something this macro or its
+ * compile-time constants currently need or enforce.
+ */
+#define JOCKEY3_LIVENESS_WINDOW_NS(n)	((u64)NSEC_PER_MSEC * (n))
+
 /* Consecutive URB transport errors tolerated before a direction is given up on */
 #define JOCKEY3_MAX_URB_ERRORS 8
 
@@ -1600,28 +1614,27 @@ static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int directio
 static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direction,
 				      const char *context, bool report_xrun);
 
-static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *urb_stream)
+static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *urb_stream,
+					   const int direction)
 {
 	u64 last_time = atomic64_read(&urb_stream->last_callback_time);
+	u64 window_ns = direction == SNDRV_PCM_STREAM_PLAYBACK ?
+			JOCKEY3_LIVENESS_WINDOW_NS(JOCKEY3_PLAYBACK_N) :
+			JOCKEY3_LIVENESS_WINDOW_NS(JOCKEY3_CAPTURE_N);
 
 	if (!last_time)
 		return false;
 
 	/*
-	 * Alive if we had activity within the last 1 ms = 1,000,000 ns. This
-	 * window must exceed one URB span (JOCKEY3_PLAYBACK_N or
-	 * JOCKEY3_CAPTURE_N packet intervals) or a perfectly healthy stream
-	 * could sample as dead between completions. At the current N=4 the
-	 * worst case is 907.2 us (playback, 44100 Hz) -- only ~9% margin
-	 * left against this 1 ms window, down from ~55% at N=2. Real
-	 * scheduling jitter (workqueue/softirq latency under host load) could
-	 * plausibly eat that margin and produce a false "not alive" reading
-	 * right where jockey3_pcm_hw_params()'s post-rate-change check and
-	 * jockey3_pcm_prepare()'s liveness check use it. Needs hardware
-	 * confirmation at N=4 specifically, and the window (or this
-	 * function's granularity) likely needs raising before N=8.
+	 * Alive if we had activity within the last window_ns. The window
+	 * must exceed one URB span (JOCKEY3_PLAYBACK_N or JOCKEY3_CAPTURE_N
+	 * packet intervals) or a perfectly healthy stream could sample as
+	 * dead between completions -- and scaling it with N (see
+	 * JOCKEY3_LIVENESS_WINDOW_NS()) keeps the same margin against that
+	 * span at any N, rather than a fixed window eating into a shrinking
+	 * margin as N grows.
 	 */
-	return (ktime_get_mono_fast_ns() - last_time <= NSEC_PER_MSEC);
+	return (ktime_get_mono_fast_ns() - last_time <= window_ns);
 }
 
 /**
@@ -1803,7 +1816,8 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
 		if (jockey3_is_disconnected(chip))
 			return false;
 
-		if (jockey3_check_urb_stream_alive(jockey3_get_pcm_urb_stream(chip, direction)))
+		if (jockey3_check_urb_stream_alive(jockey3_get_pcm_urb_stream(chip, direction),
+						  direction))
 			return true;
 
 		usleep_range(500, 2000);
@@ -1883,7 +1897,7 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	if (jockey3_check_urb_stream_alive(urb_stream))
+	if (jockey3_check_urb_stream_alive(urb_stream, direction))
 		return 0;
 
 	if (atomic_cmpxchg(&chip->recovery_in_progress, 0, 1) != 0) {
@@ -2153,14 +2167,15 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 		 * jockey3_pcm_hw_params()). Catch it here, before the stream that
 		 * is being prepared starts relying on it.
 		 *
-		 * This single sample is only a hint. jockey3_check_urb_stream_alive()
-		 * looks back 1 ms, which spans about four playback packets at
-		 * 44100 Hz, so one preemption is enough to make a healthy stream
-		 * read as dead -- and .prepare runs on every xrun recovery, where
-		 * acting on a false positive would disrupt a working stream. What
-		 * it flags is confirmed below before anything is done about it.
+		 * This single sample is only a hint. jockey3_check_urb_stream_alive()'s
+		 * window is scaled to always span a handful of packet intervals
+		 * regardless of N (JOCKEY3_LIVENESS_WINDOW_NS()), but a handful is
+		 * still not many -- one preemption is enough to make a healthy
+		 * stream read as dead -- and .prepare runs on every xrun recovery,
+		 * where acting on a false positive would disrupt a working stream.
+		 * What it flags is confirmed below before anything is done about it.
 		 */
-		stalled = !jockey3_check_urb_stream_alive(urb_stream);
+		stalled = !jockey3_check_urb_stream_alive(urb_stream, substream->stream);
 	}
 
 	/*
