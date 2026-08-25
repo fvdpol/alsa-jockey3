@@ -238,16 +238,22 @@ def main():
         c.progress(f"{name}: playback + capture open at {rate} Hz")
         duration_s = settle_seconds + sample_seconds
         procs = start_stream_pair(device, device, rate, duration_s)
+        # A device that refuses this rate fails fast, well inside the
+        # settling time below -- catch that here rather than measuring a
+        # stream that never actually opened. Once past this point every
+        # process is deliberately cut short by stop_stream_pair() when the
+        # sample window ends, so no exit-code check is meaningful after it.
+        time.sleep(0.5)
+        for p, label in zip(procs, ("aplay", "arecord")):
+            if p.poll() is not None and p.returncode != 0:
+                _out, err = p.communicate()
+                c.note(f"{name}: {label} exited {p.returncode} before "
+                       f"streaming started: {(err or '').strip()[:200]}")
         try:
             metrics, durations = sample_point(
                 c, name, hcd, settle_seconds, sample_seconds)
         finally:
             stop_stream_pair(procs)
-        for p, label in zip(procs, ("aplay", "arecord")):
-            if p.returncode not in (None, 0, -15):   # -15 = terminated by us
-                _out, err = p.communicate()
-                c.note(f"{name}: {label} exited {p.returncode}: "
-                       f"{(err or '').strip()[:200]}")
         all_metrics[name] = metrics
         save_raw_trace(c, name, durations)
 
