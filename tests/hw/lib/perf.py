@@ -21,10 +21,14 @@ _STAT_FIELDS = ("user", "nice", "system", "idle", "iowait", "irq", "softirq")
 def read_hcd_irq_total(hcd_name):
     """Sum of /proc/interrupts entries for the named HCD driver, across CPUs.
 
-    Returns None if no line names this driver -- e.g. it is not the last
-    field on every distro's /proc/interrupts (dwc2 sometimes appends a
-    description), so the match is "driver name is one of the whitespace
-    tokens", not "driver name is the last column".
+    Returns None if no line names this driver. The match is substring, not
+    equality: env.usb_host_controller() gives the *driver* name resolved from
+    sysfs ("dwc2", "xhci_hcd"), but /proc/interrupts' description column
+    names the *IRQ requester*, which is not always identical -- a Pi's dwc2
+    line reads "20980000.usb, dwc2_hsotg:usb1", where "dwc2" is a substring of
+    "dwc2_hsotg" but not equal to any whitespace-split token. An exact-token
+    match here silently produced no irq_per_s on armhf-prod
+    (re/streaming_overhead_experiments.md E1's first pi1test run, 2026-08-26).
     """
     if not hcd_name:
         return None
@@ -42,11 +46,18 @@ def read_hcd_irq_total(hcd_name):
         parts = line.split()
         if not parts:
             continue
-        if hcd_name not in parts[ncols:] and hcd_name not in parts:
+        description = " ".join(parts[ncols:])
+        if hcd_name not in description:
             continue
         # parts[0] is "NNN:"; the per-CPU counts follow, one column per CPU
         # header on the first line, everything after is description text.
-        counts = parts[1:1 + ncols - 1]
+        # ncols columns of counts, not ncols-1 -- this was off by one and
+        # silently dropped the last CPU's count everywhere (harmless on the
+        # 4-core boxes tested first, since their dropped column read 0) and
+        # the *only* count on pi1test's single-core board, where it produced
+        # an empty counts list and therefore no irq_per_s at all (E1's first
+        # armhf-prod run, 2026-08-26).
+        counts = parts[1:1 + ncols]
         for c in counts:
             if c.isdigit():
                 total += int(c)
