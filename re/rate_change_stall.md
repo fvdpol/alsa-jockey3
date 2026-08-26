@@ -1027,6 +1027,159 @@ failure is a genuinely separate mode from the downward capture-stall this
 document otherwise tracks, or the same instability surfacing a different
 way once the divide-ratio fix closed off the common path, is unresolved.
 
+## 2026-08-26: the watchdog fires on a rate change's own deliberate silence
+
+Follow-on from the 2026-08-26 counting-bug follow-up above, using
+`re/bpftrace/rate_stall_trace.bt` (kprobes on `jockey3_stop_urbs()`,
+`ploytec_set_rate()`, `jockey3_start_urbs()`, `jockey3_watchdog_check()`,
+`jockey3_recover_urb_stream()`, and the playback/capture completion
+callbacks). N=8, `dev/streaming-overhead`, `x86_64-prod` unless noted.
+
+### The mechanism: two independent recovery paths share no coordination
+
+`jockey3_pcm_hw_params()` holds `rate_mutex` across its whole
+stop/set-rate/start sequence (confirmed reading `jockey3.c:2298`).
+`jockey3_recover_urb_stream()` -- the watchdog's own recovery call --
+needs the same mutex for its stop+start pair, so the two cannot corrupt
+shared state concurrently. But `jockey3_recover_urb_stream()`'s liveness
+check (`jockey3_check_urb_stream_alive()`) ran only once, *before* trying
+for the mutex. Traced twice on hardware (`20260826T152050Z-smoke`,
+`20260826T154222Z-smoke`): `hw_params()`'s own restart succeeds, then a
+watchdog call that had been blocked on `rate_mutex` acquires it moments
+later (2.9ms in one case) and repeats a full stop+start on a stream that
+had *just* recovered -- sometimes with a third such cycle from a
+different call site layered on top (`"opening a capture stream"`,
+`jockey3_pcm_prepare()`'s own check). The redundant cycle is the one that
+misses its 50ms liveness budget (`JOCKEY3_PREPARE_CONFIRM_MS`) and
+escalates to a full USB reset that the original rate change never needed.
+
+**Fixed** (`dev/streaming-overhead` `9b6f283`): `jockey3_recover_urb_stream()`
+re-checks `jockey3_check_urb_stream_alive()` immediately after entering
+`scoped_guard(mutex, &chip->rate_mutex)`, before repeating the stop+start.
+A call that raced a legitimate recovery is now a no-op.
+
+### Why the watchdog fires at all: it is not measuring a real fault
+
+The deeper question -- did the stream actually stall, or is the watchdog
+firing on its own deliberate silence -- resolves cleanly by reconstructing
+the *real* completion timeline from the trace's own captured completions,
+independent of the driver's `last_callback_time`/`urbs_started_time`
+bookkeeping:
+
+| run | real last completion -> onset gap | `STOP_URBS` -> onset gap | dmesg's own reported gap |
+|---|---|---|---|
+| `20260826T152050Z-smoke` | 225.6 ms | 225.2 ms | "20 ms" |
+| `20260826T154222Z-smoke` | 116.8 ms | 116.4 ms | "23 ms" |
+
+**Caveat added 2026-08-26, after the fact:** the "real" column above mixes
+clocks -- `STOP_URBS`/completion timestamps came from bpftrace's `nsecs`,
+the onset gap from `dmesg`'s own timestamp, and a later, cleaner
+investigation (see "Ground truth via trace_printk" below) found `dmesg`'s
+clock and `ktime_get_mono_fast_ns()`-family clocks (bpftrace's `nsecs`
+included) sit at a large, session-varying, but *roughly constant within a
+boot* offset from each other -- session traces disagreeing when
+correlated by timestamp is not a validated fact. The **structural**
+finding here (multiple stop/start cycles measured entirely within
+bpftrace's own single clock, no `dmesg` mixing) is unaffected and is what
+`9b6f283` fixes. The specific 117-226ms/5-10x magnitude below should be
+read as provisional, superseded by the single-clock value comparison in
+"Ground truth via trace_printk".
+
+The stream genuinely does stop delivering completions -- that much is
+real. But the real gap lines up almost exactly with `STOP_URBS`, not with
+anything mid-stream: what the watchdog is reacting to is the deliberate,
+expected silence of `hw_params()`'s own teardown-EP0-restart sequence,
+the exact window `urb_stream->stopping` exists to hide from it. And the
+watchdog's own *reported* duration is wrong by 5-10x (20-23ms logged
+against 117-226ms real) -- `now`/`last`/`age_ns` in `jockey3_watchdog_check()`
+are sampled once, outside `urb_stream->lock`, before the `stopping` check;
+by the time the tick can act on that sample, `stopping` may already have
+gone false again, and the small `age_ns` it computed no longer reflects
+how much real silence has actually elapsed. Whether the gap between
+sampling and acting is spinlock contention (unlikely -- these critical
+sections are brief) or `system_long_wq` scheduling delay behind a rate
+change that is itself touching URB-stream state throughout is not pinned
+down; it does not change the conclusion, since either way the tick is
+acting on data computed before a window it should have been excluded
+from.
+
+**Fixed** (`dev/streaming-overhead` `12e5f3c`): `jockey3_watchdog_check()`
+now checks `stopping` *before* sampling `last`/`now`/`age_ns`, with all
+three taken under the same `urb_stream->lock` critical section, so a
+decision is always made from a fresh read taken after `stopping` was
+confirmed false, not from a sample taken before an unknown wait. The
+existing "read `last` before `now`" underflow-avoidance rule is preserved.
+
+### Ground truth via `trace_printk()`: the reported duration is accurate
+
+The bpftrace-vs-dmesg clock question above made the 117-226ms figures
+unreliable, so rather than keep correlating across tools, `50dcb38`
+(temporary, `dev/streaming-overhead` only, never to reach `main`) added a
+`trace_printk()` inside `jockey3_watchdog_check()`'s locked section,
+printing `last_callback_time`, `urbs_started_time`, the `last`/`now` it
+actually used, and the computed `age_ms` -- ground truth from inside the
+function itself. Comparing this *by value*, not by timestamp, against
+what `dev_warn()` printed to `dmesg` sidesteps any clock-alignment
+question entirely.
+
+Across the 9 onsets captured this way (1 on `x86_64-prod`, 8 on
+`arm64-prod`, both `12e5f3c` manifest-verified builds): the computed
+`age_ms` matched the `dmesg`-reported figure **exactly, every time** --
+`[22, 20, 21, 22, 20, 21, 20, 23]` computed vs. `[22, 20, 21, 22, 20, 21,
+20, 23]` reported on `arm64-prod`, `21` vs. `21` on `x86_64-prod`. Every
+one used the `urbs_started_time` fallback (`last_callback_time == 0`) --
+genuinely zero completions since the restart, not stale data. **The
+watchdog's reported duration is accurate.** `12e5f3c` is doing its job.
+
+### The real question was the threshold, not the measurement
+
+With `dmesg` out of the analysis entirely, the full sequence timing comes
+from a single clock (bpftrace's `nsecs` and the driver's own
+`ktime_get_mono_fast_ns()` agree to within a few microseconds on the same
+tick, confirmed directly). For all 9 onsets, on both platforms:
+
+```
+STOP_URBS --~237-240ms--> SET_RATE (112-114ms) --~0.4-0.5ms--> START_URBS --20-23ms--> onset
+```
+
+Remarkably consistent across every single traced case. `START_URBS`
+follows `SET_RATE` within under a millisecond every time -- resubmission
+itself is not the bottleneck. The onset fires **20-23ms after
+`START_URBS`, every time**, with zero completions in that window: a real,
+highly reproducible cost of bringing the URB ring back up after a rate
+change, not an intermittent fault. `JOCKEY3_WATCHDOG_STALL_MS` (20ms) sits
+right at the edge of that band, so ordinary rate changes occasionally
+cross it and get treated the same as an established stream going silent
+-- even though every one of these 9 self-healed on the very next tick
+with no restart needed.
+
+**Fixed** (`dev/streaming-overhead` `00d9223`): a separate, longer
+threshold, `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS` (200ms), applies whenever
+`last_callback_time == 0` -- the existing signal for "no completion since
+the last start" -- in both `jockey3_watchdog_check()` and
+`jockey3_watchdog_next_delay_ms()`. No new state; ~10x the worst startup
+latency observed, so a genuinely wedged device is still caught, just not
+mistaken for one on every rate change that happens to land a few ms past
+20ms. Not yet hardware-validated.
+
+(The ~237-240ms `STOP_URBS`-to-`SET_RATE` gap and the consistent
+112-114ms `SET_RATE` duration are both real and worth understanding on
+their own terms, but are outside this question's scope.)
+
+### A metric-reading correction: reset counts hide most of the activity
+
+`resets_total_device`/`stalls_per_change_pct` (the latter is scoped to
+`capture_stall_hw_params` only) undercount how often the watchdog fires at
+all. On the two 300-change validation runs after the fix above:
+`x86_64-prod` (`20260826T173215Z-smoke`): 1 reset, but
+`watchdog_onset_total=21` (7% of changes), 19 of which self-healed without
+even needing a restart. `arm64-prod` (`20260826T173110Z-functional`): 0
+resets, but `watchdog_onset_total=57` (19% of changes), 56 of which needed
+an actual light restart. Neither run's headline "0/1 resets" figure alone
+says anything close to how often this fires -- always read
+`watchdog_onset_total`/`watchdog_restarted_total`/`watchdog_recovered_total`
+alongside it.
+
 ## Open questions, in the order worth attacking
 
 1. ~~Measure per-change incidence on each branch, one variable at a time.~~
