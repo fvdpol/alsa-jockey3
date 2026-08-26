@@ -69,6 +69,7 @@ class Run:
     target: str
     started: str
     operator: str = ""
+    note: str = ""
     ended: str = ""
     outcome: str = PENDING
     env: dict = field(default_factory=dict)

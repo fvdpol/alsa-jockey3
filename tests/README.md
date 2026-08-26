@@ -98,6 +98,18 @@ This is how a parameter sweep is run without editing the catalog between arms.
 afterwards and two runs can be told apart without reconstructing what was
 edited when.
 
+`--note "free text"` records that text in `run.json` too, for the details
+`--param` cannot express -- which bench build was loaded, that a bpftrace
+script was attached alongside the case, why this particular run exists. It
+keeps that context inside the run record itself rather than in chat history
+or a separate log that can drift out of sync with which run it was about:
+
+```sh
+./runner.py --case JT-RATE-001 --unattended \
+    --param rates=[96000,48000] --param sweep_order=as-given \
+    --note "N=8 driver, rate_stall_trace.bt attached"
+```
+
 The runner is **not** run under sudo. Playback, capture, MIDI and sysfs need no
 privilege; the few operations that do go through `priv/jockey3-testctl`. The
 test user needs to be in the `audio` group, and nothing more.

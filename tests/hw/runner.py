@@ -648,6 +648,11 @@ def main():
     ap.add_argument("--list", "-l", action="store_true")
     ap.add_argument("--dry-run", "-n", action="store_true")
     ap.add_argument("--operator", default=os.environ.get("USER", ""))
+    ap.add_argument("--note", default="",
+                    help="free-text note recorded in run.json, for keeping "
+                         "track of what this run/experiment was for (e.g. "
+                         "which bench build or bpftrace script was attached) "
+                         "without relying on chat history or memory")
     ap.add_argument("--quiet", "-q", action="store_true",
                     help="do not echo each case's progress as it runs; keep "
                          "only the per-case verdict")
@@ -837,6 +842,7 @@ def main():
         run_id=f"{target_name}-{stamp}-{args.profile}",
         profile=args.profile, target=target_name,
         started=results.utc_iso(started), operator=args.operator,
+        note=args.note,
     )
     run.env = env.capture(targets["targets"], args.kernel_src)
     run.env["target_identified_from"] = kernel.get("source")
