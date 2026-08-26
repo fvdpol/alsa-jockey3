@@ -19,6 +19,7 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <linux/cleanup.h>
+#include <linux/trace_printk.h> /* TEMPORARY DEBUG -- do not merge into main */
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/rawmidi.h>
@@ -1723,6 +1724,26 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 		 */
 		now = ktime_get_mono_fast_ns();
 		age_ns = now - last;
+
+		/*
+		 * TEMPORARY DEBUG -- do not merge into main. Ground truth for
+		 * the 2026-08-26 real-age-vs-reported-age investigation
+		 * (re/rate_change_stall.md): what this function itself read
+		 * for last_callback_time/urbs_started_time right at the point
+		 * it computed age_ns, independent of any external observer
+		 * (a parallel bpftrace completion tracker gave numbers that
+		 * did not reconcile with dmesg's reported age, on both
+		 * x86_64-prod and arm64-prod). trace_printk(), not dev_dbg or
+		 * dev_warn: this must not perturb the timing it is measuring
+		 * the same way printk to the console already has once before
+		 * on this driver.
+		 */
+		trace_printk("wdcheck dir=%d last_cb=%llu urbs_started=%llu last_used=%llu now=%llu age_ms=%llu stall_reported=%d\n",
+			     direction,
+			     atomic64_read(&urb_stream->last_callback_time),
+			     atomic64_read(&urb_stream->urbs_started_time),
+			     last, now, div_u64(age_ns, NSEC_PER_MSEC),
+			     urb_stream->stall_reported);
 
 		open = urb_stream->substream;
 
