@@ -1677,37 +1677,52 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 	u64 now, last, age_ns, outage_ns = 0;
 	bool open = false;
 
-	/*
-	 * Fall back to the start timestamp until the first completion arrives:
-	 * last_callback_time is legitimately 0 in that window, and treating it
-	 * as a stall would fire on every start.
-	 */
-	last = atomic64_read(&urb_stream->last_callback_time);
-	if (!last)
-		last = atomic64_read(&urb_stream->urbs_started_time);
-	if (!last)
-		return;		/* never started; nothing to watch yet */
-
-	/*
-	 * Sampled after @last, not before: a URB completion on another CPU can
-	 * land between the two reads and advance last_callback_time past a
-	 * @now taken first, and "now - last" then underflows to a u64 near its
-	 * max instead of going negative. Reading @last first guarantees @now
-	 * is taken no earlier than the completion that produced it.
-	 */
-	now = ktime_get_mono_fast_ns();
-
-	age_ns = now - last;
-
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		/*
 		 * One flag covers every deliberate stop -- rate change, suspend,
-		 * pre_reset and teardown all reach jockey3_stop_urbs().
+		 * pre_reset and teardown all reach jockey3_stop_urbs(). Checked
+		 * before now/last/age_ns are sampled, not after: this tick can
+		 * have been sitting on system_long_wq for a while before it got
+		 * to run, and a stop+restart cycle -- which routinely takes on
+		 * the order of 100 ms, far longer than this spinlock is ever
+		 * held -- can complete inside that wait. Sampling first and
+		 * checking stopping second, as this used to, let a tick whose
+		 * data predated the stop act on it once stopping had already
+		 * gone false again, misreporting a rate change's own deliberate
+		 * silence as a stall. See re/rate_change_stall.md's 2026-08-26
+		 * follow-up: two hardware traces showed the real gap since the
+		 * last completion running 5-10x longer than the age this
+		 * function went on to report, in both cases matching almost
+		 * exactly the span between jockey3_stop_urbs() and the
+		 * following jockey3_start_urbs() -- the sanctioned quiet window
+		 * this flag exists to hide, not a fault.
 		 */
 		if (urb_stream->stopping) {
 			urb_stream->stall_reported = false;
 			return;
 		}
+
+		/*
+		 * Fall back to the start timestamp until the first completion
+		 * arrives: last_callback_time is legitimately 0 in that window,
+		 * and treating it as a stall would fire on every start.
+		 */
+		last = atomic64_read(&urb_stream->last_callback_time);
+		if (!last)
+			last = atomic64_read(&urb_stream->urbs_started_time);
+		if (!last)
+			return;		/* never started; nothing to watch yet */
+
+		/*
+		 * Sampled after @last, not before: a URB completion on another CPU
+		 * can land between the two reads and advance last_callback_time
+		 * past a @now taken first, and "now - last" then underflows to a
+		 * u64 near its max instead of going negative. Reading @last first
+		 * guarantees @now is taken no earlier than the completion that
+		 * produced it.
+		 */
+		now = ktime_get_mono_fast_ns();
+		age_ns = now - last;
 
 		open = urb_stream->substream;
 
