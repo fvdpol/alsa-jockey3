@@ -47,6 +47,64 @@
 > stalls out of 4,000 changes) recovered every time without needing a device
 > reset.
 >
+> **2026-08-26 follow-up: the long `JT-RATE-003` soak this document has been
+> waiting on is in, at `N=8` -- and it exposed a test-framework bug that had
+> been silently hiding every watchdog-triggered reset since the watchdog
+> gained the ability to queue one (`e780ef4`, "make the URB liveness
+> watchdog self-healing", 2026-08-23).**
+>
+> `cases/rate_change.py`'s `resets_total_device` only ever summed three
+> named contexts -- `reset_on_rate_change`, `reset_after_urb_restart`,
+> `reset_after_playback_prepare` -- matching the three call sites
+> `jockey3_recover_urb_stream()` had when that counter was written. A
+> fourth call site, `jockey3_watchdog_work()`'s own escalation (context
+> `"watchdog"`, `jockey3.c:1744`), was never added to the list. Every reset
+> it queued logged normally (`queuing full USB reset (watchdog)`, then
+> `usb ...: reset high-speed USB device ...`) but was invisible to the
+> metric and, via `branch_of()`, misclassified as a self-recovered
+> `"deferred"` stall rather than a `"reset"`.
+>
+> `x86_64-prod`, capture arm, run `20260826T005005Z-functional` (~8.08 h,
+> 20,000 changes) reported `resets_total_device=0`. The true count, counted
+> directly from `dmesg.txt` (`queuing full USB reset (watchdog)` and the
+> matching `usb ...: reset high-speed USB device` line, both bounded
+> between this run's own `JT-MARK`s) is **176** -- exactly the 176 changes
+> the run had already correctly counted as `stalls_per_change_pct=1.0%`
+> (84 `down`/`cross`, 92 `up`/`within`): every one of those "self-recovered"
+> stalls was actually a full device reset. That is `resets_per_change_pct
+> = 0.88%`, not `0.0%`. This run therefore *does* exercise repeated resets
+> and, contrary to what it originally appeared to say, is now the largest
+> evidence to date on the **device wedge** question (question 3) -- it ran
+> 176 resets back to back with no gap and never wedged.
+>
+> The same bug affects every `x86_64-prod`/`armhf-prod` `JT-RATE-00{1,3}`
+> run taken between `e780ef4` (2026-08-23) and the fix (`reset_on_watchdog`
+> added to `CONTEXT` and to `branch_of()`, same day as this note).
+> `arm64-prod` is unaffected in the runs checked -- its watchdog resets were
+> independently already known to be zero, and the raw dmesg count agrees.
+> Recounted from raw `dmesg.txt` the same way: the N=4 `x86_64-prod`
+> `JT-RATE-001` run (`20260825T234356Z-functional`, 100 changes) had 1 true
+> reset (was reported as 0), and the N=8 100-change run
+> (`20260826T004125Z-functional`) had 3 (was reported as 0) -- matching
+> what had already been noted by hand in
+> `re/streaming_overhead_experiments.md`'s N cross-reference table before
+> the metric bug was found, which is how the discrepancy below was first
+> spotted.
+>
+> **The "0.0% at N=8, 20,000 changes vs. 3/100 at N=8" conflict this
+> section previously raised is not resolved, it is dissolved -- it was
+> the counting bug, not a real disagreement.** The corrected figures (1%
+> at N=4/n=100, 3% at N=8/n=100, 0.88% at N=8/n=20,000) do not by
+> themselves establish or rule out a reset rate that climbs with N either:
+> a 100-change sample cannot resolve better than roughly a factor of two
+> either way (see "the number this is judged on" above), so 1% and 3% are
+> not distinguishable from noise, and the only high-confidence figure is
+> the 20,000-change 0.88%. There is still no same-build `N=1`/`N=2`
+> `JT-RATE-001`-scale control run to compare it against -- that remains
+> the blocking next step, now doubly so since the pre-08-23 comparisons
+> this investigation leaned on cannot be assumed unaffected either without
+> the same raw-dmesg recount.
+>
 > The rest of this document is the investigation as it ran, kept because the
 > reasoning is the record of how the cause was found -- and because several
 > of its intermediate conclusions were wrong in instructive ways.
@@ -918,8 +976,9 @@ It does not settle the **device wedge** under sustained resets (open question
 performed none, so the wedge was not exercised rather than fixed. It stays
 open.
 
-The longer `JT-RATE-003` is still worth having before the milestone is closed,
-as is a lateral-only sweep (`rates=[44100,48000]` / `[88200,96000]`,
+The longer `JT-RATE-003` is now in, at `N=8` on `x86_64-prod` -- see the
+2026-08-26 follow-up in the banner above (0 resets in 20,000 changes). A
+lateral-only sweep (`rates=[44100,48000]` / `[88200,96000]`,
 `sweep_order=as-given`) to put a number on the one class no sweep has ever
 produced.
 

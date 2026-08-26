@@ -377,6 +377,11 @@ CONTEXT = [
     #   reset_after_playback_prepare
     #                             prepare()'s playback light retry (context
     #                             "preparing a playback stream") did not
+    #   reset_on_watchdog        jockey3_watchdog_work()'s own light retry
+    #                             (context "watchdog") did not -- not tied
+    #                             to any PCM call, so it can happen inside a
+    #                             change window without hw_params() or
+    #                             prepare() having done anything at all
     ("reset_on_rate_change",
      re.compile(r"(?:Playback|Capture) stream still stalled after URB restart; "
                 r"queuing full USB reset \(rate change\)")),
@@ -386,6 +391,18 @@ CONTEXT = [
     ("reset_after_playback_prepare",
      re.compile(r"Playback stream still stalled after URB restart; queuing "
                 r"full USB reset \(preparing a playback stream\)")),
+    # jockey3_watchdog_work()'s own light-retry-then-escalate call
+    # (jockey3.c:1744, context "watchdog") -- independent of a rate change
+    # or a PCM open, so it can land inside a change window that never
+    # touched hw_params()'s or prepare()'s own recovery path at all. Added
+    # 2026-08-26 after a full device reset in this context was found
+    # silently missing from resets_total_device: every one of
+    # JT-RATE-003's 20260826T005005Z-functional 176 "self-recovered
+    # stalls" was actually this event, confirmed 176 == the run's raw
+    # `reset high-speed USB device` count. See re/rate_change_stall.md.
+    ("reset_on_watchdog",
+     re.compile(r"(?:Playback|Capture) stream still stalled after URB restart; "
+                r"queuing full USB reset \(watchdog\)")),
     # The budget-exhausted give-up: chip-wide, so it can fire from any of the
     # three contexts above without a light retry having even been tried on
     # THIS call -- jockey3_recovery_budget_take() may already be spent from a
@@ -531,7 +548,7 @@ def branch_of(counts):
     prepare_capture_total beside it, and the per-change metrics for any
     individual change.
     """
-    if counts.get("reset_on_rate_change"):
+    if counts.get("reset_on_rate_change") or counts.get("reset_on_watchdog"):
         return "reset"
     if counts.get("prepare_capture"):
         return "recovered_on_open"
@@ -1315,7 +1332,7 @@ def main():
     # watch while the driver is being worked on: it should trend to zero, and a
     # release where it does not has not fixed the fault, only survived it.
     #
-    # All three routes a reset can be queued from count, because they are the
+    # All four routes a reset can be queued from count, because they are the
     # same event from the device's point of view -- an audible interruption to
     # whatever was playing:
     #
@@ -1328,6 +1345,18 @@ def main():
     #   reset_after_playback_prepare
     #              prepare()'s playback call did the same and also failed
     #              recovery, so it could never have contributed a reset
+    #   reset_on_watchdog
+    #              jockey3_watchdog_work()'s own call (context "watchdog")
+    #              did the same and also failed -- not tied to a rate change
+    #              or a PCM open, so it can fire on a change that never
+    #              touched hw_params()'s or prepare()'s own recovery path.
+    #              Missing here until 2026-08-26: every reset this route
+    #              queued was silently uncounted from when the watchdog
+    #              gained it (`e780ef4`, "make the URB liveness watchdog
+    #              self-healing", 2026-08-23) until this line was added. Any
+    #              resets_total_device/resets_per_change_pct recorded for a
+    #              build after `e780ef4` and before this fix is a lower
+    #              bound, not a measurement -- see re/rate_change_stall.md.
     #
     # A URB restart that DID work is not counted: it is the outcome this metric
     # wants more of, so it is reported beside the percentage rather than inside
@@ -1342,7 +1371,8 @@ def main():
     # quietly wrong.
     resets = (totals.get("reset_on_rate_change", 0)
               + totals.get("reset_after_urb_restart", 0)
-              + totals.get("reset_after_playback_prepare", 0))
+              + totals.get("reset_after_playback_prepare", 0)
+              + totals.get("reset_on_watchdog", 0))
     light_retries = (totals.get("hw_params_light_retry", 0)
                      + totals.get("prepare_capture", 0)
                      + totals.get("prepare_playback", 0))

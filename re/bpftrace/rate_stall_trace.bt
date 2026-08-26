@@ -1,0 +1,125 @@
+#!/usr/bin/env bpftrace
+/*
+ * Timing trace for the N=8 rate-change stall investigation
+ * (re/rate_change_stall.md, re/streaming_overhead_experiments.md).
+ *
+ * Answers: does the EP0 rate-change sequence itself fail to bring the
+ * device back to streaming, or does streaming start and then die a beat
+ * later? Times ploytec_set_rate() (the EP0 exchange) and
+ * jockey3_start_urbs() (the URB-ring resubmission that follows it), then
+ * watches the first few playback/capture URB completions after the
+ * restart for a gap -- the same signature an OpenVizsla trace would show
+ * on the wire, without the minutes of capture that would take.
+ *
+ * Kprobes only -- no driver source change, so this cannot itself be the
+ * "debug build behaves differently" trap (see the dev_dbg/printk incident
+ * that motivated using bpftrace here instead of instrumentation). Argument
+ * access is by position (arg0, arg1, ...), which needs no BTF/DWARF, so
+ * this runs unmodified against a prod kernel with
+ * CONFIG_DEBUG_INFO_BTF unset (true today on x86_64-prod).
+ *
+ * The playback/capture callbacks fire continuously for the driver's
+ * entire free-running lifetime (URBs never stop between PCM opens), so
+ * they are NOT traced unconditionally -- only inside a short window gated
+ * open by jockey3_start_urbs() returning, and capped at COMPLETIONS_PER_DIR
+ * events per direction per rate change. That keeps overhead and output
+ * volume bounded even across a JT-RATE-003-scale run.
+ *
+ * Usage:
+ *   sudo bpftrace re/bpftrace/rate_stall_trace.bt -o rate_stall_trace.log
+ *
+ * Validate non-perturbation before trusting a long run: run JT-RATE-001
+ * once with this attached and once without, same build, and confirm
+ * resets_per_change_pct / stalls_per_change_pct do not move outside the
+ * existing noise band (re/rate_change_stall.md, "a single run cannot show
+ * an improvement of less than roughly a factor of two").
+ *
+ * Correlating with dmesg: bpftrace's nsecs and the kernel log's
+ * [nnnn.nnnnnn] timestamps are both boot-relative monotonic time, so
+ * ts_ns / 1e9 lines up directly against dmesg.txt / a JT-MARK.
+ */
+
+BEGIN
+{
+	printf("tracing armed -- rate_val=Hz, dur_ms=EP0/URB-restart wall time, gap_us=time since the previous completion in this window\n");
+	@completions_per_dir = 25;
+	/* 500 ms: comfortably past the ~360ms stall-onset offset already
+	 * measured from dmesg, so a real stall lands inside the window every
+	 * time. Cast to uint64 to match nsecs -- left as a bare int64
+	 * literal, "nsecs + @gate_window_ns" mixes signs. */
+	@gate_window_ns = (uint64)500000000;
+}
+
+kprobe:ploytec_set_rate
+{
+	@rate_t0[tid] = nsecs;
+	@rate_val[tid] = arg2;
+}
+
+kretprobe:ploytec_set_rate
+/@rate_t0[tid]/
+{
+	$dur_ms = (nsecs - @rate_t0[tid]) / 1000000;
+	printf("SET_RATE ts_ns=%llu rate=%d ret=%d dur_ms=%d\n",
+	       nsecs, @rate_val[tid], retval, $dur_ms);
+	delete(@rate_t0[tid]);
+	delete(@rate_val[tid]);
+}
+
+kprobe:jockey3_start_urbs
+{
+	@urbs_t0[tid] = nsecs;
+}
+
+kretprobe:jockey3_start_urbs
+/@urbs_t0[tid]/
+{
+	$dur_ms = (nsecs - @urbs_t0[tid]) / 1000000;
+	printf("START_URBS ts_ns=%llu ret=%d dur_ms=%d\n",
+	       nsecs, retval, $dur_ms);
+	delete(@urbs_t0[tid]);
+
+	/* Arm the completion-gate: only the callbacks fired in this window
+	 * get traced. */
+	@gate_until = nsecs + @gate_window_ns;
+	@pb_seen = 0;
+	@cap_seen = 0;
+	@pb_last = (uint64)0;
+	@cap_last = (uint64)0;
+}
+
+kprobe:jockey3_playback_callback
+/@gate_until && nsecs < @gate_until && @pb_seen < @completions_per_dir/
+{
+	/* Cast the uint64 delta to int64 before dividing, so both arms of
+	 * the ternary -- the -1 "no previous completion yet" sentinel and
+	 * the measured gap -- are the same signed type. */
+	$gap_us = @pb_last != 0 ? (int64)((nsecs - @pb_last) / 1000) : -1;
+	printf("PB_CB  ts_ns=%llu gap_us=%d\n", nsecs, $gap_us);
+	@pb_last = nsecs;
+	@pb_seen++;
+}
+
+kprobe:jockey3_capture_callback
+/@gate_until && nsecs < @gate_until && @cap_seen < @completions_per_dir/
+{
+	$gap_us = @cap_last != 0 ? (int64)((nsecs - @cap_last) / 1000) : -1;
+	printf("CAP_CB ts_ns=%llu gap_us=%d\n", nsecs, $gap_us);
+	@cap_last = nsecs;
+	@cap_seen++;
+}
+
+/* The stall-onset/full-stall dev_warn() lines already in dmesg sit on the
+ * same monotonic clock as ts_ns above, so they line up against this log
+ * directly -- no need to also probe jockey3_watchdog_check() (it polls
+ * every 10ms-1s per direction for the driver's whole free-running
+ * lifetime; tracing it would add real overhead for a timestamp dmesg
+ * already gives us for free). */
+
+END
+{
+	clear(@rate_t0); clear(@rate_val); clear(@urbs_t0);
+	clear(@gate_until); clear(@pb_seen); clear(@cap_seen);
+	clear(@pb_last); clear(@cap_last); clear(@completions_per_dir);
+	clear(@gate_window_ns);
+}
