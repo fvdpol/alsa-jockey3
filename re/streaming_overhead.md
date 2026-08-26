@@ -707,6 +707,40 @@ instability contaminated this specific measurement, or N=4 genuinely costs
 more per-open-stream CPU on this host, is not yet known. One run; needs
 repeating before drawing a conclusion either way.
 
+### E2 exploratory: N=8 on `arm64-prod` -- clean CPU/irq trend continues, stall rate is lower than N=4, not higher
+
+Audio clean by ear. `irq_per_s` halves again cleanly against the N=4
+baseline at all four rates (0.500 ratio, no anomaly this time).
+`cpu_pct_sys_irq_soft` continues the same well-behaved trend N=2->N=4
+already showed on this board -- flat or improving at every rate, both
+`idle` and `stream` (e.g. 96 kHz stream: 0.87% at N=4 -> 0.40% at N=8).
+No reversal here, unlike `x86_64-prod`'s N=2->N=4 CPU anomaly.
+
+**`JT-RATE-001` (60 rate changes): 10 stalls -- 16.7%, all self-recovered,
+zero escalations** (9 Playback, 1 Capture). **That is LOWER than N=4's
+26.7% on the same board, not higher.** The stall rate is not simply
+increasing with N -- whatever drives it is not monotonic, at least not
+between N=4 and N=8. `JT-AUDIO-002` (4 rate changes) came back fully
+clean, which is unsurprising noise at this sample size against either a
+17% or 27% true rate.
+
+**`JT-PCM-007` needs a caveat about what it can actually show.** Both
+directions' theoretical minimum (960 B playback = 8x120, 1152 B capture =
+8x144) tested clean, zero xruns. But the test's candidate ladder is a
+fixed sequence of frame-count doublings (10/20/40/80 for playback,
+8/16/32/64 for capture) that was never designed around a variable N --
+it only happens to land exactly on `N x subpacket_bytes` because N itself
+is a power of two here, same as at N=4. Critically, **960 B is the exact
+same absolute period size** that N=4 already proved clean (as the
+"doubled" safe candidate there) -- this run does not newly show N=8's
+own theoretical boundary is more forgiving than N=4's was; it re-tests a
+size already known to be safe. The ladder has no rung between N=8's own
+period_bytes_min and the next doubling, so whether N=8's *own* tight
+boundary carries the same single-xrun marginal risk N=4's boundary showed
+is genuinely untested here, not disproven. `JT-PCM-007`'s candidate
+ladder would need to scale with N (or add finer steps) to actually answer
+that.
+
 ### What it costs
 
 Completion rate with 80 frames per URB in both directions:

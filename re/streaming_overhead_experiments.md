@@ -327,6 +327,7 @@ it) whenever a new run's N is known.
 | 2 | armhf-prod | JT-PERF-001 (x4) | `20260825T212251Z-smoke` (clean), `20260825T213832Z-smoke` (2 self-recovered stalls), `20260825T214550Z-smoke` (clean), `20260825T215242Z-smoke` (clean) |
 | 4 (`9317476`/`b6e5c86`) | arm64-prod | JT-MIDI-004, JT-PCM-007, JT-AUDIO-002, JT-RATE-001, JT-PERF-001 | `20260825T230043Z-functional`, `20260825T231128Z-functional`, `20260825T231624Z-functional`, `20260825T231814Z-functional`, `20260826T001324Z-functional` |
 | 4 | x86_64-prod | JT-MIDI-004 (1 stall, escalated to reset), JT-PCM-007 (1 self-recovered stall), JT-AUDIO-002 (clean), JT-RATE-001 (4 stalls incl. 1 escalation), JT-PERF-001 | `20260825T233829Z-functional`, `20260825T234109Z-functional`, `20260825T234303Z-functional`, `20260825T234356Z-functional`, `20260826T001006Z-functional` |
+| 8 | arm64-prod | JT-AUDIO-002 (clean), JT-RATE-001 (10 self-recovered stalls, 16.7%), JT-PERF-001, JT-PCM-007 | `20260826T002201Z-functional`, `20260826T002259Z-functional`, `20260826T003013Z-functional`, `20260826T003412Z-functional` |
 
 Not yet run: a `JT-RATE-001`-scale (dozens of changes) comparison at N=1
 and N=2, same boards as the N=4 runs above, to control for whether the
