@@ -741,6 +741,56 @@ is genuinely untested here, not disproven. `JT-PCM-007`'s candidate
 ladder would need to scale with N (or add finer steps) to actually answer
 that.
 
+### E2 exploratory: N=8 on `x86_64-prod` -- the completion-rate model itself starts breaking down, and reset frequency is climbing
+
+Audio clean by ear. `JT-PCM-007` and the initial `JT-AUDIO-002`/
+`JT-PERF-001` runs came back clean (same period-headroom-ladder caveat as
+`arm64-prod`'s N=8 result applies here too).
+
+**`irq_per_s` no longer halves cleanly against the N=4 baseline, at any
+rate, and `idle` and `stream` diverge from each other for the first time
+in this whole study:**
+
+| Rate | idle ratio N=4->N=8 | stream ratio N=4->N=8 | idle-vs-stream gap at N=8 |
+|---|---|---|---|
+| 44100 | 0.554 | 0.534 | 1.3% |
+| 48000 | 0.447 | 0.452 | 1.0% |
+| 88200 | 0.399 | 0.412 | 3.4% |
+| 96000 | 0.398 | 0.470 | **18.0%** |
+
+Every prior N transition on every platform, including `idle` vs `stream`
+matching almost exactly (the whole point of "URBs run free regardless of
+PCM open/close"), held to within a percent or two of the simple model.
+None of that holds here. This `JT-PERF-001` run's own dmesg is completely
+clean (no stalls, no resets) -- so this is not recovery activity skewing
+the numbers; something about actual URB completion behavior itself
+changes at N=8 on this board, and per-callback processing time did grow
+(`ns_per_capture_cb` stream vs idle up 34-38%, `ns_per_playback_cb` up
+7-14%, from real encode/decode work replacing the idle path) but that
+does not obviously explain a *higher* stream completion rate at 96 kHz --
+slower per-completion processing would be expected to reduce throughput,
+not raise it. **Not understood yet; flagged rather than explained.**
+
+**`JT-RATE-001` (100 rate changes): 8 stalls -- 8%, up from N=4's 4% --
+and 3 of those 8 escalated to a full USB reset (37.5% of stalls, up from
+N=4's 1 of 4 = 25%).** All 8 were Playback, all "substream idle". Two of
+the three resets followed a transition *into* 96000 Hz specifically; the
+third followed a transition into 88200 Hz. The last reset's log carries
+an extra line the others didn't: `Rate change to 96000 Hz left a stream
+stalled (playback_alive=0, capture_alive=0, capture_open=1)` -- both
+directions found dead at once, the same combined-failure signature
+Frank's original `JT-AUDIO-002`/`JT-MIDI-001` investigation found at N=1
+(E2b section, above).
+
+**x86_64-prod's stability is trending the wrong way as N grows, and
+monotonically so, unlike `arm64-prod`'s non-monotonic stall rate:** 0
+issues of any kind at N=2 (every test), 4% stalls / 1 reset at N=4, 8%
+stalls / 3 resets at N=8. `arm64-prod` shows no equivalent trend (26.7%
+at N=4, 16.7% at N=8, zero resets at either). Whatever is driving this on
+`x86_64-prod` is getting more frequent and more severe with N, which
+`arm64-prod`'s data does not show at all -- this is the strongest signal
+so far against simply picking the largest N that "works."
+
 ### What it costs
 
 Completion rate with 80 frames per URB in both directions:
