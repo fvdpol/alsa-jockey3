@@ -147,8 +147,8 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * keyed off these constants below is written to degenerate to the original
  * single sub-packet code path at N=1.
  */
-#define JOCKEY3_PLAYBACK_N	4
-#define JOCKEY3_CAPTURE_N	4
+#define JOCKEY3_PLAYBACK_N	8
+#define JOCKEY3_CAPTURE_N	8
 
 #define JOCKEY3_PLAYBACK_XFER_SIZE	(JOCKEY3_PLAYBACK_N * PLOYTEC_PKT_SIZE)
 #define JOCKEY3_CAPTURE_XFER_SIZE	(JOCKEY3_CAPTURE_N * PLOYTEC_PKT_SIZE)
