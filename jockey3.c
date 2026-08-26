@@ -1765,13 +1765,31 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 		 * dev_warn: this must not perturb the timing it is measuring
 		 * the same way printk to the console already has once before
 		 * on this driver.
+		 *
+		 * in_flight/disconnected added ahead of the N=1/N=2/N=4 control
+		 * runs: every "expected silence" window this driver knows about
+		 * (rate change, suspend, pre_reset, disconnect, the startup
+		 * grace period) already routes through the stopping check above
+		 * or the urbs_started_time fallback, so a stall that reaches
+		 * this point is never a false positive from one of those --
+		 * what's still unknown per-onset is which of the two real
+		 * failure shapes the docstring above describes it is: URBs
+		 * stuck in flight (a genuine device/USB-side stall) versus the
+		 * ring empty (couldn't even submit, e.g. torn down underneath
+		 * the driver). Both are cheap reads already taken elsewhere in
+		 * this function for the dev_warn() below; logging them on every
+		 * tick, not just the rate-limited onset/recovery lines, is what
+		 * lets a stall be classified without waiting for it to also hit
+		 * the edge-triggered log.
 		 */
-		trace_printk("wdcheck dir=%d last_cb=%llu urbs_started=%llu last_used=%llu now=%llu age_ms=%llu stall_reported=%d\n",
+		trace_printk("wdcheck dir=%d last_cb=%llu urbs_started=%llu last_used=%llu now=%llu age_ms=%llu stall_reported=%d in_flight=%d disconnected=%d\n",
 			     direction,
 			     atomic64_read(&urb_stream->last_callback_time),
 			     atomic64_read(&urb_stream->urbs_started_time),
 			     last, now, div_u64(age_ns, NSEC_PER_MSEC),
-			     urb_stream->stall_reported);
+			     urb_stream->stall_reported,
+			     atomic_read(&urb_stream->urbs_in_flight),
+			     jockey3_is_disconnected(chip));
 
 		open = urb_stream->substream;
 
