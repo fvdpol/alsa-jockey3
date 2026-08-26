@@ -1160,7 +1160,23 @@ the last start" -- in both `jockey3_watchdog_check()` and
 `jockey3_watchdog_next_delay_ms()`. No new state; ~10x the worst startup
 latency observed, so a genuinely wedged device is still caught, just not
 mistaken for one on every rate change that happens to land a few ms past
-20ms. Not yet hardware-validated.
+20ms.
+
+**Hardware-validated** (`20260826T205002Z-smoke` x86_64-prod,
+`20260826T204838Z-functional` arm64-prod, both 120 changes,
+manifest-verified `00d9223`): **zero watchdog "no completion" onsets on
+either platform**, down from the ~7-19%/~19-24% baselines. `x86_64-prod`
+had no stall-adjacent activity at all. `arm64-prod` had 3 occurrences of a
+*different*, pre-existing, unrelated timeout --
+`jockey3_pcm_hw_params()`'s own direct post-restart check
+(`jockey3_wait_urb_stream_started(..., 50)`, a 50ms budget never touched
+by any of the three fixes here) occasionally lands past its own budget on
+the same startup-latency tail; each one called
+`jockey3_recover_urb_stream(..., "rate change", ...)`, whose pre-existing
+early alive-check found the stream already fine and returned with no
+restart, no cascade, no reset. Same underlying phenomenon, a different and
+already well-behaved consumer of it -- nothing further needed there for
+now.
 
 (The ~237-240ms `STOP_URBS`-to-`SET_RATE` gap and the consistent
 112-114ms `SET_RATE` duration are both real and worth understanding on
