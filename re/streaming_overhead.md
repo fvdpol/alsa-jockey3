@@ -650,6 +650,63 @@ changes, full dmesg) at N=1 and N=2 on the same board would settle whether
 this is proportional to N, a step change at some threshold, or was already
 this frequent and simply never sampled at this scale before.
 
+### E2 exploratory: N=4 on `x86_64-prod` -- lower stall frequency, but a real escalation, and CPU% moves the wrong way
+
+**The period-headroom finding above is confirmed cross-platform, not
+arm64-specific.** `JT-PCM-007` on `x86_64-prod` shows the identical
+pattern byte-for-byte: capture clean at 576 B (matches the model
+exactly); playback's theoretical 480 B legally accepted but 1 xrun,
+actual clean minimum 960 B. Whatever is eating that extra headroom is a
+property of N=4 itself, not this one board.
+
+**Stability looks different here than on `arm64-prod`, in both directions
+at once.** Counted from full dmesg:
+
+- `JT-MIDI-004`: the very first rate change produced a Playback stall that
+  self-recovered (23 ms), then a second stall on the same direction that
+  did **not** clear on the watchdog's first restart -- `Playback URB has
+  stalled` twice more, then `queuing full USB reset`, then a real
+  `usb ... reset high-speed USB device`.
+- `JT-PCM-007`: one Capture stall (substream idle), self-recovered in 56 ms,
+  nothing else.
+- `JT-RATE-001` (100 rate changes): only **4 stalls -- 4%**, a fraction of
+  `arm64-prod`'s 26.7% on the same test. But **one of the four escalated
+  to a full reset** (Capture, substream open, the very first stall in the
+  run) -- something that never happened once across `arm64-prod`'s 16.
+  The other three (all Playback, substream idle) self-recovered in
+  53-58 ms.
+
+**So the two boards diverge in opposite directions**: `arm64-prod` stalls
+far more often but always self-heals; `x86_64-prod` stalls rarely but,
+when it does, has a real chance of needing the hard recovery path.
+Neither board shows this at N=2. Two boards, two different failure
+signatures, both novel at N=4 -- not something a single-platform read
+would have caught.
+
+**`JT-PERF-001` adds a third divergence: CPU% does not keep improving on
+`x86_64-prod` the way it does on `arm64-prod`.** `irq_per_s` still halves
+against the N=2 baseline at 3 of 4 rates (0.500-0.501); 44.1 kHz is an
+outlier at **0.404**, not explained yet. But `cpu_pct_sys_irq_soft` while
+streaming *increases* from N=2 to N=4 at every rate --
+
+| Rate | irq ratio N=2->N=4 | cpu% stream N=2->N=4 | cpu% idle N=2->N=4 |
+|---|---|---|---|
+| 44100 | 0.404 | 1.07 -> 2.30 | 0.17 -> 0.12 |
+| 48000 | 0.501 | 0.68 -> 1.92 | 0.12 -> 0.07 |
+| 88200 | 0.500 | 1.25 -> 1.72 | 0.12 -> 0.15 |
+| 96000 | 0.500 | 1.07 -> 1.45 | 0.15 -> 0.15 |
+
+-- while `idle` CPU stays flat or drops, as expected. `arm64-prod` shows
+the opposite pattern at the same transition (irq ratio a clean 0.500-0.501
+at all four rates; `stream` CPU *continues to drop*, e.g. 96 kHz
+1.01% -> 0.87%). **On `x86_64-prod`, N=4 is not a clear further win over
+N=2 in CPU terms while a stream is actually open, even though completion
+count keeps falling.** This `JT-PERF-001` run followed directly after the
+stall/reset-heavy runs above, on the same device session -- whether that
+instability contaminated this specific measurement, or N=4 genuinely costs
+more per-open-stream CPU on this host, is not yet known. One run; needs
+repeating before drawing a conclusion either way.
+
 ### What it costs
 
 Completion rate with 80 frames per URB in both directions:

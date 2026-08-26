@@ -325,14 +325,13 @@ it) whenever a new run's N is known.
 | 2 (`3974582`/`854f7a8`) | x86_64-prod | JT-PERF-001, JT-PCM-007, JT-MIDI-004 | `20260825T195732Z-smoke`, `20260825T220718Z-functional`, `20260825T221542Z-functional` |
 | 2 | arm64-prod | JT-PERF-001, JT-PCM-007, JT-MIDI-004 | `20260825T211430Z-functional`, `20260825T222215Z-functional`, `20260825T222515Z-functional` |
 | 2 | armhf-prod | JT-PERF-001 (x4) | `20260825T212251Z-smoke` (clean), `20260825T213832Z-smoke` (2 self-recovered stalls), `20260825T214550Z-smoke` (clean), `20260825T215242Z-smoke` (clean) |
-| 4 (`9317476`/`b6e5c86`) | arm64-prod | JT-MIDI-004, JT-PCM-007, JT-AUDIO-002, JT-RATE-001 | `20260825T230043Z-functional`, `20260825T231128Z-functional`, `20260825T231624Z-functional`, `20260825T231814Z-functional` |
-| 4 | x86_64-prod | (in progress) | -- |
+| 4 (`9317476`/`b6e5c86`) | arm64-prod | JT-MIDI-004, JT-PCM-007, JT-AUDIO-002, JT-RATE-001, JT-PERF-001 | `20260825T230043Z-functional`, `20260825T231128Z-functional`, `20260825T231624Z-functional`, `20260825T231814Z-functional`, `20260826T001324Z-functional` |
+| 4 | x86_64-prod | JT-MIDI-004 (1 stall, escalated to reset), JT-PCM-007 (1 self-recovered stall), JT-AUDIO-002 (clean), JT-RATE-001 (4 stalls incl. 1 escalation), JT-PERF-001 | `20260825T233829Z-functional`, `20260825T234109Z-functional`, `20260825T234303Z-functional`, `20260825T234356Z-functional`, `20260826T001006Z-functional` |
 
 Not yet run: a `JT-RATE-001`-scale (dozens of changes) comparison at N=1
-and N=2, same board as the N=4 run above, to control for whether the
-post-rate-change stall rate found at N=4 is N=4-specific or was already
-elevated at lower N. N=8 planned next, both platforms, once N=4 on
-x86_64-prod finishes.
+and N=2, same boards as the N=4 runs above, to control for whether the
+post-rate-change stall rate/pattern found at N=4 is N=4-specific or was
+already present at lower N. N=8 planned next, both platforms.
 
 ---
 
