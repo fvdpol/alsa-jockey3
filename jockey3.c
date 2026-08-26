@@ -1931,6 +1931,24 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	}
 
 	scoped_guard(mutex, &chip->rate_mutex) {
+		/*
+		 * Something else may have already fixed this while the call above
+		 * was waiting for rate_mutex -- most plausibly
+		 * jockey3_pcm_hw_params()'s own rate-change restart, which holds
+		 * this same mutex across its whole stop/set-rate/start sequence.
+		 * The alive check above this function's entry is stale by the
+		 * time the lock is held; re-checking here is what makes a call
+		 * that raced a legitimate recovery a no-op instead of a second,
+		 * redundant full URB-ring teardown/rebuild landing right on top
+		 * of one that already succeeded. Found on the bench via bpftrace:
+		 * that redundant restart is what missed its own liveness budget
+		 * and escalated to a full USB reset a change that had already
+		 * recovered on its own never needed. See re/rate_change_stall.md's
+		 * 2026-08-26 follow-up.
+		 */
+		if (jockey3_check_urb_stream_alive(urb_stream, direction))
+			goto out;
+
 		jockey3_stop_urbs(chip);
 		jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip), context);
 	}
