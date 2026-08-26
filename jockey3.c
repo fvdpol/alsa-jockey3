@@ -210,6 +210,25 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_WATCHDOG_POLL_MS	1000
 #define JOCKEY3_WATCHDOG_MIN_POLL_MS	10
 #define JOCKEY3_WATCHDOG_STALL_MS	20
+/*
+ * Separate, longer grace period for the window between jockey3_start_urbs()
+ * and this direction's first completion since that start -- distinct from
+ * JOCKEY3_WATCHDOG_STALL_MS, which governs steady-state silence between two
+ * completions. Traced on hardware (re/rate_change_stall.md's 2026-08-26
+ * sections): the first completion after a restart routinely lands 20-23ms
+ * after jockey3_start_urbs(), a tight and highly reproducible band on both
+ * x86_64-prod and arm64-prod -- right at, and sometimes just past,
+ * JOCKEY3_WATCHDOG_STALL_MS's edge, so a normal rate change occasionally
+ * trips the same threshold meant for an established stream going silent.
+ * 200 ms is roughly 10x the worst startup latency observed, so it does not
+ * meaningfully weaken detection of a device that is actually not coming
+ * back -- that fault stays wedged far longer than an extra 180 ms would
+ * ever paper over -- while removing the false positive on ordinary rate
+ * changes. Applied wherever last_callback_time is 0 and urbs_started_time
+ * is used instead: see jockey3_watchdog_check() and
+ * jockey3_watchdog_next_delay_ms().
+ */
+#define JOCKEY3_WATCHDOG_STARTUP_GRACE_MS	200
 
 /*
  * Bounded-retry budget for jockey3_recover_urb_stream(), chip-wide because the
@@ -1193,7 +1212,8 @@ static void jockey3_midi_in_callback(struct urb *urb)
 
 /*
  * How long until a direction's watchdog deadline (last activity plus
- * JOCKEY3_WATCHDOG_STALL_MS), in ms clamped to
+ * JOCKEY3_WATCHDOG_STALL_MS, or JOCKEY3_WATCHDOG_STARTUP_GRACE_MS if no
+ * completion has arrived since the last start), in ms clamped to
  * [JOCKEY3_WATCHDOG_MIN_POLL_MS, JOCKEY3_WATCHDOG_POLL_MS]. Returns
  * JOCKEY3_WATCHDOG_POLL_MS if the direction has never started (no deadline to
  * chase yet), and the floor if the deadline has already passed, so a
@@ -1205,15 +1225,18 @@ static unsigned long jockey3_watchdog_next_delay_ms(const struct jockey3_pcm_urb
 {
 	u64 last = atomic64_read(&urb_stream->last_callback_time);
 	u64 started = atomic64_read(&urb_stream->urbs_started_time);
+	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
 	u64 now, remaining_ns;
 
-	if (!last)
+	if (!last) {
 		last = started;
+		threshold_ms = JOCKEY3_WATCHDOG_STARTUP_GRACE_MS;
+	}
 	if (!last)
 		return JOCKEY3_WATCHDOG_POLL_MS;
 
 	now = ktime_get_mono_fast_ns();
-	remaining_ns = last + (u64)JOCKEY3_WATCHDOG_STALL_MS * NSEC_PER_MSEC - now;
+	remaining_ns = last + threshold_ms * NSEC_PER_MSEC - now;
 
 	if ((s64)remaining_ns <= 0)
 		return JOCKEY3_WATCHDOG_MIN_POLL_MS;
@@ -1676,6 +1699,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 	const char *type = direction == SNDRV_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
 	bool log_onset = false, log_recovery = false;
 	u64 now, last, age_ns, outage_ns = 0;
+	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
 	bool open = false;
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
@@ -1691,12 +1715,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 		 * data predated the stop act on it once stopping had already
 		 * gone false again, misreporting a rate change's own deliberate
 		 * silence as a stall. See re/rate_change_stall.md's 2026-08-26
-		 * follow-up: two hardware traces showed the real gap since the
-		 * last completion running 5-10x longer than the age this
-		 * function went on to report, in both cases matching almost
-		 * exactly the span between jockey3_stop_urbs() and the
-		 * following jockey3_start_urbs() -- the sanctioned quiet window
-		 * this flag exists to hide, not a fault.
+		 * follow-up for the hardware traces this closed.
 		 */
 		if (urb_stream->stopping) {
 			urb_stream->stall_reported = false;
@@ -1705,12 +1724,21 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 
 		/*
 		 * Fall back to the start timestamp until the first completion
-		 * arrives: last_callback_time is legitimately 0 in that window,
-		 * and treating it as a stall would fire on every start.
+		 * arrives: last_callback_time is legitimately 0 in that window.
+		 * That window gets its own, longer threshold
+		 * (JOCKEY3_WATCHDOG_STARTUP_GRACE_MS) rather than
+		 * JOCKEY3_WATCHDOG_STALL_MS: traced on hardware, the first
+		 * completion after a restart routinely lands 20-23ms after
+		 * jockey3_start_urbs(), a real, reproducible cost of the
+		 * restart itself rather than a fault, and JOCKEY3_WATCHDOG_STALL_MS
+		 * sits right at the edge of that band. See
+		 * JOCKEY3_WATCHDOG_STARTUP_GRACE_MS's own comment.
 		 */
 		last = atomic64_read(&urb_stream->last_callback_time);
-		if (!last)
+		if (!last) {
 			last = atomic64_read(&urb_stream->urbs_started_time);
+			threshold_ms = JOCKEY3_WATCHDOG_STARTUP_GRACE_MS;
+		}
 		if (!last)
 			return;		/* never started; nothing to watch yet */
 
@@ -1747,7 +1775,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 
 		open = urb_stream->substream;
 
-		if (age_ns > (u64)JOCKEY3_WATCHDOG_STALL_MS * NSEC_PER_MSEC) {
+		if (age_ns > threshold_ms * NSEC_PER_MSEC) {
 			if (!urb_stream->stall_reported) {
 				urb_stream->stall_reported = true;
 				urb_stream->stall_since = last;
