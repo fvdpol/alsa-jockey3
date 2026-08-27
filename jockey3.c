@@ -1943,8 +1943,9 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  * Shared by jockey3_pcm_hw_params()'s post-rate-change check,
  * jockey3_pcm_prepare()'s liveness check, and jockey3_watchdog_check()'s
  * mid-stream stall detection. All call sites confirm the direction is actually
- * stalled before calling this (over JOCKEY3_PREPARE_CONFIRM_MS for the ioctl
- * paths, over JOCKEY3_WATCHDOG_STALL_MS for the watchdog), and a direction
+ * stalled before calling this (over JOCKEY3_WATCHDOG_STARTUP_GRACE_MS for the
+ * rate-change check, JOCKEY3_PREPARE_CONFIRM_MS for .prepare's own liveness
+ * check, JOCKEY3_WATCHDOG_STALL_MS for the watchdog), and a direction
  * found alive at entry -- for instance because a sibling call already
  * restarted the shared URB ring -- returns immediately, at no cost beyond one
  * 1 ms sample and without a second light retry glitching a stream that just
@@ -2507,9 +2508,19 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	 * so that, if both directions died together, its call (which restarts
 	 * the shared URB ring for both) makes the capture call below a cheap
 	 * no-op instead of a second, redundant restart.
+	 *
+	 * Uses JOCKEY3_WATCHDOG_STARTUP_GRACE_MS, not JOCKEY3_PREPARE_CONFIRM_MS:
+	 * this is the same "first completion after a restart" wait that constant's
+	 * own comment describes, and JT-RATE-003's 20260827 20k-change soak
+	 * (re/rate_change_stall.md) measured this exact check timing out at 50 ms
+	 * on ~3.5% of rate changes on arm64-prod at N=8 -- a light URB restart
+	 * every time, never escalating, so harmless but needlessly frequent given
+	 * 50 ms was shown to have almost no margin over the real startup latency.
 	 */
-	playback_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_PLAYBACK, 50);
-	capture_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE, 50);
+	playback_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_PLAYBACK,
+							 JOCKEY3_WATCHDOG_STARTUP_GRACE_MS);
+	capture_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE,
+							JOCKEY3_WATCHDOG_STARTUP_GRACE_MS);
 	capture_open = jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE);
 
 	if (!playback_alive || (!capture_alive && capture_open)) {
