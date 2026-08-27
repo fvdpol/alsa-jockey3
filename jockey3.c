@@ -148,8 +148,8 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * keyed off these constants below is written to degenerate to the original
  * single sub-packet code path at N=1.
  */
-#define JOCKEY3_PLAYBACK_N	8
-#define JOCKEY3_CAPTURE_N	8
+#define JOCKEY3_PLAYBACK_N	1
+#define JOCKEY3_CAPTURE_N	1
 
 #define JOCKEY3_PLAYBACK_XFER_SIZE	(JOCKEY3_PLAYBACK_N * PLOYTEC_PKT_SIZE)
 #define JOCKEY3_CAPTURE_XFER_SIZE	(JOCKEY3_CAPTURE_N * PLOYTEC_PKT_SIZE)
@@ -224,9 +224,10 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * meaningfully weaken detection of a device that is actually not coming
  * back -- that fault stays wedged far longer than an extra 180 ms would
  * ever paper over -- while removing the false positive on ordinary rate
- * changes. Applied wherever last_callback_time is 0 and urbs_started_time
- * is used instead: see jockey3_watchdog_check() and
- * jockey3_watchdog_next_delay_ms().
+ * changes. Applied for the whole fixed window after urbs_started_time,
+ * elapsed-time-based rather than keyed off last_callback_time being 0 --
+ * see jockey3_watchdog_check()'s kernel-doc for why -- in both that
+ * function and jockey3_watchdog_next_delay_ms().
  */
 #define JOCKEY3_WATCHDOG_STARTUP_GRACE_MS	200
 
@@ -834,11 +835,26 @@ static void jockey3_capture_callback(struct urb *urb)
 	bool active = false;
 	bool stopping;
 	int sp, ret;
+	enum jockey3_urb_state urb_check;
+	u64 now = ktime_get_mono_fast_ns();
 
 	atomic_dec(&urb_stream->urbs_in_flight);
-	atomic64_set(&urb_stream->last_callback_time, ktime_get_mono_fast_ns());
+	atomic64_set(&urb_stream->last_callback_time, now);
 
-	switch (jockey3_urb_check(urb)) {
+	/*
+	 * TEMPORARY DEBUG -- do not merge into main. Capture-side counterpart
+	 * of jockey3_playback_callback()'s "phantom completion" trace_printk --
+	 * see that one's comment. All three onsets found so far are Playback,
+	 * but Capture shares the same unconditional-set-before-status-check
+	 * shape, so it is instrumented too rather than assumed innocent.
+	 */
+	urb_check = jockey3_urb_check(urb);
+	if (now - atomic64_read(&urb_stream->urbs_started_time) < 5 * NSEC_PER_MSEC)
+		trace_printk("cb dir=capture ts=%llu status=%d urb_check=%d since_start_us=%llu\n",
+			     now, urb->status, urb_check,
+			     div_u64(now - atomic64_read(&urb_stream->urbs_started_time), 1000));
+
+	switch (urb_check) {
 	case JOCKEY3_URB_STOPPED:
 		scoped_guard(spinlock_irqsave, &urb_stream->lock)
 			stopping = urb_stream->stopping;
@@ -1040,11 +1056,28 @@ static void jockey3_playback_callback(struct urb *urb)
 	bool active = false;
 	bool stopping;
 	int i, sp, ret;
+	enum jockey3_urb_state urb_check;
+	u64 now = ktime_get_mono_fast_ns();
 
 	atomic_dec(&urb_stream->urbs_in_flight);
-	atomic64_set(&urb_stream->last_callback_time, ktime_get_mono_fast_ns());
+	atomic64_set(&urb_stream->last_callback_time, now);
 
-	switch (jockey3_urb_check(urb)) {
+	/*
+	 * TEMPORARY DEBUG -- do not merge into main. Ground truth for the
+	 * 2026-08-27 "phantom completion defeats startup grace" investigation
+	 * (re/rate_change_stall.md): every N=1 arm64-prod stall found so far
+	 * shows last_callback_time landing ~100-130us after urbs_started_time,
+	 * far too fast to be the real first completion (independently measured
+	 * at ~20-23ms). Gated to the first 5ms after a restart so this does not
+	 * flood the ring buffer at N=1's completion rate over a full run.
+	 */
+	urb_check = jockey3_urb_check(urb);
+	if (now - atomic64_read(&urb_stream->urbs_started_time) < 5 * NSEC_PER_MSEC)
+		trace_printk("cb dir=playback ts=%llu status=%d urb_check=%d since_start_us=%llu\n",
+			     now, urb->status, urb_check,
+			     div_u64(now - atomic64_read(&urb_stream->urbs_started_time), 1000));
+
+	switch (urb_check) {
 	case JOCKEY3_URB_STOPPED:
 		scoped_guard(spinlock_irqsave, &urb_stream->lock)
 			stopping = urb_stream->stopping;
@@ -1228,14 +1261,25 @@ static unsigned long jockey3_watchdog_next_delay_ms(const struct jockey3_pcm_urb
 	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
 	u64 now, remaining_ns;
 
-	if (!last) {
-		last = started;
-		threshold_ms = JOCKEY3_WATCHDOG_STARTUP_GRACE_MS;
-	}
-	if (!last)
+	if (!started)
 		return JOCKEY3_WATCHDOG_POLL_MS;
 
 	now = ktime_get_mono_fast_ns();
+
+	/*
+	 * Mirror jockey3_watchdog_check()'s own time-based grace window
+	 * (see its kernel-doc): while still inside it, the deadline to chase
+	 * is urbs_started_time + GRACE_MS regardless of whether an early
+	 * completion has already advanced last_callback_time, or this would
+	 * schedule a tight re-poll off a completion that does not end grace.
+	 */
+	if (now - started < JOCKEY3_WATCHDOG_STARTUP_GRACE_MS * NSEC_PER_MSEC) {
+		last = started;
+		threshold_ms = JOCKEY3_WATCHDOG_STARTUP_GRACE_MS;
+	} else if (!last) {
+		last = started;
+	}
+
 	remaining_ns = last + threshold_ms * NSEC_PER_MSEC - now;
 
 	if ((s64)remaining_ns <= 0)
@@ -1694,21 +1738,34 @@ static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *
  * empty one means "nothing could be submitted".
  *
  * The onset log line also tags itself "startup" or "steady-state", mirroring
- * which threshold caught it (JOCKEY3_WATCHDOG_STARTUP_GRACE_MS via the
- * last_callback_time == 0 fallback below, or JOCKEY3_WATCHDOG_STALL_MS once
- * at least one completion has landed since the last start). A "startup"
+ * which threshold caught it: JOCKEY3_WATCHDOG_STARTUP_GRACE_MS for the whole
+ * fixed window after jockey3_start_urbs(), elapsed-time-based (see below),
+ * or JOCKEY3_WATCHDOG_STALL_MS once that window has passed. A "startup"
  * onset means the grace period itself was exceeded -- a longer or more
  * frequent startup latency than JOCKEY3_WATCHDOG_STARTUP_GRACE_MS's own
  * comment measured, not a mid-stream fault. A "steady-state" onset means the
  * stream had been completing URBs normally and then stopped, which is the
  * only shape that should be treated as a real, unexpected stall.
+ *
+ * Deliberately time-based rather than keyed off the first completion
+ * (last_callback_time == 0): traced on hardware (re/rate_change_stall.md's
+ * 2026-08-27 follow-up), an N=1 rate change routinely gets 1-2 URBs
+ * completed within ~150us of jockey3_start_urbs() -- almost certainly a
+ * small hardware-side FIFO draining, not the device's audio pipeline having
+ * caught up -- while the real, already-established ~20-23ms resync latency
+ * this grace period exists for is still ongoing. Keying startup detection
+ * off "has a completion landed yet" let that first trickle flip the check to
+ * the tight JOCKEY3_WATCHDOG_STALL_MS before the resync was actually done,
+ * which is what caused the false positives this comment now guards against.
+ * Elapsed time since urbs_started_time is a signal early completions cannot
+ * corrupt.
  */
 static void jockey3_watchdog_check(struct jockey3_chip *chip, const int direction)
 {
 	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
 	const char *type = direction == SNDRV_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
 	bool log_onset = false, log_recovery = false;
-	u64 now, last, age_ns, outage_ns = 0;
+	u64 now, last, started, age_ns, outage_ns = 0;
 	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
 	bool open = false, startup = false;
 
@@ -1733,35 +1790,36 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 		}
 
 		/*
-		 * Fall back to the start timestamp until the first completion
-		 * arrives: last_callback_time is legitimately 0 in that window.
-		 * That window gets its own, longer threshold
-		 * (JOCKEY3_WATCHDOG_STARTUP_GRACE_MS) rather than
-		 * JOCKEY3_WATCHDOG_STALL_MS: traced on hardware, the first
-		 * completion after a restart routinely lands 20-23ms after
-		 * jockey3_start_urbs(), a real, reproducible cost of the
-		 * restart itself rather than a fault, and JOCKEY3_WATCHDOG_STALL_MS
-		 * sits right at the edge of that band. See
-		 * JOCKEY3_WATCHDOG_STARTUP_GRACE_MS's own comment.
+		 * Read both candidate baselines before sampling @now, whichever
+		 * one ends up used below: a completion landing on another CPU
+		 * between reading a baseline and reading @now would otherwise let
+		 * "now - last" underflow to a u64 near its max instead of going
+		 * negative. Reading both first guarantees @now is taken no
+		 * earlier than either.
 		 */
+		started = atomic64_read(&urb_stream->urbs_started_time);
 		last = atomic64_read(&urb_stream->last_callback_time);
-		if (!last) {
-			last = atomic64_read(&urb_stream->urbs_started_time);
-			threshold_ms = JOCKEY3_WATCHDOG_STARTUP_GRACE_MS;
-			startup = true;
-		}
-		if (!last)
+		now = ktime_get_mono_fast_ns();
+
+		if (!started)
 			return;		/* never started; nothing to watch yet */
 
-		/*
-		 * Sampled after @last, not before: a URB completion on another CPU
-		 * can land between the two reads and advance last_callback_time
-		 * past a @now taken first, and "now - last" then underflows to a
-		 * u64 near its max instead of going negative. Reading @last first
-		 * guarantees @now is taken no earlier than the completion that
-		 * produced it.
-		 */
-		now = ktime_get_mono_fast_ns();
+		if (now - started < JOCKEY3_WATCHDOG_STARTUP_GRACE_MS * NSEC_PER_MSEC) {
+			/*
+			 * Still inside the fixed post-restart grace window --
+			 * measured from urbs_started_time regardless of whether
+			 * last_callback_time has already advanced. See this
+			 * function's kernel-doc for why an early completion is
+			 * not treated as proof the window is over.
+			 */
+			last = started;
+			threshold_ms = JOCKEY3_WATCHDOG_STARTUP_GRACE_MS;
+			startup = true;
+		} else if (!last) {
+			/* Past the grace window and still never completed once */
+			last = started;
+		}
+
 		age_ns = now - last;
 
 		/*
