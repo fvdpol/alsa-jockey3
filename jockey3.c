@@ -1692,6 +1692,16 @@ static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *
  * which is exactly the case that must not go unnoticed. The count is reported
  * as evidence instead -- a full ring means "submitted, never returned", an
  * empty one means "nothing could be submitted".
+ *
+ * The onset log line also tags itself "startup" or "steady-state", mirroring
+ * which threshold caught it (JOCKEY3_WATCHDOG_STARTUP_GRACE_MS via the
+ * last_callback_time == 0 fallback below, or JOCKEY3_WATCHDOG_STALL_MS once
+ * at least one completion has landed since the last start). A "startup"
+ * onset means the grace period itself was exceeded -- a longer or more
+ * frequent startup latency than JOCKEY3_WATCHDOG_STARTUP_GRACE_MS's own
+ * comment measured, not a mid-stream fault. A "steady-state" onset means the
+ * stream had been completing URBs normally and then stopped, which is the
+ * only shape that should be treated as a real, unexpected stall.
  */
 static void jockey3_watchdog_check(struct jockey3_chip *chip, const int direction)
 {
@@ -1700,7 +1710,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 	bool log_onset = false, log_recovery = false;
 	u64 now, last, age_ns, outage_ns = 0;
 	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
-	bool open = false;
+	bool open = false, startup = false;
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		/*
@@ -1738,6 +1748,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 		if (!last) {
 			last = atomic64_read(&urb_stream->urbs_started_time);
 			threshold_ms = JOCKEY3_WATCHDOG_STARTUP_GRACE_MS;
+			startup = true;
 		}
 		if (!last)
 			return;		/* never started; nothing to watch yet */
@@ -1782,14 +1793,15 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 		 * lets a stall be classified without waiting for it to also hit
 		 * the edge-triggered log.
 		 */
-		trace_printk("wdcheck dir=%d last_cb=%llu urbs_started=%llu last_used=%llu now=%llu age_ms=%llu stall_reported=%d in_flight=%d disconnected=%d\n",
+		trace_printk("wdcheck dir=%d last_cb=%llu urbs_started=%llu last_used=%llu now=%llu age_ms=%llu stall_reported=%d in_flight=%d disconnected=%d startup=%d\n",
 			     direction,
 			     atomic64_read(&urb_stream->last_callback_time),
 			     atomic64_read(&urb_stream->urbs_started_time),
 			     last, now, div_u64(age_ns, NSEC_PER_MSEC),
 			     urb_stream->stall_reported,
 			     atomic_read(&urb_stream->urbs_in_flight),
-			     jockey3_is_disconnected(chip));
+			     jockey3_is_disconnected(chip),
+			     startup);
 
 		open = urb_stream->substream;
 
@@ -1814,10 +1826,11 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 
 	if (log_onset)
 		dev_warn(&chip->intf0->dev,
-			 "%s URB stream stalled: no completion for %llu ms (%d URBs in flight, substream %s)\n",
+			 "%s URB stream stalled: no completion for %llu ms (%d URBs in flight, substream %s, %s)\n",
 			 type, div_u64(age_ns, NSEC_PER_MSEC),
 			 atomic_read(&urb_stream->urbs_in_flight),
-			 open ? "open" : "idle");
+			 open ? "open" : "idle",
+			 startup ? "startup" : "steady-state");
 	else if (log_recovery)
 		dev_warn(&chip->intf0->dev, "%s URB stream recovered after %llu ms\n",
 			 type, div_u64(outage_ns, NSEC_PER_MSEC));
