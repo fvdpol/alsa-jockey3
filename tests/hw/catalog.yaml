@@ -707,6 +707,56 @@ cases:
       standing in for; each former SOAK case moved into the area it actually
       belongs to and kept its level: L5.
 
+  - id: JT-PCM-009
+    title: Xrun injection and recovery
+    area: PCM
+    level: L3
+    mode: automated
+    status: implemented
+    requires: [device, root, sox]
+    exec: cases/pcm_xrun_recovery.py
+    args: [playback]
+    params:
+      rate: 48000
+      seconds: 6
+      injections: 3
+    metrics:
+      - injections_requested
+      - injections_confirmed
+      - xruns
+      - avail_max
+    pass: >
+      Every injected xrun raises the substream's xrun counter, and
+      aplay/arecord recovers from each one and runs to completion.
+    expect_dmesg:
+      - 'Playback URB has stalled\.'
+      - 'Capture URB has stalled\.'
+    notes: >
+      No other case in this suite produces an xrun on purpose, so
+      jockey3_pcm_prepare()'s liveness check -- which ALSA core runs on
+      every xrun recovery -- had no case exercising it at all. Uses
+      CONFIG_SND_PCM_XRUN_DEBUG's xrun_injection proc file (root-owned,
+      new jockey3-testctl verb xrun-inject) to force a real xrun on the
+      open substream via snd_pcm_stop_xrun(), the same core function a
+      genuine buffer underrun/overrun reaches, at chosen points during an
+      otherwise ordinary playback or capture run.
+
+      Exercises the FAST recovery path only. This driver's URBs run free
+      of PCM trigger state (see jockey3.c's top-of-file DOC), so an
+      ALSA-core-only xrun leaves them untouched --
+      jockey3_check_urb_stream_alive() finds the stream alive immediately,
+      and jockey3_pcm_prepare()'s liveness-check/recovery branch
+      (JOCKEY3_STREAM_STARTUP_GRACE_MS) is never reached. There is no
+      userspace-safe way to force a genuine URB-level stall on demand to
+      exercise that branch too -- that class of event is covered
+      statistically by rate-change soak runs instead, per
+      re/rate_change_stall.md's 2026-08-27 follow-ups.
+
+      Direction is chosen by args, playback by default -- a profile that
+      also wants capture coverage overrides args: [capture] for its own
+      entry, the same way JT-PCM-002/004 both point at cases/pcm.py with
+      different args rather than being two separate exec files.
+
   # ------------------------------------------------------------------- RATE
 
   - id: JT-RATE-001

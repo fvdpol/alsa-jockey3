@@ -103,6 +103,9 @@ usage() {
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
 #   printk-console <1-8>   set the console loglevel
 #   xrun-debug 0|1        make the ALSA core log every xrun to the kernel log
+#   xrun-inject pcm0p|pcm0c   force an xrun on that substream's sub0, via
+#                          CONFIG_SND_PCM_XRUN_DEBUG's xrun_injection file
+#                          (a safe no-op if it is not open and running)
 #   trace-callbacks start  begin function_graph tracing of the two URB
 #                          completion handlers (JT-PERF-001)
 #   trace-callbacks collect  stop tracing, print the trace buffer, reset
@@ -356,6 +359,32 @@ xrun-debug)
 	done
 	[ "$n" -gt 0 ] || die "no xrun_debug under $proc (CONFIG_SND_PCM_XRUN_DEBUG?)"
 	echo "xrun_debug=$1 on $n substream(s) of $(basename "$(readlink -f "$proc")")"
+	exit 0
+	;;
+
+xrun-inject)
+	# .../pcm0{p,c}/sub0/xrun_injection is root-owned (mode 0200,
+	# CONFIG_SND_PCM_XRUN_DEBUG): any write to it calls snd_pcm_stop_xrun()
+	# on that substream directly -- the same core function a genuine
+	# buffer underrun/overrun reaches -- letting JT-PCM-009
+	# (cases/pcm_xrun_recovery.py) force one deterministically rather than
+	# wait for one to happen. Safe against a closed or not-yet-running
+	# substream: snd_pcm_stop_xrun() checks substream->runtime and
+	# snd_pcm_running() itself and is a no-op otherwise.
+	#
+	# Only pcm0p or pcm0c is accepted, sub0 is implicit -- this device has
+	# exactly one substream per direction, and a bare pcm/sub pair taken
+	# from the caller would let a case aim this at any PCM on the system,
+	# not just this card's.
+	[ $# -eq 1 ] || die "xrun-inject needs pcm0p or pcm0c"
+	case "$1" in
+	pcm0p | pcm0c) ;;
+	*) die "xrun-inject only accepts pcm0p or pcm0c" ;;
+	esac
+	proc=$(card_proc) || die "no Jockey 3 card found in /proc/asound"
+	f="$proc/$1/sub0/xrun_injection"
+	[ -e "$f" ] || die "no $f (CONFIG_SND_PCM_XRUN_DEBUG not set?)"
+	printf '1\n' > "$f" || die "cannot write $f"
 	exit 0
 	;;
 

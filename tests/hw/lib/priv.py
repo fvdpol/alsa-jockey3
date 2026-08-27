@@ -122,6 +122,16 @@ def printk_console(level, timeout=20):
     return rc == 0, (err or "").strip()
 
 
+def xrun_inject(pcm, timeout=20):
+    """Force an xrun on the open substream named pcm ('pcm0p' or 'pcm0c').
+
+    One write to CONFIG_SND_PCM_XRUN_DEBUG's xrun_injection file, calling
+    snd_pcm_stop_xrun() directly -- a safe no-op if that substream is closed
+    or not currently running. See JT-PCM-009 (cases/pcm_xrun_recovery.py).
+    """
+    return call("xrun-inject", pcm, timeout=timeout)
+
+
 def trace_callbacks_start(timeout=20):
     """Begin function_graph tracing of the two URB completion handlers."""
     return call("trace-callbacks", "start", timeout=timeout)
