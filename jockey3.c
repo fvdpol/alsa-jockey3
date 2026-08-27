@@ -192,9 +192,10 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * gives up on the open substream and returns -EIO to userspace on its own.
  *
  * Note the contrast with jockey3_check_urb_stream_alive(), whose window is 1 ms:
- * that one is sampled repeatedly inside a 50 ms deadline and only has to answer
- * "has anything completed just now", whereas a single background sample has to
- * be robust against everything a loaded system can do to a workqueue.
+ * that one is sampled repeatedly inside a JOCKEY3_STREAM_STARTUP_GRACE_MS
+ * deadline and only has to answer "has anything completed just now", whereas
+ * a single background sample has to be robust against everything a loaded
+ * system can do to a workqueue.
  *
  * jockey3_watchdog_arm() self-reschedules from the nearer of the two
  * directions' last-activity deadlines, rather than always waiting the full
@@ -211,25 +212,21 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_WATCHDOG_MIN_POLL_MS	10
 #define JOCKEY3_WATCHDOG_STALL_MS	20
 /*
- * Separate, longer grace period for the window between jockey3_start_urbs()
- * and this direction's first completion since that start -- distinct from
- * JOCKEY3_WATCHDOG_STALL_MS, which governs steady-state silence between two
- * completions. Traced on hardware (re/rate_change_stall.md's 2026-08-26
- * sections): the first completion after a restart routinely lands 20-23ms
- * after jockey3_start_urbs(), a tight and highly reproducible band on both
- * x86_64-prod and arm64-prod -- right at, and sometimes just past,
- * JOCKEY3_WATCHDOG_STALL_MS's edge, so a normal rate change occasionally
- * trips the same threshold meant for an established stream going silent.
- * 200 ms is roughly 10x the worst startup latency observed, so it does not
- * meaningfully weaken detection of a device that is actually not coming
- * back -- that fault stays wedged far longer than an extra 180 ms would
- * ever paper over -- while removing the false positive on ordinary rate
- * changes. Applied for the whole fixed window after urbs_started_time,
- * elapsed-time-based rather than keyed off last_callback_time being 0 --
- * see jockey3_watchdog_check()'s kernel-doc for why -- in both that
- * function and jockey3_watchdog_next_delay_ms().
+ * The single time budget for every "has this direction reached steady
+ * streaming yet" check, covering the window from jockey3_start_urbs() until
+ * the device is proven alive -- distinct from JOCKEY3_WATCHDOG_STALL_MS,
+ * which governs silence between two completions on an already-established
+ * stream. See every caller of this constant for the specific check each one
+ * makes.
+ *
+ * The time from jockey3_start_urbs() to the first real completion is not a
+ * tight figure: measured on hardware from under 1ms up to several tens of
+ * ms, depending on platform and packets-per-URB. 200ms gives that ample
+ * margin without meaningfully weakening detection of a device that is
+ * actually not coming back -- that fault stays wedged far longer than an
+ * extra couple hundred ms would ever paper over.
  */
-#define JOCKEY3_WATCHDOG_STARTUP_GRACE_MS	200
+#define JOCKEY3_STREAM_STARTUP_GRACE_MS	200
 
 /*
  * Bounded-retry budget for jockey3_recover_urb_stream(), chip-wide because the
@@ -250,18 +247,6 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  */
 #define JOCKEY3_RECOVERY_MAX_ATTEMPTS	3
 #define JOCKEY3_RECOVERY_WINDOW_MS	60000
-
-/*
- * How long jockey3_pcm_prepare() polls before believing a stream has stalled.
- *
- * .prepare runs on every xrun recovery, so a false positive there would disrupt
- * a stream that is working. A healthy direction confirms itself within one
- * URB span -- N packet intervals, comfortably under 1 ms at the current
- * JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N and any supported rate -- so the
- * normal cost is nil, while 50 ms of complete silence is many consecutive
- * missed URBs and cannot happen on a stream that is still running.
- */
-#define JOCKEY3_PREPARE_CONFIRM_MS	50
 
 /* Chip flags */
 #define JOCKEY3_FLAG_DISCONNECTED	0
@@ -1245,7 +1230,7 @@ static void jockey3_midi_in_callback(struct urb *urb)
 
 /*
  * How long until a direction's watchdog deadline (last activity plus
- * JOCKEY3_WATCHDOG_STALL_MS, or JOCKEY3_WATCHDOG_STARTUP_GRACE_MS if no
+ * JOCKEY3_WATCHDOG_STALL_MS, or JOCKEY3_STREAM_STARTUP_GRACE_MS if no
  * completion has arrived since the last start), in ms clamped to
  * [JOCKEY3_WATCHDOG_MIN_POLL_MS, JOCKEY3_WATCHDOG_POLL_MS]. Returns
  * JOCKEY3_WATCHDOG_POLL_MS if the direction has never started (no deadline to
@@ -1273,9 +1258,9 @@ static unsigned long jockey3_watchdog_next_delay_ms(const struct jockey3_pcm_urb
 	 * completion has already advanced last_callback_time, or this would
 	 * schedule a tight re-poll off a completion that does not end grace.
 	 */
-	if (now - started < JOCKEY3_WATCHDOG_STARTUP_GRACE_MS * NSEC_PER_MSEC) {
+	if (now - started < JOCKEY3_STREAM_STARTUP_GRACE_MS * NSEC_PER_MSEC) {
 		last = started;
-		threshold_ms = JOCKEY3_WATCHDOG_STARTUP_GRACE_MS;
+		threshold_ms = JOCKEY3_STREAM_STARTUP_GRACE_MS;
 	} else if (!last) {
 		last = started;
 	}
@@ -1738,27 +1723,24 @@ static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *
  * empty one means "nothing could be submitted".
  *
  * The onset log line also tags itself "startup" or "steady-state", mirroring
- * which threshold caught it: JOCKEY3_WATCHDOG_STARTUP_GRACE_MS for the whole
+ * which threshold caught it: JOCKEY3_STREAM_STARTUP_GRACE_MS for the whole
  * fixed window after jockey3_start_urbs(), elapsed-time-based (see below),
  * or JOCKEY3_WATCHDOG_STALL_MS once that window has passed. A "startup"
  * onset means the grace period itself was exceeded -- a longer or more
- * frequent startup latency than JOCKEY3_WATCHDOG_STARTUP_GRACE_MS's own
+ * frequent startup latency than JOCKEY3_STREAM_STARTUP_GRACE_MS's own
  * comment measured, not a mid-stream fault. A "steady-state" onset means the
  * stream had been completing URBs normally and then stopped, which is the
  * only shape that should be treated as a real, unexpected stall.
  *
  * Deliberately time-based rather than keyed off the first completion
- * (last_callback_time == 0): traced on hardware (re/rate_change_stall.md's
- * 2026-08-27 follow-up), an N=1 rate change routinely gets 1-2 URBs
- * completed within ~150us of jockey3_start_urbs() -- almost certainly a
- * small hardware-side FIFO draining, not the device's audio pipeline having
- * caught up -- while the real, already-established ~20-23ms resync latency
- * this grace period exists for is still ongoing. Keying startup detection
- * off "has a completion landed yet" let that first trickle flip the check to
- * the tight JOCKEY3_WATCHDOG_STALL_MS before the resync was actually done,
- * which is what caused the false positives this comment now guards against.
- * Elapsed time since urbs_started_time is a signal early completions cannot
- * corrupt.
+ * (last_callback_time == 0): at low N a restart can get one or two URBs
+ * completed within well under a millisecond of jockey3_start_urbs(), almost
+ * certainly a small hardware-side FIFO draining rather than the device's
+ * audio pipeline actually catching up, while the real resync is still in
+ * progress. A completion landing that early is not proof of steady flow, so
+ * it must not be able to end the grace window early the way keying off
+ * last_callback_time == 0 would let it. Elapsed time since urbs_started_time
+ * is a signal that trickle cannot corrupt.
  */
 static void jockey3_watchdog_check(struct jockey3_chip *chip, const int direction)
 {
@@ -1804,7 +1786,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 		if (!started)
 			return;		/* never started; nothing to watch yet */
 
-		if (now - started < JOCKEY3_WATCHDOG_STARTUP_GRACE_MS * NSEC_PER_MSEC) {
+		if (now - started < JOCKEY3_STREAM_STARTUP_GRACE_MS * NSEC_PER_MSEC) {
 			/*
 			 * Still inside the fixed post-restart grace window --
 			 * measured from urbs_started_time regardless of whether
@@ -1813,7 +1795,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 			 * not treated as proof the window is over.
 			 */
 			last = started;
-			threshold_ms = JOCKEY3_WATCHDOG_STARTUP_GRACE_MS;
+			threshold_ms = JOCKEY3_STREAM_STARTUP_GRACE_MS;
 			startup = true;
 		} else if (!last) {
 			/* Past the grace window and still never completed once */
@@ -2001,9 +1983,10 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  * Shared by jockey3_pcm_hw_params()'s post-rate-change check,
  * jockey3_pcm_prepare()'s liveness check, and jockey3_watchdog_check()'s
  * mid-stream stall detection. All call sites confirm the direction is actually
- * stalled before calling this (over JOCKEY3_WATCHDOG_STARTUP_GRACE_MS for the
- * rate-change check, JOCKEY3_PREPARE_CONFIRM_MS for .prepare's own liveness
- * check, JOCKEY3_WATCHDOG_STALL_MS for the watchdog), and a direction
+ * stalled before calling this -- JOCKEY3_STREAM_STARTUP_GRACE_MS for every
+ * ioctl path (the rate-change check, .prepare's own liveness check, and this
+ * function's own post-restart re-confirm below), JOCKEY3_WATCHDOG_STALL_MS
+ * for the watchdog's mid-stream detection -- and a direction
  * found alive at entry -- for instance because a sibling call already
  * restarted the shared URB ring -- returns immediately, at no cost beyond one
  * 1 ms sample and without a second light retry glitching a stream that just
@@ -2107,7 +2090,7 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 		jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip), context);
 	}
 
-	if (jockey3_wait_urb_stream_started(chip, direction, JOCKEY3_PREPARE_CONFIRM_MS))
+	if (jockey3_wait_urb_stream_started(chip, direction, JOCKEY3_STREAM_STARTUP_GRACE_MS))
 		goto out;
 
 	if (!jockey3_recovery_budget_take(chip)) {
@@ -2126,7 +2109,7 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	if (ret < 0)
 		goto out;
 
-	if (!jockey3_wait_urb_stream_started(chip, direction, JOCKEY3_PREPARE_CONFIRM_MS))
+	if (!jockey3_wait_urb_stream_started(chip, direction, JOCKEY3_STREAM_STARTUP_GRACE_MS))
 		dev_err(&chip->intf0->dev,
 			"%s stream still stalled after full USB reset; hardware may need power-cycling (%s)\n",
 			type, context);
@@ -2352,13 +2335,14 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 
 	/*
 	 * Confirm, and recover, outside rate_mutex on purpose: polling would
-	 * otherwise hold the mutex for JOCKEY3_PREPARE_CONFIRM_MS, and recovery
-	 * may escalate to a queued USB reset, whose jockey3_pre_reset() and
-	 * jockey3_post_reset() need to acquire the mutex themselves to complete.
+	 * otherwise hold the mutex for JOCKEY3_STREAM_STARTUP_GRACE_MS, and
+	 * recovery may escalate to a queued USB reset, whose jockey3_pre_reset()
+	 * and jockey3_post_reset() need to acquire the mutex themselves to
+	 * complete.
 	 */
 	if (stalled)
 		stalled = !jockey3_wait_urb_stream_started(chip, substream->stream,
-							  JOCKEY3_PREPARE_CONFIRM_MS);
+							  JOCKEY3_STREAM_STARTUP_GRACE_MS);
 
 	if (stalled) {
 		const char *context = substream->stream == SNDRV_PCM_STREAM_CAPTURE ?
@@ -2567,18 +2551,13 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	 * the shared URB ring for both) makes the capture call below a cheap
 	 * no-op instead of a second, redundant restart.
 	 *
-	 * Uses JOCKEY3_WATCHDOG_STARTUP_GRACE_MS, not JOCKEY3_PREPARE_CONFIRM_MS:
-	 * this is the same "first completion after a restart" wait that constant's
-	 * own comment describes, and JT-RATE-003's 20260827 20k-change soak
-	 * (re/rate_change_stall.md) measured this exact check timing out at 50 ms
-	 * on ~3.5% of rate changes on arm64-prod at N=8 -- a light URB restart
-	 * every time, never escalating, so harmless but needlessly frequent given
-	 * 50 ms was shown to have almost no margin over the real startup latency.
+	 * Uses JOCKEY3_STREAM_STARTUP_GRACE_MS -- see that constant's own
+	 * comment for why this budget is wide.
 	 */
 	playback_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_PLAYBACK,
-							 JOCKEY3_WATCHDOG_STARTUP_GRACE_MS);
+							 JOCKEY3_STREAM_STARTUP_GRACE_MS);
 	capture_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE,
-							JOCKEY3_WATCHDOG_STARTUP_GRACE_MS);
+							JOCKEY3_STREAM_STARTUP_GRACE_MS);
 	capture_open = jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE);
 
 	if (!playback_alive || (!capture_alive && capture_open)) {
