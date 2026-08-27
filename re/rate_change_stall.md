@@ -131,6 +131,136 @@
 > number. Not yet re-validated on hardware; still no same-build `N=1`/`N=2`
 > control run either (same open item as the 08-26 follow-up above).
 >
+> **2026-08-27 follow-up #2: N=1 exposed a "2-fast-completions-then-a-real-gap"
+> pattern after every restart, not just after a rate change -- and it broke
+> the watchdog's startup/steady-state classification in a way N=8 never did.**
+> Investigating an N=1 vs. N=8 comparison run (`JT-RATE-001`, dozens of
+> changes each, part of the N=1/2/4/8 control-run series this document's
+> first 2026-08-27 follow-up called for): N=8 was clean, but arm64-prod at
+> N=1 logged far *more* `watchdog_onset_steady_state` events than N=8 ever
+> had (8.75% of changes in one 240-change run), the opposite of the naive
+> expectation that a smaller N should leave more margin against
+> `JOCKEY3_WATCHDOG_STALL_MS` (20 ms, fixed, not scaled with N). It does --
+> worst-case URB span is 83-227us at N=1 (20 ms = ~88-240x that) vs.
+> 0.67-1.81ms at N=8 (20 ms = ~11-30x) -- so the extra onsets are not a
+> detection-margin artifact. Something real was different.
+>
+> Root-caused with a gated `TEMPORARY DEBUG` `trace_printk()` added to both
+> `jockey3_playback_callback()` and `jockey3_capture_callback()`, logging
+> `urb->status`/`jockey3_urb_check()`'s result/time-since-`urbs_started_time`
+> for the first 5ms after every restart (`jockey3.c`, `dev/streaming-overhead`,
+> not yet committed as of this writing). First hypothesis -- a stopped/error
+> URB completion slipping through and falsely proving the stream alive --
+> was refuted immediately: every early completion logged `status=0`,
+> `urb_check=0` (`JOCKEY3_URB_OK`). They are genuine, successful completions.
+>
+> **The actual pattern, measured across all 201 restart groups in one
+> 200-change run (`arm64-prod/20260827T192002Z-functional`)**: every single
+> restart at N=1 gets **exactly 2** Playback completions landing ~55-170us
+> after `jockey3_start_urbs()` -- almost certainly a small hardware-side FIFO
+> on the device draining whatever was already queued -- followed by a real,
+> highly variable gap before the next one:
+>
+> - 119/201 restarts (59%): no 3rd completion at all within 5ms of the restart.
+> - The rest resume anywhere from ~150us (effectively continuous) up to
+>   several ms later, with no obvious clustering -- a wide, continuous
+>   distribution, not a bimodal "fine" vs. "broken" split.
+> - 29/200 rate changes in that run (14.5%) happened to have that gap exceed
+>   the fixed 20 ms `JOCKEY3_WATCHDOG_STALL_MS` and got logged as a stall.
+>   The other 171 are silent, sub-threshold instances of the exact same
+>   underlying event -- the flagged onset rate is only the visible tail of a
+>   distribution that is present on effectively every restart, not a
+>   distinct failure mode affecting 14.5% of changes.
+>
+> A completion just means the USB endpoint ACKed the OUT transfer -- it does
+> not mean the device's DAC/clock pipeline has caught up with the new rate.
+> Working hypothesis, *not wire-verified*: at N=1 each URB is tiny (one
+> Ploytec sub-packet, tens of bytes), small enough that the first couple can
+> fit into a small hardware FIFO on the device and get ACKed immediately even
+> while the device is still mid-resync internally; once that FIFO is full the
+> device stops ACKing until it is genuinely ready, which is where the
+> already-established ~20-23ms restart latency (the same figure
+> `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS` was sized against on 2026-08-26) becomes
+> visible as a real gap. At N=8 each URB carries 8x the data, so it is much
+> less likely two whole N=8-sized transfers fit through the same FIFO before
+> the gate closes -- `last_callback_time` correctly stays untouched for the
+> entire resync window at N=8, which is consistent with N=8 never showing
+> this. Ruled out as an alternative explanation: a driver-side cleanup gap
+> after `usb_kill_anchored_urbs()` letting a stale pre-stop completion leak
+> through -- `jockey3_stop_urbs()` (`jockey3.c:1385-1442`) is synchronous
+> (`usb_kill_urb()`/`usb_kill_anchored_urbs()` block until every completion
+> handler has actually run) and explicitly zeroes `last_callback_time`/
+> `urbs_started_time` *after* that, before `jockey3_start_urbs()` stamps a
+> fresh `urbs_started_time` and submits 8 new URBs -- there is no window for
+> a leftover completion from before the stop to taint the new cycle.
+>
+> **The driver defect this exposed** (distinct from, and not fixed by, the
+> 50ms->200ms hw_params change in the first 2026-08-27 follow-up above):
+> `jockey3_watchdog_check()`'s `startup` classification
+> (`jockey3.c:1747-1752` as of that first follow-up) was binary on "has
+> `last_callback_time` been set at least once since the restart" -- so the
+> first of those 2 fast completions flipped it from the wide 200 ms
+> `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS` to the tight 20 ms
+> `JOCKEY3_WATCHDOG_STALL_MS` immediately, while the device was still
+> genuinely inside its restart-settling window. One completion is not proof
+> of steady flow, only proof one buffered transfer drained.
+>
+> **Fix (Frank's call, not yet hardware-validated)**: made `startup`
+> purely time-based -- `now - urbs_started_time < JOCKEY3_WATCHDOG_STARTUP_GRACE_MS`,
+> regardless of how many early completions have landed -- instead of keyed
+> off `last_callback_time == 0`, in both `jockey3_watchdog_check()` and its
+> scheduling companion `jockey3_watchdog_next_delay_ms()` (which had the same
+> stale-classification shape for computing the next poll deadline, though not
+> itself a correctness bug since the check function re-derives state fresh
+> every tick). Deliberately no "N consecutive completions" requirement --
+> the fixed grace window alone is expected to be sufficient. Both
+> `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS`'s own comment and
+> `jockey3_watchdog_check()`'s kernel-doc updated to describe the new
+> semantics.
+>
+> **Confirmed on the wire, same day: this is a hardware/firmware property,
+> not a Linux-driver artifact.** Frank's observation that the FIFO-drain
+> hypothesis should be checkable directly, since it claims to be
+> hardware-only -- checked two already-existing OpenVizsla captures rather
+> than taking a new one, since both already carry rate changes:
+>
+> - `capture_2026-08-17_linux_ratechange.txt` (this driver, predates all
+>   N=8/coalescing work by over a week): rate change to 44.1kHz, right after
+>   the burst's last EP0 write --
+>   ```
+>   14.351730  OUT: 34.5 (playback)
+>   14.351741  OUT: 34.5   <- 11us later, second completion
+>   14.356900  OUT: 34.5   <- 5,159us later -- the real gap
+>   ```
+>   then steady ~210-250us cadence resumes.
+> - `capture_2026-08-17_macos_ratechange.txt` (vendor CoreAudio driver,
+>   Reloop/Ploytec 3.3.17, entirely different USB stack): same shape at a
+>   different rate change --
+>   ```
+>   22.105829  OUT: 8.5 (playback)
+>   22.105839  OUT: 8.5   <- 10us later, second completion
+>   22.106633  OUT: 8.5   <- 794us later -- the gap
+>   ```
+>   then steady ~200-230us cadence.
+>
+> Both captures show exactly 2 near-back-to-back OUT completions right after
+> the rate-programming burst ends, then a gap larger than steady-state
+> cadence before regular flow resumes -- on a driver-side capture that
+> predates this investigation's driver changes entirely, and independently
+> on the vendor's own driver and USB stack. The gap magnitude differs (5.16ms
+> vs. 794us) but sits within the same wide, variable distribution the
+> driver-side `trace_printk` data already showed (150us to several ms across
+> 201 restarts) -- not two different phenomena. What remains open is only
+> the *count* (exactly 2, not 1 or 3) and *why 2 specifically* -- the small
+> hardware-FIFO explanation is still the working theory for that detail, not
+> confirmed by these two captures, but the pattern itself (fast pair, then a
+> gap, on the wire, independent of driver) no longer needs to be inferred.
+>
+> Also open: whether this same 2-fast-then-gap pattern exists at N=2/N=4
+> (would support it being about available buffer depth scaling with N x
+> `JOCKEY3_N_URBS`) or is N=1-specific for some other reason -- part of the
+> same N=1/2/4/8 control-run series still in progress.
+>
 > The rest of this document is the investigation as it ran, kept because the
 > reasoning is the record of how the cause was found -- and because several
 > of its intermediate conclusions were wrong in instructive ways.
