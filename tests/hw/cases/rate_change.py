@@ -415,6 +415,20 @@ CONTEXT = [
                 r"reset; hardware may need power-cycling")),
     ("reset_timeout",
      re.compile(r"Timeout waiting for reset completion")),
+    # jockey3_watchdog_check() has tagged its own onset line "startup" or
+    # "steady-state" since 2026-08-26 (jockey3.c's JOCKEY3_WATCHDOG_STARTUP_GRACE_MS
+    # work) -- mirroring which threshold caught it, not which recovery path
+    # ran. "startup" means the grace period itself was exceeded before the
+    # first completion after a restart; only "steady-state" is a stall in
+    # the sense the case's docstring means (a stream that WAS completing URBs
+    # normally and then stopped). The untagged fallback below keeps this
+    # readable against a dmesg predating the tag.
+    ("watchdog_onset_startup",
+     re.compile(r"(?:Playback|Capture) URB stream stalled: no completion for "
+                r"(\d+) ms \(\d+ URBs in flight, substream \w+, startup\)")),
+    ("watchdog_onset_steady_state",
+     re.compile(r"(?:Playback|Capture) URB stream stalled: no completion for "
+                r"(\d+) ms \(\d+ URBs in flight, substream \w+, steady-state\)")),
     ("watchdog_onset",
      re.compile(r"(?:Playback|Capture) URB stream stalled: no completion for "
                 r"(\d+) ms")),
