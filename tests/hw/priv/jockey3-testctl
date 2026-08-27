@@ -72,7 +72,7 @@ TRACE_FUNCS='jockey3_playback_callback jockey3_capture_callback'
 # the keyboard, the mouse, and the hub this device hangs off. Resolving the
 # port from the device's own vendor/product id means the only port that can
 # ever be switched is one with a Jockey 3 plugged into it.
-JOCKEY3_USB_IDS='200c:1037 200c:1009'      # Remix, Master Edition
+JOCKEY3_USB_IDS='200c:1037 200c:1019 200c:1009'      # Remix, Master Edition
 
 # Where the resolved port is remembered between `off` and `on`.
 #
