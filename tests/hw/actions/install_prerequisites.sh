@@ -4,5 +4,5 @@
 #
 #
 sudo apt install uhubctl alsa-utils sox 
-sudo apt install linux-cpupower
+sudo apt install linux-cpupower bpftrace
 sudo apt install python3-mido python3-rtmidi python3-yaml

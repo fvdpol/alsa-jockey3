@@ -5,11 +5,25 @@
  *
  * Answers: does the EP0 rate-change sequence itself fail to bring the
  * device back to streaming, or does streaming start and then die a beat
- * later? Times ploytec_set_rate() (the EP0 exchange) and
- * jockey3_start_urbs() (the URB-ring resubmission that follows it), then
- * watches the first few playback/capture URB completions after the
- * restart for a gap -- the same signature an OpenVizsla trace would show
- * on the wire, without the minutes of capture that would take.
+ * later? Times jockey3_stop_urbs()/ploytec_set_rate()/jockey3_start_urbs()
+ * (the whole teardown-EP0-restart sequence hw_params() runs on a rate
+ * change), then watches the first few playback/capture URB completions
+ * after the restart for a gap -- the same signature an OpenVizsla trace
+ * would show on the wire, without the minutes of capture that would take.
+ *
+ * 2026-08-26 v2: also times every jockey3_watchdog_check() entry per
+ * direction, to confirm or rule out a specific hypothesis raised by v1's
+ * first captured reset (re/rate_change_stall.md's 2026-08-26 follow-up):
+ * jockey3_stop_urbs()'s disarm (cancel_delayed_work(), non-blocking, by
+ * the function's own docstring) does not stop a watchdog tick that is
+ * already executing. That tick samples `now`/`last` (and so computes
+ * age_ns) BEFORE taking urb_stream->lock to check `stopping` -- so a tick
+ * whose sampling straddles a stop+EP0+restart cycle can find `stopping`
+ * already cleared by the time it takes the lock (because the restart
+ * already finished) and declare a stall from data that predates the
+ * restart entirely. A watchdog_check() entry timestamp that lands before
+ * STOP_URBS and a matching dev_warn() that lands after START_URBS, for the
+ * same direction, is the signature that confirms it.
  *
  * Kprobes only -- no driver source change, so this cannot itself be the
  * "debug build behaves differently" trap (see the dev_dbg/printk incident
@@ -50,6 +64,82 @@ BEGIN
 	@gate_window_ns = (uint64)500000000;
 }
 
+kprobe:jockey3_stop_urbs
+{
+	@stop_t0[tid] = nsecs;
+	/*
+	 * Set for the entire span between this stop and its matching start
+	 * returning, regardless of which of jockey3_stop_urbs()'s 5 call
+	 * sites triggered it (rate change, watchdog, prepare(), disconnect,
+	 * suspend) -- WD_CHECK reads it to flag a tick that fires while URBs
+	 * are deliberately down, which is the shape of the race this script
+	 * exists to catch. Cleared in kretprobe:jockey3_start_urbs.
+	 */
+	@urbs_stopping = 1;
+}
+
+kretprobe:jockey3_stop_urbs
+/@stop_t0[tid]/
+{
+	$dur_ms = (nsecs - @stop_t0[tid]) / 1000000;
+	printf("STOP_URBS ts_ns=%llu dur_ms=%d\n", nsecs, $dur_ms);
+	delete(@stop_t0[tid]);
+}
+
+/*
+ * Entry only: this is a proxy for "when did this tick sample now/last",
+ * which happens a few instructions into the function, well before it takes
+ * urb_stream->lock. Low frequency (10ms-1s per direction while a stream is
+ * open) so, unlike the completion callbacks below, this needs no gating.
+ * direction is SNDRV_PCM_STREAM_PLAYBACK (0) or _CAPTURE (1). race_window=1
+ * means this tick's entry landed between some stop_urbs() and its matching
+ * start_urbs() returning -- added 2026-08-26 v4 so a race candidate is
+ * visible directly in the log instead of eyeballed per run against
+ * STOP_URBS/START_URBS timestamps.
+ */
+kprobe:jockey3_watchdog_check
+{
+	/*
+	 * real_age_since_completion_ms is ground truth for "how long ago was
+	 * the last completion, right now" -- read from the always-on
+	 * trackers below, not from the gated PB_CB/CAP_CB log (which caps at
+	 * @completions_per_dir per restart and goes quiet long before a
+	 * later WD_CHECK, making any "time since the last logged completion"
+	 * comparison against dmesg's reported age meaningless once the gate
+	 * has closed). -1 means no completion tracked yet for this
+	 * direction this run.
+	 */
+	$last_completion = (uint64)0;
+	if (arg1 == 0) {
+		$last_completion = @pb_last_completion;
+	} else {
+		$last_completion = @cap_last_completion;
+	}
+	$real_age_ms = (int64)-1;
+	if ($last_completion != 0) {
+		$real_age_ms = (int64)((nsecs - $last_completion) / 1000000);
+	}
+	printf("WD_CHECK ts_ns=%llu direction=%d race_window=%d real_age_since_completion_ms=%lld\n",
+	       nsecs, arg1, @urbs_stopping, $real_age_ms);
+}
+
+/*
+ * Names the caller of every stop+start recovery cycle. Added 2026-08-26 v3
+ * after a second confirmation run showed THREE stop/start cycles inside one
+ * reset's ~620ms window, not the two v2 found -- the second one had no
+ * accompanying SET_RATE, so it is not hw_params()'s own rate-change restart
+ * and not (yet) attributable to the watchdog either. context is a static
+ * string literal (jockey3.c's four call sites each pass a distinct one:
+ * "rate change", "watchdog", "opening a capture stream", "preparing a
+ * playback stream"), so str() can read it directly -- low frequency (only
+ * on an actual stall/recovery), no gating needed.
+ */
+kprobe:jockey3_recover_urb_stream
+{
+	printf("RECOVER ts_ns=%llu direction=%d context=%s\n",
+	       nsecs, arg1, str(arg2));
+}
+
 kprobe:ploytec_set_rate
 {
 	@rate_t0[tid] = nsecs;
@@ -78,6 +168,7 @@ kretprobe:jockey3_start_urbs
 	printf("START_URBS ts_ns=%llu ret=%d dur_ms=%d\n",
 	       nsecs, retval, $dur_ms);
 	delete(@urbs_t0[tid]);
+	@urbs_stopping = 0;
 
 	/* Arm the completion-gate: only the callbacks fired in this window
 	 * get traced. */
@@ -88,38 +179,57 @@ kretprobe:jockey3_start_urbs
 	@cap_last = (uint64)0;
 }
 
+/*
+ * @pb_last_completion is updated unconditionally, every call, with no
+ * printf -- a plain map write is cheap enough to run for the whole
+ * free-running lifetime of the URBs. It is what WD_CHECK reads for
+ * real_age_since_completion_ms. The gated printf below it is the separate,
+ * capped PB_CB log used for the completion-cadence dump around a specific
+ * restart (correlate_trace.py window); it stops after @completions_per_dir
+ * per restart and so cannot answer "how long ago was the real last
+ * completion" once a later WD_CHECK fires -- that gap is why this tracker
+ * exists as its own thing rather than reusing @pb_last.
+ */
 kprobe:jockey3_playback_callback
-/@gate_until && nsecs < @gate_until && @pb_seen < @completions_per_dir/
 {
-	/* Cast the uint64 delta to int64 before dividing, so both arms of
-	 * the ternary -- the -1 "no previous completion yet" sentinel and
-	 * the measured gap -- are the same signed type. */
-	$gap_us = @pb_last != 0 ? (int64)((nsecs - @pb_last) / 1000) : -1;
-	printf("PB_CB  ts_ns=%llu gap_us=%d\n", nsecs, $gap_us);
-	@pb_last = nsecs;
-	@pb_seen++;
+	@pb_last_completion = nsecs;
+
+	if (@gate_until && nsecs < @gate_until && @pb_seen < @completions_per_dir) {
+		$gap_us = (int64)-1;
+		if (@pb_last != 0) {
+			$gap_us = (int64)((nsecs - @pb_last) / 1000);
+		}
+		printf("PB_CB  ts_ns=%llu gap_us=%d\n", nsecs, $gap_us);
+		@pb_last = nsecs;
+		@pb_seen++;
+	}
 }
 
 kprobe:jockey3_capture_callback
-/@gate_until && nsecs < @gate_until && @cap_seen < @completions_per_dir/
 {
-	$gap_us = @cap_last != 0 ? (int64)((nsecs - @cap_last) / 1000) : -1;
-	printf("CAP_CB ts_ns=%llu gap_us=%d\n", nsecs, $gap_us);
-	@cap_last = nsecs;
-	@cap_seen++;
+	@cap_last_completion = nsecs;
+
+	if (@gate_until && nsecs < @gate_until && @cap_seen < @completions_per_dir) {
+		$gap_us = (int64)-1;
+		if (@cap_last != 0) {
+			$gap_us = (int64)((nsecs - @cap_last) / 1000);
+		}
+		printf("CAP_CB ts_ns=%llu gap_us=%d\n", nsecs, $gap_us);
+		@cap_last = nsecs;
+		@cap_seen++;
+	}
 }
 
 /* The stall-onset/full-stall dev_warn() lines already in dmesg sit on the
- * same monotonic clock as ts_ns above, so they line up against this log
- * directly -- no need to also probe jockey3_watchdog_check() (it polls
- * every 10ms-1s per direction for the driver's whole free-running
- * lifetime; tracing it would add real overhead for a timestamp dmesg
- * already gives us for free). */
+ * same monotonic clock as ts_ns above, so WD_CHECK lines up against them
+ * directly -- no need to also trace inside jockey3_watchdog_check() to see
+ * when it logs; the entry timestamp plus dmesg's own line is enough. */
 
 END
 {
-	clear(@rate_t0); clear(@rate_val); clear(@urbs_t0);
+	clear(@stop_t0); clear(@rate_t0); clear(@rate_val); clear(@urbs_t0);
 	clear(@gate_until); clear(@pb_seen); clear(@cap_seen);
 	clear(@pb_last); clear(@cap_last); clear(@completions_per_dir);
-	clear(@gate_window_ns);
+	clear(@gate_window_ns); clear(@urbs_stopping);
+	clear(@pb_last_completion); clear(@cap_last_completion);
 }
