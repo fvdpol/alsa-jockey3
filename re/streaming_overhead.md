@@ -4,10 +4,16 @@ Options for cutting the CPU, interrupt and power cost the Jockey 3 imposes on
 its host: transfer coalescing, idle rate downshift, and on-demand streaming.
 
 **Status: E1 (baseline measurement) and E2a (firmware acceptance gate) done,
-both on real hardware. E2a passed at N=2 in both directions -- see Part 2.**
-The companion document `re/streaming_overhead_experiments.md` is the
-executable plan for the experiments this study calls for and tracks
-per-experiment status in more detail.
+both on real hardware. E2a passed at N=2 in both directions -- see Part 2.
+N=1/2/4/8 exploratory runs done at every N on both `x86_64-prod` and
+`arm64-prod`; the reset/stall instability those exploratory runs found
+turned out to be a driver bug (a watchdog timing check defeated by real
+hardware restart-latency variance), now fixed -- a clean, untraced
+N=1/2/4/8 re-run of `JT-RATE-001`/`JT-PERF-001` on both platforms is the
+current picture (2026-08-27 section of Part 2).** The companion document
+`re/streaming_overhead_experiments.md` is the executable plan for the
+experiments this study calls for and tracks per-experiment status in more
+detail.
 
 This started as a narrower question -- "should the driver stop streaming when
 the device is idle?" -- and the answer reframes it, which is why the title is
@@ -790,6 +796,130 @@ at N=4, 16.7% at N=8, zero resets at either). Whatever is driving this on
 `x86_64-prod` is getting more frequent and more severe with N, which
 `arm64-prod`'s data does not show at all -- this is the strongest signal
 so far against simply picking the largest N that "works."
+
+### 2026-08-27: the N-vs-stability trend above was a driver bug, now fixed -- full N=1/2/4/8 sweep is clean
+
+**The instability the sections above tracked -- worsening on `x86_64-prod`
+as N grew, always self-healing but non-monotonic on `arm64-prod` -- was not
+an inherent cost of higher N. It was `jockey3_watchdog_check()`'s startup
+classification being defeated by real, N=1-and-up restart-latency variance,
+root-caused and fixed this same day; see `re/rate_change_stall.md`'s three
+2026-08-27 follow-ups for the full mechanism (a small hardware-side FIFO
+lets 1-2 early URB completions through before the device is actually ready,
+confirmed on the wire independent of this driver) and the fix (every
+"has this direction reached steady streaming yet" check consolidated onto
+one time-based budget, `JOCKEY3_STREAM_STARTUP_GRACE_MS`).**
+
+With that fix in place, `JT-RATE-001` was re-run at all four N values, both
+platforms, no bpftrace/trace_printk attached (kept out so this run's timing
+is directly comparable to earlier untraced runs). Every run came back
+clean -- 0 resets, effectively 0 stalls -- except one: `x86_64-prod` at N=2
+had a single reset on the run's very first rate change after probe,
+`stalls_direction_first=1`, the framework's own pre-existing bucket for
+"first change after probe" (see `cases/rate_change.py`, which tracks this
+direction separately for exactly this reason). Isolated, not repeated
+anywhere else in that run or in N=1/N=4/N=8 on either platform -- read as a
+one-off cold-start condition, not an N=2 regression.
+
+**This resolves the open question the N=4/N=8 exploratory sections above
+raised.** The pre-fix data is kept as-is above (append-only, per this
+document's convention) because the reasoning that found the fix is worth
+keeping, but its conclusion -- "this is the strongest signal so far against
+simply picking the largest N that works" -- no longer holds against
+current `jockey3.c`.
+
+**`JT-PERF-001`, same runs, consolidated into one table per target.** State
+= idle (URBs flowing, MIDI only) vs. stream (a substream open at that
+rate); `cpu%` is `cpu_pct_sys_irq_soft` (softirq + system time attributable
+to the driver's IRQ/URB path):
+
+**`x86_64-prod`**
+
+| State | irq/s N=1 | N=2 | N=4 | N=8 | cpu% N=1 | N=2 | N=4 | N=8 |
+|---|---|---|---|---|---|---|---|---|
+| idle 44.1 kHz | 9,918.7 | 4,960.0 | 2,006.8 | 1,140.0 | 0.65 | 0.40 | 0.20 | 1.32 |
+| stream 44.1 kHz | 9,926.0 | 4,958.6 | 2,235.3 | 1,137.7 | 1.02 | 0.90 | 2.30 | 1.50 |
+| idle 48 kHz | 10,790.4 | 5,384.5 | 2,313.9 | 1,214.9 | 0.32 | 0.40 | 1.88 | 0.98 |
+| stream 48 kHz | 10,481.6 | 5,388.3 | 2,586.8 | 1,238.7 | 1.40 | 1.30 | 2.27 | 1.32 |
+| idle 88.2 kHz | 19,855.1 | 9,927.4 | 4,678.9 | 1,981.8 | 3.13 | 0.57 | 2.37 | 0.18 |
+| stream 88.2 kHz | 19,853.8 | 9,908.5 | 4,881.0 | 2,056.7 | 3.35 | 1.20 | 1.88 | 2.18 |
+| idle 96 kHz | 21,542.6 | 10,770.1 | 5,400.1 | 2,235.2 | 3.43 | 1.05 | 0.12 | 0.50 |
+| stream 96 kHz | 21,538.0 | 10,799.6 | 5,395.4 | 2,265.4 | 3.68 | 1.57 | 0.92 | 1.57 |
+
+**`arm64-prod`**
+
+| State | irq/s N=1 | N=2 | N=4 | N=8 | cpu% N=1 | N=2 | N=4 | N=8 |
+|---|---|---|---|---|---|---|---|---|
+| idle 44.1 kHz | 9,908.2 | 4,949.9 | 2,482.4 | 1,241.2 | 0.57 | 0.22 | 0.15 | 0.15 |
+| stream 44.1 kHz | 9,928.9 | 4,949.8 | 2,482.4 | 1,241.2 | 0.84 | 0.30 | 0.27 | 0.25 |
+| idle 48 kHz | 10,791.3 | 5,388.7 | 2,700.7 | 1,350.3 | 0.60 | 0.20 | 0.25 | 0.22 |
+| stream 48 kHz | 10,795.4 | 5,387.3 | 2,700.5 | 1,350.2 | 0.74 | 0.74 | 0.17 | 0.20 |
+| idle 88.2 kHz | 19,856.3 | 9,928.2 | 4,964.7 | 2,482.4 | 0.55 | 0.45 | 0.20 | 0.22 |
+| stream 88.2 kHz | 19,847.9 | 9,928.3 | 4,964.6 | 2,482.4 | 1.68 | 1.24 | 0.40 | 0.42 |
+| idle 96 kHz | 21,562.6 | 10,800.3 | 5,400.2 | 2,700.5 | 0.82 | 0.40 | 0.25 | 0.25 |
+| stream 96 kHz | 21,559.0 | 10,800.9 | 5,400.3 | 2,700.6 | 1.85 | 0.79 | 0.77 | 0.59 |
+
+`arm64-prod`'s `irq/s` halves cleanly at every single N-doubling and every
+rate (ratio 0.500 throughout, to 3 significant figures) -- the flat
+per-URB model holds exactly on this board across the whole N range now
+tested. `x86_64-prod` keeps the irregularity the exploratory sections
+above already flagged (ratios from 0.40 to 0.57 rather than a clean 0.5),
+but the specific N=4->N=8 anomaly called out there -- `idle` and `stream`
+diverging from each other, up to 18.0% apart at 96 kHz -- has shrunk
+sharply: recomputed from this table, the same comparison is now 0.2-3.6%
+across all four rates. Whether that's the watchdog fix removing
+recovery-adjacent noise from what was being measured, or just this run's
+own noise floor, isn't established -- flagged, not explained, consistent
+with how this document has treated `x86_64-prod`'s irq/s irregularity
+throughout.
+
+`cpu%` does not fall monotonically with N on either board -- both show
+values that go up as well as down moving from one N to the next (e.g.
+`x86_64-prod` stream 44.1 kHz: 1.02 -> 0.90 -> 2.30 -> 1.50). Read
+`cpu_pct_sys_irq_soft` at this resolution as noisy in absolute terms; the
+`irq/s` trend is the reliable signal, `cpu%` is directional at best from a
+single run per N.
+
+**Per-callback processing time (`playback_cb`/`capture_cb`, ns) grows with
+N on both platforms** -- expected, since a coalesced URB's completion
+handler processes N sub-packets in one call, and confirms the mechanism
+the N=8 `x86_64-prod` exploratory section above first noticed:
+
+**`x86_64-prod`**
+
+| State | playback_cb ns N=1 | N=2 | N=4 | N=8 | capture_cb ns N=1 | N=2 | N=4 | N=8 |
+|---|---|---|---|---|---|---|---|---|
+| idle 44.1 kHz | 1,504 | 2,831 | 11,560 | 10,973 | 1,368 | 2,318 | 9,574 | 8,478 |
+| stream 44.1 kHz | 1,450 | 2,670 | 11,232 | 14,247 | 1,616 | 2,983 | 10,858 | 13,561 |
+| idle 48 kHz | 1,505 | 2,573 | 9,606 | 12,339 | 1,371 | 2,256 | 8,288 | 9,864 |
+| stream 48 kHz | 2,267 | 2,531 | 8,054 | 12,848 | 2,518 | 3,065 | 8,382 | 12,228 |
+| idle 88.2 kHz | 2,236 | 1,581 | 6,738 | 11,948 | 1,976 | 1,357 | 6,646 | 9,188 |
+| stream 88.2 kHz | 2,205 | 1,594 | 5,908 | 12,828 | 2,414 | 1,715 | 6,362 | 12,136 |
+| idle 96 kHz | 2,270 | 1,680 | 3,987 | 10,359 | 2,016 | 1,446 | 2,243 | 8,395 |
+| stream 96 kHz | 2,269 | 1,533 | 3,094 | 12,744 | 2,454 | 1,654 | 3,980 | 12,613 |
+
+**`arm64-prod`**
+
+| State | playback_cb ns N=1 | N=2 | N=4 | N=8 | capture_cb ns N=1 | N=2 | N=4 | N=8 |
+|---|---|---|---|---|---|---|---|---|
+| idle 44.1 kHz | 8,490 | 7,705 | 11,363 | 11,209 | 8,093 | 6,610 | 8,425 | 6,828 |
+| stream 44.1 kHz | 9,668 | 11,317 | 13,746 | 18,362 | 11,093 | 12,278 | 14,337 | 21,210 |
+| idle 48 kHz | 6,581 | 7,205 | 11,390 | 14,146 | 6,263 | 6,170 | 8,346 | 8,634 |
+| stream 48 kHz | 6,945 | 11,149 | 13,578 | 18,151 | 8,021 | 12,194 | 14,444 | 21,019 |
+| idle 88.2 kHz | 4,322 | 7,187 | 8,202 | 14,181 | 4,054 | 6,138 | 6,012 | 8,592 |
+| stream 88.2 kHz | 7,201 | 11,008 | 13,942 | 18,606 | 8,280 | 12,451 | 14,533 | 21,237 |
+| idle 96 kHz | 6,612 | 7,428 | 8,305 | 14,070 | 6,311 | 6,354 | 6,114 | 8,591 |
+| stream 96 kHz | 7,201 | 8,294 | 13,861 | 17,930 | 8,306 | 9,095 | 14,195 | 21,370 |
+
+`arm64-prod`'s `stream` callback cost grows the most cleanly with N (e.g.
+96 kHz playback: 7,201 -> 8,294 -> 13,861 -> 17,930 ns) -- consistent with
+per-sub-packet codec work dominating on the weaker core, exactly where
+Part 1 already expected `arm64-prod` to show it. This is real per-open-
+stream CPU cost, not recovered by `irq/s` falling -- the two `cpu%` tables
+together are the actual trade a higher N makes: fewer, more expensive
+callbacks. Whether that nets out favorably is a per-platform, per-rate
+question this table answers directly rather than the flat completion-rate
+model alone.
 
 ### What it costs
 
