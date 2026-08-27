@@ -105,6 +105,32 @@
 > this investigation leaned on cannot be assumed unaffected either without
 > the same raw-dmesg recount.
 >
+> **2026-08-27 follow-up: overnight `JT-RATE-003` soak (20,000 changes, N=8)
+> on `x86_64-prod` (`20260827T004510Z-functional`) and `arm64-prod`/pi4
+> (`20260827T004800Z-functional`) found the hw_params rate-change liveness
+> check's 50 ms window was itself too tight on arm64.** `x86_64-prod` was
+> clean (1 reset, 2 playback stalls, 1 capture stall, 1 watchdog restart).
+> `arm64-prod` had `resets_total_device=0` and no watchdog onsets at all, but
+> `playback_stall_total=696` (3.5% of changes) -- every one of them
+> `jockey3_pcm_hw_params()`'s own post-rate-change check
+> (`playback_alive=0` in the `Rate change to N Hz left a stream stalled ...`
+> line, `jockey3.c:2515-2518`) finding Playback not yet alive 50 ms after
+> `jockey3_start_urbs()`, recovered by the light URB restart every time and
+> never escalating. Spread evenly across the whole run and across all four
+> target rates -- not a warm-up or rate-pair effect.
+>
+> This 50 ms window is the identical "first completion after a restart"
+> latency that `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS` (200 ms) exists to give
+> margin against (see that constant's comment, `jockey3.c:213-231`) -- but
+> the hw_params check was left at a hardcoded `50` (not even the
+> `JOCKEY3_PREPARE_CONFIRM_MS` constant it duplicated) when that grace period
+> was introduced on 2026-08-26. 3.5% of rate changes needing the light retry
+> at N=8 on arm64 means 50 ms had almost no margin there. Changed hw_params
+> to use `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS` for this check instead, for
+> consistency with the watchdog's own reasoning and to remove the magic
+> number. Not yet re-validated on hardware; still no same-build `N=1`/`N=2`
+> control run either (same open item as the 08-26 follow-up above).
+>
 > The rest of this document is the investigation as it ran, kept because the
 > reasoning is the record of how the cause was found -- and because several
 > of its intermediate conclusions were wrong in instructive ways.
