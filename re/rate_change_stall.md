@@ -120,13 +120,13 @@
 > target rates -- not a warm-up or rate-pair effect.
 >
 > This 50 ms window is the identical "first completion after a restart"
-> latency that `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS` (200 ms) exists to give
+> latency that `JOCKEY3_STREAM_STARTUP_GRACE_MS` (200 ms) exists to give
 > margin against (see that constant's comment, `jockey3.c:213-231`) -- but
 > the hw_params check was left at a hardcoded `50` (not even the
 > `JOCKEY3_PREPARE_CONFIRM_MS` constant it duplicated) when that grace period
 > was introduced on 2026-08-26. 3.5% of rate changes needing the light retry
 > at N=8 on arm64 means 50 ms had almost no margin there. Changed hw_params
-> to use `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS` for this check instead, for
+> to use `JOCKEY3_STREAM_STARTUP_GRACE_MS` for this check instead, for
 > consistency with the watchdog's own reasoning and to remove the magic
 > number. Not yet re-validated on hardware; still no same-build `N=1`/`N=2`
 > control run either (same open item as the 08-26 follow-up above).
@@ -180,7 +180,7 @@
 > while the device is still mid-resync internally; once that FIFO is full the
 > device stops ACKing until it is genuinely ready, which is where the
 > already-established ~20-23ms restart latency (the same figure
-> `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS` was sized against on 2026-08-26) becomes
+> `JOCKEY3_STREAM_STARTUP_GRACE_MS` was sized against on 2026-08-26) becomes
 > visible as a real gap. At N=8 each URB carries 8x the data, so it is much
 > less likely two whole N=8-sized transfers fit through the same FIFO before
 > the gate closes -- `last_callback_time` correctly stays untouched for the
@@ -200,13 +200,13 @@
 > (`jockey3.c:1747-1752` as of that first follow-up) was binary on "has
 > `last_callback_time` been set at least once since the restart" -- so the
 > first of those 2 fast completions flipped it from the wide 200 ms
-> `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS` to the tight 20 ms
+> `JOCKEY3_STREAM_STARTUP_GRACE_MS` to the tight 20 ms
 > `JOCKEY3_WATCHDOG_STALL_MS` immediately, while the device was still
 > genuinely inside its restart-settling window. One completion is not proof
 > of steady flow, only proof one buffered transfer drained.
 >
 > **Fix (Frank's call, not yet hardware-validated)**: made `startup`
-> purely time-based -- `now - urbs_started_time < JOCKEY3_WATCHDOG_STARTUP_GRACE_MS`,
+> purely time-based -- `now - urbs_started_time < JOCKEY3_STREAM_STARTUP_GRACE_MS`,
 > regardless of how many early completions have landed -- instead of keyed
 > off `last_callback_time == 0`, in both `jockey3_watchdog_check()` and its
 > scheduling companion `jockey3_watchdog_next_delay_ms()` (which had the same
@@ -214,7 +214,7 @@
 > itself a correctness bug since the check function re-derives state fresh
 > every tick). Deliberately no "N consecutive completions" requirement --
 > the fixed grace window alone is expected to be sufficient. Both
-> `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS`'s own comment and
+> `JOCKEY3_STREAM_STARTUP_GRACE_MS`'s own comment and
 > `jockey3_watchdog_check()`'s kernel-doc updated to describe the new
 > semantics.
 >
@@ -260,6 +260,64 @@
 > (would support it being about available buffer depth scaling with N x
 > `JOCKEY3_N_URBS`) or is N=1-specific for some other reason -- part of the
 > same N=1/2/4/8 control-run series still in progress.
+>
+> **2026-08-27 follow-up #3: the one "substream open" reset in the fix's own
+> validation run was a real, isolated stall -- tipped into an unnecessary
+> full reset by missing a confirm deadline by half a millisecond.**
+> `arm64-prod/20260827T195958Z-functional`'s single remaining event
+> (`resets_total_device=1` out of 200 N=1 changes, tagged `substream open`
+> not `idle`, so a different class from the false positive #2 above fixed)
+> was cross-checked between `wdcheck_trace.log` (the driver's own
+> `trace_printk`) and `re/bpftrace/rate_stall_trace.bt`'s independently
+> tracked completions, both agreeing on the sequence (dmesg-clock times):
+>
+> | time | event |
+> |---|---|
+> | 629771.248518 | watchdog catches a genuine 23ms gap in Playback completions, 786ms after the last restart (unrelated to any rate change) -- confirmed by bpftrace's own completion tracker independently agreeing `age=23ms` |
+> | 629771.248560 | light URB restart triggered |
+> | 629771.252098 | `jockey3_start_urbs()` returns |
+> | 629771.300475 | the restart's own confirm poll (then `JOCKEY3_PREPARE_CONFIRM_MS`, 50ms) gives up, escalates to a full USB reset |
+> | 629771.300948 | the real first completion after the restart lands -- **473 microseconds later** |
+>
+> The light restart had actually worked; the 50ms confirm window just
+> wasn't quite enough margin to see it happen. Same problem class as the
+> two fixes above (a real, variable N=1 restart latency vs. a too-tight
+> fixed window), now found at a third call site.
+>
+> **Clock-offset gotcha hit again doing this analysis, worth recording
+> precisely**: `re/bpftrace/rate_stall_trace.bt`'s own `nsecs` timestamps do
+> NOT reliably match dmesg's printk clock either, contrary to what earlier
+> follow-ups in this document assumed. In this run bpftrace's log was
+> offset from dmesg by the same ~7.16s constant `wdcheck_trace.log` carried
+> (i.e. bpftrace and `trace_printk` share one clock that differs from
+> dmesg's) -- a *previous* run happened to have a near-zero bpftrace-to-
+> dmesg offset, which is what created the impression bpftrace always
+> matches dmesg. `correlate_trace.py window` assumes zero offset and would
+> have silently shown the wrong window here. Always derive the offset
+> per-run from a known pair (a `wdcheck_trace.log` `age_ms`-nonzero line
+> against its matching dmesg onset line) and apply it to bpftrace
+> timestamps too, not only `trace_printk` ones.
+>
+> **Consolidation, Frank's call**: all of this driver's "has this direction
+> reached steady streaming yet" checks are really the same question asked
+> from different call sites, and every one of them had turned out too
+> tight at some point in this investigation -- a hardcoded 50ms in
+> `jockey3_pcm_hw_params()` (follow-up #1, fixed), the completion-gated
+> `startup` classification in the watchdog (follow-up #2, fixed), and now
+> `JOCKEY3_PREPARE_CONFIRM_MS` (also 50ms, shared by
+> `jockey3_recover_urb_stream()`'s post-restart re-confirm and
+> `jockey3_pcm_prepare()`'s own liveness check). Rather than re-tune each
+> one separately, `JOCKEY3_PREPARE_CONFIRM_MS` is retired and every one of
+> its call sites now uses `JOCKEY3_STREAM_STARTUP_GRACE_MS` (200ms), the
+> same value the watchdog itself uses -- one time budget for the whole
+> "restart to steady flow" question, used everywhere it is asked
+> (`jockey3.c`, `dev/streaming-overhead`). Frank's reasoning: a too-tight
+> budget can cause an escalation (reset) that a wider one would have
+> avoided, as this very event demonstrates, while a too-loose one only
+> delays detecting a device that is genuinely not coming back -- and that
+> fault stays wedged far longer than any reasonable extra margin would
+> ever paper over, so there is no real cost to erring wide. Not yet
+> hardware-validated.
 >
 > The rest of this document is the investigation as it ran, kept because the
 > reasoning is the record of how the cause was found -- and because several
@@ -1310,7 +1368,7 @@ cross it and get treated the same as an established stream going silent
 with no restart needed.
 
 **Fixed** (`dev/streaming-overhead` `00d9223`): a separate, longer
-threshold, `JOCKEY3_WATCHDOG_STARTUP_GRACE_MS` (200ms), applies whenever
+threshold, `JOCKEY3_STREAM_STARTUP_GRACE_MS` (200ms), applies whenever
 `last_callback_time == 0` -- the existing signal for "no completion since
 the last start" -- in both `jockey3_watchdog_check()` and
 `jockey3_watchdog_next_delay_ms()`. No new state; ~10x the worst startup
