@@ -20,7 +20,6 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <linux/cleanup.h>
-#include <linux/trace_printk.h> /* TEMPORARY DEBUG -- do not merge into main */
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/rawmidi.h>
@@ -137,30 +136,29 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_N_URBS 8
 
 /*
- * Packets per URB ("N"), per direction (E2 -- transfer coalescing,
- * re/streaming_overhead.md Part 2). E2a probed the firmware with a
- * throwaway build-time toggle and found it accepts 2 x 512 B bulk transfers
- * cleanly in both directions; this is that finding turned into the real
- * per-packet implementation. Kept as two separate constants, not one,
- * because E2a's hardware run showed the two directions can have independent
- * answers to "does this firmware accept N x 512 B".
+ * Maximum Ploytec packets per URB ("N"), per direction. Several packets are
+ * coalesced into one USB bulk transfer to cut the completion-interrupt rate
+ * (rationale and measurements in re/streaming_overhead.md).
  *
- * These are the *allocation width*, not the live N: E2d-exp
- * (re/streaming_overhead_experiments.md) established that the firmware
- * cannot tell a bulk transfer's length apart from a run of separate
- * transfers of the same total length -- PLOYTEC_PKT_SIZE is exactly the USB
- * high-speed bulk max-packet size, so an N x 512 B transfer is, on the wire,
- * indistinguishable from N separate 512 B ones. That is what lets
- * jockey3_pcm_hw_params() pick a smaller N per PCM open and vary
- * urb->transfer_buffer_length on a running ring (struct
- * jockey3_pcm_urb_stream's @n_shift/@n_pkts) without tearing it down: the
- * URB buffers stay allocated JOCKEY3_*_XFER_SIZE wide (8 x 512 B) regardless
- * of the chosen N.
+ * The live N is not fixed: jockey3_pcm_hw_params() picks it per stream open,
+ * per direction, as the largest power of two that fits the requested period
+ * size, and stores it in struct jockey3_pcm_urb_stream's @n_shift/@n_pkts.
+ * These two values are only the *ceiling* on that choice, and the width the
+ * URB transfer buffers are allocated at (JOCKEY3_*_XFER_SIZE) -- which is why
+ * the ceiling has to be a compile-time constant. Two separate constants, not
+ * one, so the ceiling can be tuned per direction if the firmware ever turns
+ * out to accept coalescing on one direction but not the other.
  *
- * N=1 in both directions must be byte-for-byte identical to the
- * pre-coalescing driver -- this is E2c's regression gate, and every loop
- * keyed off these constants below is written to degenerate to the original
- * single packet code path at N=1.
+ * Changing the live N never reallocates or tears down the URB ring: only
+ * urb->transfer_buffer_length varies. PLOYTEC_PKT_SIZE (512) is exactly the
+ * USB high-speed bulk max-packet size, so an N x 512 B transfer is
+ * indistinguishable on the wire from N separate 512 B ones; the firmware
+ * cannot tell the two apart. The buffers stay allocated JOCKEY3_*_XFER_SIZE
+ * wide regardless of the N in use.
+ *
+ * A live N of 1 in both directions must be byte-for-byte identical to a
+ * driver without coalescing: every packet loop below is keyed off the live
+ * @n_pkts and degenerates to the original single-packet code path at N=1.
  */
 #define JOCKEY3_PLAYBACK_N	8
 #define JOCKEY3_CAPTURE_N	8
@@ -186,9 +184,10 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 /*
  * URB liveness watchdog.
  *
- * One URB carries JOCKEY3_PLAYBACK_N (playback) or JOCKEY3_CAPTURE_N
- * (capture) Ploytec packets, so a healthy stream completes one URB every
- * N packet intervals:
+ * One URB carries up to JOCKEY3_PLAYBACK_N (playback) or JOCKEY3_CAPTURE_N
+ * (capture) Ploytec packets -- the exact count is that direction's live N
+ * (@n_pkts) -- so a healthy stream completes one URB every N packet
+ * intervals:
  * PLOYTEC_PLAYBACK_FRAMES (10) or PLOYTEC_CAPTURE_FRAMES (8) PCM frames'
  * worth of time, per packet. A single packet interval is 226.8 us at
  * 44100 Hz, the slowest supported rate, down to 83.3 us at 96000 Hz;
@@ -313,12 +312,11 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  *	outage lasted once the stream comes back.
  * @n_shift: log2 of the number of Ploytec packets per URB ("N") the
  *	next URB resubmission on this direction will carry, in [0, 3]; @lock.
- *	Set by jockey3_pcm_hw_params() from the open substream's period size
- *	(E2d, re/streaming_overhead_experiments.md), and reset to the
- *	JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N default by jockey3_pcm_close() so a
- *	direction with no open stream always re-arms at a safe N rather than a
- *	stale one left over from its last open. Changing it does not tear the
- *	URB ring down (E2d-exp confirmed the wire cannot tell one N x 512 B
+ *	Set by jockey3_pcm_hw_params() from the open substream's period size,
+ *	and reset to the JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N default by
+ *	jockey3_pcm_close() so a direction with no open stream always re-arms at
+ *	a safe N rather than a stale one left over from its last open. Changing
+ *	it does not tear the URB ring down (the wire cannot tell one N x 512 B
  *	transfer apart from N separate ones): each URB picks up the current
  *	value at its own next resubmission, so the ring turns over within at
  *	most JOCKEY3_N_URBS completions.
@@ -850,26 +848,11 @@ static void jockey3_capture_callback(struct urb *urb)
 	bool active = false;
 	bool stopping;
 	int sp, ret;
-	enum jockey3_urb_state urb_check;
-	u64 now = ktime_get_mono_fast_ns();
 
 	atomic_dec(&urb_stream->urbs_in_flight);
-	atomic64_set(&urb_stream->last_callback_time, now);
+	atomic64_set(&urb_stream->last_callback_time, ktime_get_mono_fast_ns());
 
-	/*
-	 * TEMPORARY DEBUG -- do not merge into main. Capture-side counterpart
-	 * of jockey3_playback_callback()'s "phantom completion" trace_printk --
-	 * see that one's comment. All three onsets found so far are Playback,
-	 * but Capture shares the same unconditional-set-before-status-check
-	 * shape, so it is instrumented too rather than assumed innocent.
-	 */
-	urb_check = jockey3_urb_check(urb);
-	if (now - atomic64_read(&urb_stream->urbs_started_time) < 5 * NSEC_PER_MSEC)
-		trace_printk("cb dir=capture ts=%llu status=%d urb_check=%d since_start_us=%llu\n",
-			     now, urb->status, urb_check,
-			     div_u64(now - atomic64_read(&urb_stream->urbs_started_time), 1000));
-
-	switch (urb_check) {
+	switch (jockey3_urb_check(urb)) {
 	case JOCKEY3_URB_STOPPED:
 		scoped_guard(spinlock_irqsave, &urb_stream->lock)
 			stopping = urb_stream->stopping;
@@ -889,9 +872,8 @@ static void jockey3_capture_callback(struct urb *urb)
 		return;
 
 	/*
-	 * E2a found the firmware fills a multi-packet capture URB
-	 * completely rather than always terminating at one 512 B packet
-	 * (re/streaming_overhead.md, "E2a result"), so the expected case is
+	 * The firmware fills a multi-packet capture URB completely rather than
+	 * terminating at one 512 B packet, so the expected case is
 	 * actual_length == JOCKEY3_CAPTURE_XFER_SIZE. Derive the count from
 	 * what actually came back rather than assuming N, in case that
 	 * changes under load or on other firmware revisions.
@@ -906,7 +888,7 @@ static void jockey3_capture_callback(struct urb *urb)
 			/*
 			 * A short trailing partial packet: use the
 			 * complete ones and drop the rest, but this should
-			 * not happen on firmware behaving as E2a found it to
+			 * not happen on firmware behaving as described above
 			 * -- log it once so a change in device behavior is
 			 * visible instead of silently discarded audio (see
 			 * CLAUDE.md's fault-handling principle).
@@ -1073,28 +1055,11 @@ static void jockey3_playback_callback(struct urb *urb)
 	bool active = false;
 	bool stopping;
 	int i, sp, ret;
-	enum jockey3_urb_state urb_check;
-	u64 now = ktime_get_mono_fast_ns();
 
 	atomic_dec(&urb_stream->urbs_in_flight);
-	atomic64_set(&urb_stream->last_callback_time, now);
+	atomic64_set(&urb_stream->last_callback_time, ktime_get_mono_fast_ns());
 
-	/*
-	 * TEMPORARY DEBUG -- do not merge into main. Ground truth for the
-	 * 2026-08-27 "phantom completion defeats startup grace" investigation
-	 * (re/rate_change_stall.md): every N=1 arm64-prod stall found so far
-	 * shows last_callback_time landing ~100-130us after urbs_started_time,
-	 * far too fast to be the real first completion (independently measured
-	 * at ~20-23ms). Gated to the first 5ms after a restart so this does not
-	 * flood the ring buffer at N=1's completion rate over a full run.
-	 */
-	urb_check = jockey3_urb_check(urb);
-	if (now - atomic64_read(&urb_stream->urbs_started_time) < 5 * NSEC_PER_MSEC)
-		trace_printk("cb dir=playback ts=%llu status=%d urb_check=%d since_start_us=%llu\n",
-			     now, urb->status, urb_check,
-			     div_u64(now - atomic64_read(&urb_stream->urbs_started_time), 1000));
-
-	switch (urb_check) {
+	switch (jockey3_urb_check(urb)) {
 	case JOCKEY3_URB_STOPPED:
 		scoped_guard(spinlock_irqsave, &urb_stream->lock)
 			stopping = urb_stream->stopping;
@@ -1121,8 +1086,8 @@ static void jockey3_playback_callback(struct urb *urb)
 	 * (under the same lock), and this URB's buffer must only ever claim
 	 * to carry as many freshly written packets as it actually filled
 	 * this callback. Reading a larger value at resubmit than was used to
-	 * fill would send stale packets left over from an earlier, larger
-	 * N instead of tearing the ring down (E2d, E2d-exp).
+	 * fill would send stale packets left over from an earlier, larger N
+	 * instead of tearing the ring down.
 	 */
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		submit_pkts = urb_stream->n_pkts;
@@ -1543,12 +1508,11 @@ static int jockey3_start_urbs(struct jockey3_chip *chip)
 
 	/*
 	 * Each direction's ring is (re)armed at its own current N
-	 * (jockey3_pcm_hw_params()), which persists across a restart -- the
-	 * whole point of E2d is that this never has to fall back to the
-	 * JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N default just because the ring
-	 * turned over. A direction with no open stream is held at that
-	 * default by jockey3_pcm_close(), so it always
-	 * re-arms at a safe N.
+	 * (jockey3_pcm_hw_params()), which persists across a restart rather than
+	 * falling back to the JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N default just
+	 * because the ring turned over. A direction with no open stream is held
+	 * at that default by jockey3_pcm_close(), so it always re-arms at a
+	 * safe N.
 	 */
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		chip->playback.urbs[i]->transfer_buffer_length =
@@ -1819,8 +1783,8 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 		 * checking stopping second, as this used to, let a tick whose
 		 * data predated the stop act on it once stopping had already
 		 * gone false again, misreporting a rate change's own deliberate
-		 * silence as a stall. See re/rate_change_stall.md's 2026-08-26
-		 * follow-up for the hardware traces this closed.
+		 * silence as a stall. See re/rate_change_stall.md for the
+		 * hardware traces this closed.
 		 */
 		if (urb_stream->stopping) {
 			urb_stream->stall_reported = false;
@@ -1859,45 +1823,6 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 		}
 
 		age_ns = now - last;
-
-		/*
-		 * TEMPORARY DEBUG -- do not merge into main. Ground truth for
-		 * the 2026-08-26 real-age-vs-reported-age investigation
-		 * (re/rate_change_stall.md): what this function itself read
-		 * for last_callback_time/urbs_started_time right at the point
-		 * it computed age_ns, independent of any external observer
-		 * (a parallel bpftrace completion tracker gave numbers that
-		 * did not reconcile with dmesg's reported age, on both
-		 * x86_64-prod and arm64-prod). trace_printk(), not dev_dbg or
-		 * dev_warn: this must not perturb the timing it is measuring
-		 * the same way printk to the console already has once before
-		 * on this driver.
-		 *
-		 * in_flight/disconnected added ahead of the N=1/N=2/N=4 control
-		 * runs: every "expected silence" window this driver knows about
-		 * (rate change, suspend, pre_reset, disconnect, the startup
-		 * grace period) already routes through the stopping check above
-		 * or the urbs_started_time fallback, so a stall that reaches
-		 * this point is never a false positive from one of those --
-		 * what's still unknown per-onset is which of the two real
-		 * failure shapes the docstring above describes it is: URBs
-		 * stuck in flight (a genuine device/USB-side stall) versus the
-		 * ring empty (couldn't even submit, e.g. torn down underneath
-		 * the driver). Both are cheap reads already taken elsewhere in
-		 * this function for the dev_warn() below; logging them on every
-		 * tick, not just the rate-limited onset/recovery lines, is what
-		 * lets a stall be classified without waiting for it to also hit
-		 * the edge-triggered log.
-		 */
-		trace_printk("wdcheck dir=%d last_cb=%llu urbs_started=%llu last_used=%llu now=%llu age_ms=%llu stall_reported=%d in_flight=%d disconnected=%d startup=%d\n",
-			     direction,
-			     atomic64_read(&urb_stream->last_callback_time),
-			     atomic64_read(&urb_stream->urbs_started_time),
-			     last, now, div_u64(age_ns, NSEC_PER_MSEC),
-			     urb_stream->stall_reported,
-			     atomic_read(&urb_stream->urbs_in_flight),
-			     jockey3_is_disconnected(chip),
-			     startup);
 
 		open = urb_stream->substream;
 
@@ -2132,11 +2057,10 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 		 * time the lock is held; re-checking here is what makes a call
 		 * that raced a legitimate recovery a no-op instead of a second,
 		 * redundant full URB-ring teardown/rebuild landing right on top
-		 * of one that already succeeded. Found on the bench via bpftrace:
-		 * that redundant restart is what missed its own liveness budget
-		 * and escalated to a full USB reset a change that had already
-		 * recovered on its own never needed. See re/rate_change_stall.md's
-		 * 2026-08-26 follow-up.
+		 * of one that already succeeded. Without this re-check the
+		 * redundant restart can miss its own liveness budget and escalate
+		 * to a full USB reset that a change which had already recovered on
+		 * its own never needed. See re/rate_change_stall.md.
 		 */
 		if (jockey3_check_urb_stream_alive(urb_stream))
 			goto out;
@@ -2205,12 +2129,11 @@ static const struct snd_pcm_hardware jockey3_pcm_hw_playback = {
 	.buffer_bytes_max	= 1024 * 1024,
 	/*
 	 * One playback URB carries a packet count chosen per open by
-	 * jockey3_pcm_hw_params() (E2d, re/streaming_overhead_experiments.md),
-	 * of 10 frames * 4 channels * 3 bytes = 120 bytes each. period_elapsed
-	 * is OR'd across the packet loop in jockey3_playback_callback(),
-	 * so the minimum must cover at least one packet, the smallest a
-	 * URB can ever carry (N=1), or a period boundary inside a URB could
-	 * be missed entirely.
+	 * jockey3_pcm_hw_params(), of 10 frames * 4 channels * 3 bytes = 120
+	 * bytes each. period_elapsed is OR'd across the packet loop in
+	 * jockey3_playback_callback(), so the minimum must cover at least one
+	 * packet, the smallest a URB can ever carry (N=1), or a period boundary
+	 * inside a URB could be missed entirely.
 	 */
 	.period_bytes_min	= PLOYTEC_PLAYBACK_FRAMES * 4 * 3,
 	.period_bytes_max	= 512 * 1024,
@@ -2531,14 +2454,13 @@ static int jockey3_initialize_ploytec(struct jockey3_chip *chip, u32 *fw_version
  *
  * Chooses how many Ploytec packets each USB bulk URB on this direction
  * carries, called "N" below for brevity: the largest power of two with
- * N * pkt_bytes <= period_bytes (E2d, re/streaming_overhead_experiments.md).
- * A big period gets the full coalescing saving, a tiny one falls back to
- * N=1 automatically via .period_bytes_min. Takes effect without tearing the
- * URB ring down --
- * E2d-exp found the firmware cannot tell an N x 512 B bulk transfer apart
- * from N separate 512 B ones, so each URB on this direction simply picks up
- * the new N at its own next resubmission; the ring turns over onto it within
- * at most JOCKEY3_N_URBS completions.
+ * N * pkt_bytes <= period_bytes. A big period gets the full coalescing
+ * saving, a tiny one falls back to N=1 automatically via .period_bytes_min.
+ * Takes effect without tearing the URB ring down -- the firmware cannot tell
+ * an N x 512 B bulk transfer apart from N separate 512 B ones, so each URB on
+ * this direction simply picks up the new N at its own next resubmission; the
+ * ring turns over onto it within at most JOCKEY3_N_URBS completions. See
+ * re/streaming_overhead.md for the rationale and measurements.
  *
  * Called unconditionally on every hw_params(), including when the rate is
  * unchanged and the URB ring is never touched: N is a per-open, per-period
