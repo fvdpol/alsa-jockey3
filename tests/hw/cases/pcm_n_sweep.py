@@ -435,7 +435,7 @@ def run_one(c, device, stream, ladder, period_frames, seconds, repeats, i, total
     record["n_correct"] = (detected == n)
 
     verdict = "correct" if record["n_correct"] else "WRONG"
-    xrun_note = "" if transfer_clean else " (host xruns, informational)"
+    xrun_note = "" if transfer_clean else f" ({total_xruns} xruns)"
     c.progress(f"{stream}: period={period_bytes}B, expected N={n} -- "
               f"detected N={detected}: {verdict}{xrun_note}")
 
