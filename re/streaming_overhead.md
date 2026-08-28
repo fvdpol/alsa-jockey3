@@ -1013,6 +1013,66 @@ be at least one URB span.** That constant and its comment change with N.
 (`JOCKEY3_WATCHDOG_STALL_MS` at 20 ms is still 11 URB spans in the worst case
 and needs no change, but its justification text does.)
 
+### 2026-08-28: E2 complete -- N chosen per PCM open, implemented and hardware-validated
+
+The "next step" above has been taken and closed. `re/streaming_overhead_experiments.md`'s
+**E2d** section has the full design record and the **E2d-exp** result (runtime
+`transfer_buffer_length` changes need no ring teardown -- confirmed on
+`x86_64-prod` hardware, for host-side/USB-core reasons rather than a firmware
+accommodation, since `PLOYTEC_PKT_SIZE` is exactly the USB high-speed bulk
+max-packet size). Its "Implementation status" subsection lists everything
+that landed in `jockey3.c` on `dev/streaming-overhead`.
+
+**This changes how the two sections above should be read.** They analyze a
+single, compile-time N=8 applied to every stream. That is not what shipped.
+`jockey3_pcm_set_n()` derives N from the requested period size on every
+`hw_params()` call, per direction: `1 <= N <= 8`, largest power of two with
+`N * pkt_bytes <= period_bytes`. A small-period client (the common case for
+low-latency work) lands on N=1 or N=2 and pays none of the "What it costs"
+figures above -- those apply only to a client whose period size is large
+enough to actually earn N=8. The completions/s table is still the correct
+number *for the N=8 case*; it is no longer *the* number, because N=8 is now
+one outcome among four rather than the only one.
+
+The specific risks the "What it costs to implement" section flagged were
+each resolved as anticipated: `period_bytes_min` was relaxed to the N=1
+values (120/144 bytes) rather than left at the old N=8 floor, and
+`jockey3_check_urb_stream_alive()`'s liveness window is no longer a
+hardcoded `NSEC_PER_MSEC` -- `JOCKEY3_LIVENESS_WINDOW_NS(shift)` scales it
+with the direction's live `n_shift`, so the "must be at least one URB span"
+rule holds at whatever N that direction actually negotiated, not just at
+N=8. Ring depth was left at 8 URBs; since N is now chosen per open rather
+than fixed, the 64-packets-in-flight worst case only occurs for a client
+that specifically negotiates a large enough period to get N=8, and revisiting
+ring depth did not come up as necessary during implementation or hardware
+validation.
+
+**Hardware validation:** `JT-PCM-010` (`tests/hw/cases/pcm_n_sweep.py`) --
+real sustained transfers at every period size on the ladder
+`1, 2, 3, 4, 5, 7, 8, 12, 16` packets, verifying via a gated `dev_dbg` that
+the driver actually chose the expected N (not just that the transfer ran
+xrun-free) -- came back clean on both `x86_64-prod/20260828T174506Z-functional`
+and `arm64-prod/20260828T175023Z-functional`: 9/9 candidates N-correct in
+both directions, on both platforms, no `EPROTO`/unexpected driver
+messages/oops in either run's `dmesg.txt`, xruns only at the tightest N=1
+buffer (metrics-only, not a failure criterion here -- see
+`jockey3-audio-test-gain-invariance`-style reasoning: absolute performance
+at the tightest legal buffer is host-dependent, not a driver correctness
+question).
+
+**What this validation does not cover:** the completions/s and `cpu%`/irq
+tables above are from the earlier fixed-N=1/2/4/8 sweep, built with N as a
+compile-time constant for the whole run. `JT-PCM-010` proves N *selection*
+is correct and that streaming survives at every N the runtime mechanism can
+choose -- it does not re-run `JT-PERF-001` against the runtime-N build, so
+the CPU/interrupt savings figures above are not re-confirmed on the shipped
+mechanism itself. Nothing found during implementation or validation suggests
+they would differ (a URB carrying N packets looks identical on the wire and
+to the completion handler regardless of whether N was chosen at compile time
+or at `hw_params()` time), but this is an assumption, not a measured claim.
+Re-running `JT-PERF-001` on the runtime-N build would close that gap if the
+exact savings-at-N=8 number is needed again for something.
+
 ### Related, smaller lever: `URB_NO_INTERRUPT`
 
 Setting `URB_NO_INTERRUPT` on all but the last URB of a queued run asks the
