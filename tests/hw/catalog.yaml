@@ -757,6 +757,58 @@ cases:
       entry, the same way JT-PCM-002/004 both point at cases/pcm.py with
       different args rather than being two separate exec files.
 
+  - id: JT-PCM-010
+    title: Packet/URB coalescing (N) validation sweep
+    area: PCM
+    level: L3
+    mode: automated
+    status: implemented
+    requires: [device, sox]
+    exec: cases/pcm_n_sweep.py
+    params:
+      duration_s: 10
+      repeats_per_size: 3
+    metrics:
+      - playback_results
+      - capture_results
+      - playback_clean_count
+      - capture_clean_count
+      - playback_candidates_tested
+      - capture_candidates_tested
+    pass: >
+      Every period size on the ladder (landing on N=1, 2, 4 and 8; a few
+      non-power-of-two multiples in between that must floor to the same
+      values; and one control point above the N=8 ceiling) runs a real,
+      sustained transfer with zero xruns. Unlike JT-PCM-007, a candidate
+      that is not clean here is a failure, not an expected boundary effect
+      -- every size sits well above the absolute legal minimum.
+    notes: >
+      E2d (re/streaming_overhead_experiments.md) made jockey3_pcm_hw_params()
+      choose the packets-per-URB count ("N") from the negotiated period size,
+      and relaxed .period_bytes_min to the N=1 values (120 playback / 144
+      capture). That legalized period sizes that used to sit below the
+      driver's old fixed floor, and every period at or above 240 B playback /
+      288 B capture now automatically gets a bigger, coalesced N where it
+      always got N=1 before -- a code path no period size could reach until
+      now.
+
+      JT-PCM-007 already runs real transfers at doubling period sizes, but
+      stops at the first clean one -- the wrong shape here, since the job is
+      to confirm every N the driver can choose runs clean, not just the
+      smallest. This case runs the same real-transfer method (sox/aplay,
+      arecord, exact period/buffer negotiation) at every rung of the ladder,
+      always, with no early exit. The ladder is not just powers of two: 3, 5
+      and 12 packets' worth of bytes are included specifically to confirm
+      jockey3_pcm_set_n() floors to the nearest legal N (2, 4, 8) rather
+      than rounding up or choosing a non-power-of-two N, which cannot exist.
+
+      Does NOT confirm the driver actually chose the expected N at each size
+      -- that needs the hw_params() dev_dbg line read back from the kernel
+      log, which a case must not do itself (runner's job, per lib/case.py).
+      Wiring that up needs a new jockey3-testctl dyndbg verb plus a
+      runner-side enable/parse step, mirroring dyndbg-firmware /
+      env.enable_firmware_debug() -- a follow-up, not done here.
+
   # ------------------------------------------------------------------- RATE
 
   - id: JT-RATE-001
