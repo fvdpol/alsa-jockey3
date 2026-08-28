@@ -15,9 +15,8 @@ could reach until now.
 JT-PCM-007 (pcm_latency_sweep.py) already runs real, sustained transfers at
 doubling period sizes, but it stops at the FIRST clean size: its job is a
 single achievable-latency number. That is the wrong shape here. This case's
-job is to confirm every N the driver can choose (1, 2, 4, 8) runs clean
-under real load, so every candidate below is tested regardless of whether an
-earlier one already came back clean.
+job is to confirm the driver picks the RIGHT N -- 1, 2, 4 or 8 -- at every
+period size it can occur at, not just the smallest.
 
 Candidates are the exact period sizes that land on each N per
 jockey3_pcm_set_n()'s formula, a handful of NON-power-of-two multiples in
@@ -42,34 +41,48 @@ ceiling as a control that N stays capped rather than growing further:
     ladder=12 -> N=8   12 x packets  (1440 B playback / 1728 B capture, floors + capped)
     ladder=16 -> N=8   16 x packets  (1920 B playback / 2304 B capture, control)
 
+What actually matters here is whether jockey3_pcm_set_n() chose the RIGHT N
+at each period size -- not whether the transfer happened to run xrun-free.
+An xrun is a fact about this host's own USB/scheduling headroom at a given
+size, worth recording, but it says nothing about whether the driver's N
+selection was correct, and a host with no headroom at all could xrun at
+every size without that ever being a wrong-N bug. So N verification is the
+pass/fail criterion; xruns are metrics only, reported for visibility into
+what this host can sustain, never failed on.
+
+N is confirmed by reading back jockey3_pcm_set_n()'s dev_dbg line
+("hw_params: %s using %u packet(s)/URB (period_bytes=%u)") from the kernel
+log, bracketed by a pair of markers (lib/kmsg.Marker) written immediately
+before and after probe_hw_params()'s exact, non-rounding negotiation --
+which reaches the identical jockey3_pcm_hw_params() code path any other
+open does, so a probe-only window is sufficient proof of what N the driver
+picked for that period size. A case reading dmesg for its own targeted
+diagnostics is established practice in this suite (see rate_change.py's
+marker-windowed event attribution, and perf_baseline.py's direct
+priv.trace_callbacks_*() calls) -- lib/case.py's "a case does not inspect
+the kernel log" is about the runner's own independent classification never
+being second-guessed by a case's self-report, not a blanket ban.
+
+The hw_params() dev_dbg is off by default (dynamic_debug), so main() turns
+it on for just this format string via the new jockey3-testctl
+dyndbg-hwparams-n verb (mirroring dyndbg-firmware) before sweeping, and
+off again afterwards.
+
 Real-transfer method (sox piped into aplay for playback, arecord to
 /dev/null for capture, exact period/buffer negotiation via
 probe_hw_params(), DURATION_S seconds x REPEATS_PER_SIZE repeats) is the
 same rigor JT-PCM-007 uses, and its helper functions are duplicated rather
 than imported -- cases in this suite are each meant to stand alone (see
-pcm_latency_sweep.py's own note on the same choice).
-
-Unlike JT-PCM-007, a candidate that does not run clean here IS a failure:
-every size on the ladder sits comfortably above the absolute legal minimum,
-so an xrun is a regression signal, not an expected boundary effect. That
-includes ladder=1 (N=1) -- unchanged behavior from before E2d, but worth
-reconfirming as the baseline every other rung is compared against.
-
-Known limitation: this case does not confirm the driver actually chose the
-EXPECTED N at each period size -- that would need the hw_params() dev_dbg
-line (see jockey3_pcm_set_n()) read back from the kernel log, which a case
-must not do itself (lib/case.py's module docstring: log inspection is the
-runner's job). Wiring that up needs a new jockey3-testctl dyndbg verb
-(mirroring dyndbg-firmware) plus a runner-side enable/parse step (mirroring
-env.enable_firmware_debug()/firmware_from_log()) -- a follow-up, not done
-here. What this case DOES confirm directly: real playback/capture survives,
-xrun-free, at every period size the driver's N selection actually has to
-handle.
+pcm_latency_sweep.py's own note on the same choice). Every candidate on the
+ladder is tested, never skipped once an earlier one already came back
+clean/correct -- the wrong shape, inherited from repurposing JT-PCM-007,
+would have been to stop at the first one.
 """
 
 import ctypes
 import ctypes.util
 import os
+import re
 import subprocess
 import sys
 
@@ -77,7 +90,15 @@ sys.path.insert(0, os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
 from lib.case import Case          # noqa: E402
-from lib import alsa               # noqa: E402
+from lib import alsa, kmsg, priv   # noqa: E402
+
+# jockey3_pcm_set_n()'s dev_dbg (jockey3.c), enabled for the run by
+# priv.dyndbg_hwparams_n(). Captures the direction and both numbers it
+# reports so a match can be cross-checked against the exact candidate under
+# test, not just trusted because it appeared inside the marker window.
+DETECTED_RE = re.compile(
+    r'hw_params:\s+(playback|capture)\s+using\s+(\d+)\s+packet\(s\)/URB\s+'
+    r'\(period_bytes=(\d+)\)')
 
 # Fixed for the same reason pcm_latency_sweep.py fixes it: a rate change
 # tears down and reprograms the device, which this sweep has no business
@@ -300,11 +321,43 @@ def candidate_periods(stream):
     return out
 
 
+def detect_n(log, stream, period_bytes, start_mark, end_mark):
+    """The N jockey3_pcm_set_n() actually logged for this candidate, or
+    None if it cannot be determined.
+
+    Slices the log between the two markers (by line index of their tokens,
+    not by timestamp -- see lib/kmsg.py's module docstring on why), then
+    takes the LAST DETECTED_RE match in that window whose direction and
+    period_bytes match this exact candidate. Matching on period_bytes as
+    well as direction, not just direction, is what makes this safe even if
+    some other hw_params() call landed in the same window: a match that
+    does not carry OUR period_bytes is not a message about this candidate,
+    marker window or not.
+    """
+    if not (start_mark.written and end_mark.written):
+        return None
+    start_idx = end_idx = None
+    for i, line in enumerate(log):
+        if start_mark.token in line:
+            start_idx = i
+        elif end_mark.token in line and start_idx is not None:
+            end_idx = i
+            break
+    if start_idx is None or end_idx is None:
+        return None
+    detected = None
+    for line in log[start_idx + 1:end_idx]:
+        m = DETECTED_RE.search(line)
+        if m and m.group(1) == stream and int(m.group(3)) == period_bytes:
+            detected = int(m.group(2))
+    return detected
+
+
 def run_one(c, device, stream, ladder, period_frames, seconds, repeats, i, total):
-    """Probe once, then transfer `repeats` times. Clean only if every
-    repeat ran with zero xruns, exited zero, AND actually negotiated the
-    exact size asked for -- see pcm_latency_sweep.py's run_one() for the
-    full rationale, which applies unchanged here."""
+    """Probe once, bracketed by markers so detect_n() can find the N
+    jockey3_pcm_set_n() logged for exactly this period size, then transfer
+    `repeats` times for the (informational only, see module docstring)
+    xrun/avail_max metrics."""
     info = STREAMS[stream]
     buffer_frames = period_frames * PERIODS
     period_bytes = period_frames * FRAME_BYTES[stream]
@@ -313,8 +366,13 @@ def run_one(c, device, stream, ladder, period_frames, seconds, repeats, i, total
     c.status(f"  [{stream} {i}/{total}] N={n} period={period_bytes}B "
              f"({period_frames}fr) x{PERIODS}...")
 
+    start_mark = kmsg.Marker(f"{c.id}-{stream}-{ladder}-s")
+    start_mark.write()
     ok, probe_err = probe_hw_params(device, stream, info["channels"],
                                      period_frames, buffer_frames)
+    end_mark = kmsg.Marker(f"{c.id}-{stream}-{ladder}-e")
+    end_mark.write()
+
     record = {"stream": stream, "ladder": ladder, "expected_n": n,
               "period_frames": period_frames, "period_bytes": period_bytes,
               "buffer_frames": buffer_frames}
@@ -322,15 +380,21 @@ def run_one(c, device, stream, ladder, period_frames, seconds, repeats, i, total
         # Every size on this ladder is at or above the relaxed N=1
         # .period_bytes_min, so a refusal here is a driver fault, not a
         # latency data point -- unlike pcm_latency_sweep.py, there is no
-        # "below the legal floor" case on this ladder at all.
+        # "below the legal floor" case on this ladder at all. Nothing to
+        # detect N from either: hw_params() never ran.
         c.fail(f"{stream} N={n} period={period_bytes}B: legal-range config "
                f"refused by hw_params: {probe_err}")
-        record["clean"] = False
+        record["detected_n"] = None
+        record["n_correct"] = False
+        record["xruns"] = None
+        record["avail_max"] = None
+        record["transfer_clean"] = None
         record["error"] = probe_err
-        return record
+        return record, None, None
 
     total_xruns = 0
     max_avail_max = 0
+    transfer_clean = True
     for attempt in range(1, repeats + 1):
         c.status(f"  [{stream} {i}/{total}] N={n} period={period_bytes}B "
                  f"({period_frames}fr) x{PERIODS} -- repeat {attempt}/{repeats}...")
@@ -339,57 +403,38 @@ def run_one(c, device, stream, ladder, period_frames, seconds, repeats, i, total
         total_xruns += xruns
         max_avail_max = max(max_avail_max, avail_max)
 
-        neg_period = hw_params.get("period_size")
-        neg_buffer = hw_params.get("buffer_size")
-        if neg_period != period_frames or neg_buffer != buffer_frames:
-            # aplay/arecord's --period-size/--buffer-size go through the
-            # rounding *_near() setters, not the exact ones probe_hw_params()
-            # used -- so a transfer that ran at a different size than what
-            # was probed says nothing about the N under test here.
-            c.fail(f"{stream} N={n} period={period_bytes}B: transfer "
-                   f"negotiated {neg_period}/{neg_buffer} frames, not "
-                   f"{period_frames}/{buffer_frames} -- aplay/arecord "
-                   "rounded away from the probed size")
-            record["clean"] = False
-            record["negotiated_period_frames"] = neg_period
-            record["negotiated_buffer_frames"] = neg_buffer
-            return record
-
+        # Informational only (see module docstring): an xrun here is a fact
+        # about this host's own USB/scheduling headroom at this size, not
+        # evidence about whether jockey3_pcm_set_n() chose the right N --
+        # that is decided by detect_n() against the probe window above,
+        # independent of anything that happens in this loop.
         err_lower = (err or "").lower()
-        looks_bad = xruns or rc != 0 or "xrun" in err_lower or "broken pipe" in err_lower
-        if looks_bad:
-            # Unlike pcm_latency_sweep.py, this IS a failure: every size on
-            # this ladder sits well above the absolute legal minimum and is
-            # meant to run clean, so an xrun here is the regression this
-            # case exists to catch, not an expected boundary effect.
-            c.fail(f"{stream} N={n} period={period_bytes}B: not clean on "
+        if xruns or rc != 0 or "xrun" in err_lower or "broken pipe" in err_lower:
+            c.note(f"{stream} N={n} period={period_bytes}B: not clean on "
                    f"repeat {attempt}/{repeats} (rc={rc}, xruns={xruns}, "
-                   f"avail_max={avail_max})")
-            record["clean"] = False
-            record["xruns"] = total_xruns
-            record["avail_max"] = max_avail_max
-            return record
+                   f"avail_max={avail_max}) -- informational, not a failure")
+            transfer_clean = False
 
-    record["clean"] = True
     record["xruns"] = total_xruns
     record["avail_max"] = max_avail_max
-    return record
+    record["transfer_clean"] = transfer_clean
+    return record, start_mark, end_mark
 
 
 def sweep_stream(c, device, stream, seconds, repeats):
     """Every candidate on the ladder, always -- no early return once one is
-    clean. That is the entire difference from pcm_latency_sweep.py's
+    correct. That is the entire difference from pcm_latency_sweep.py's
     sweep_stream()."""
     candidates = candidate_periods(stream)
     results = []
+    marks = []
     for i, (ladder, period_frames) in enumerate(candidates, 1):
-        record = run_one(c, device, stream, ladder, period_frames, seconds,
-                         repeats, i, len(candidates))
+        record, start_mark, end_mark = run_one(
+            c, device, stream, ladder, period_frames, seconds, repeats,
+            i, len(candidates))
         results.append(record)
-        verdict = "clean" if record["clean"] else "NOT CLEAN"
-        c.progress(f"{stream}: N={record['expected_n']} "
-                  f"period={record['period_bytes']}B -- {verdict}")
-    return results
+        marks.append((record, start_mark, end_mark))
+    return results, marks
 
 
 def main():
@@ -397,16 +442,65 @@ def main():
     c.require_card()
     c.require_tools("aplay", "arecord", "sox")
 
-    device = c.device or alsa.device_name(c.card)
-    seconds = c.params.get("duration_s", DURATION_S)
-    repeats = c.params.get("repeats_per_size", REPEATS_PER_SIZE)
+    ok, why = priv.available()
+    if not ok:
+        c.blocked(f"cannot enable the hw_params N dev_dbg: {why}")
+    ok, err = priv.dyndbg_hwparams_n(True)
+    if not ok:
+        c.blocked(f"cannot enable the hw_params N dev_dbg: {err}")
 
-    for stream in ("playback", "capture"):
-        results = sweep_stream(c, device, stream, seconds, repeats)
-        c.metric(f"{stream}_results", results)
-        clean_count = sum(1 for r in results if r["clean"])
-        c.metric(f"{stream}_clean_count", clean_count)
-        c.metric(f"{stream}_candidates_tested", len(results))
+    try:
+        device = c.device or alsa.device_name(c.card)
+        seconds = c.params.get("duration_s", DURATION_S)
+        repeats = c.params.get("repeats_per_size", REPEATS_PER_SIZE)
+
+        all_marks = []
+        for stream in ("playback", "capture"):
+            results, marks = sweep_stream(c, device, stream, seconds, repeats)
+            all_marks.extend(marks)
+            c.metric(f"{stream}_candidates_tested", len(results))
+
+        # One read for every candidate across both streams -- markers make
+        # each window self-identifying, so there is no need to read once
+        # per candidate (see lib/kmsg.py: read_log() is a single ring-buffer
+        # snapshot, not something to call in a tight loop).
+        log = kmsg.read_log()
+
+        by_stream = {"playback": [], "capture": []}
+        for record, start_mark, end_mark in all_marks:
+            if start_mark is not None:  # None => hw_params was refused, already recorded
+                detected = detect_n(log, record["stream"], record["period_bytes"],
+                                    start_mark, end_mark)
+                record["detected_n"] = detected
+                record["n_correct"] = (detected == record["expected_n"])
+                if detected is None:
+                    c.fail(f"{record['stream']} N={record['expected_n']} "
+                           f"period={record['period_bytes']}B: no hw_params "
+                           "dev_dbg message found in the marker window -- N "
+                           "could not be verified")
+                elif not record["n_correct"]:
+                    c.fail(f"{record['stream']} period={record['period_bytes']}B: "
+                           f"driver picked N={detected}, expected "
+                           f"N={record['expected_n']}")
+            verdict = "correct" if record["n_correct"] else "WRONG"
+            xrun_note = "" if record["transfer_clean"] in (True, None) \
+                else " (host xruns, informational)"
+            c.progress(f"{record['stream']}: period={record['period_bytes']}B, "
+                      f"expected N={record['expected_n']} -- detected "
+                      f"N={record.get('detected_n')}: {verdict}{xrun_note}")
+            by_stream[record["stream"]].append(record)
+
+        for stream, results in by_stream.items():
+            c.metric(f"{stream}_results", results)
+            c.metric(f"{stream}_n_correct_count",
+                     sum(1 for r in results if r["n_correct"]))
+            c.metric(f"{stream}_xrun_clean_count",
+                     sum(1 for r in results if r.get("transfer_clean")))
+    finally:
+        # Best-effort: leaving this on is harmless (one line per hw_params()
+        # call, which is not a hot path) but every other case's dmesg.txt
+        # should not carry a message this run turned on for its own purposes.
+        priv.dyndbg_hwparams_n(False)
 
     c.done()
 

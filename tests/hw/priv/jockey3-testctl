@@ -59,6 +59,16 @@ DYNDBG=/sys/kernel/debug/dynamic_debug/control
 # only visible symptom was every run recording "firmware unknown".
 FW_MATCH='Firmware'
 
+# The one dev_dbg naming the sub-packets-per-URB count ("N") a direction was
+# just armed with, in jockey3_pcm_set_n() (jockey3.c):
+#
+#     dev_dbg(&chip->intf0->dev,
+#             "hw_params: %s using %u packet(s)/URB (period_bytes=%u)\n", ...)
+#
+# Space-free for the same reason FW_MATCH is, though this one is never used
+# via the modprobe dyndbg= path -- see dyndbg-hwparams-n below.
+HWPARAMS_N_MATCH='packet(s)/URB'
+
 # The two URB completion handlers trace-callbacks profiles, for JT-PERF-001.
 # Fixed here for the same reason FW_MATCH is: the caller names an ACTION
 # (start/collect/stop), never a target function -- an arbitrary function name
@@ -101,6 +111,7 @@ usage() {
 #   dmesg-read             print the kernel log
 #   dmesg-mark <token>     write a JT-MARK boundary token to /dev/kmsg
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
+#   dyndbg-hwparams-n on|off enable/disable the hw_params() packets/URB (N) message
 #   printk-console <1-8>   set the console loglevel
 #   xrun-debug 0|1        make the ALSA core log every xrun to the kernel log
 #   xrun-inject pcm0p|pcm0c   force an xrun on that substream's sub0, via
@@ -321,6 +332,24 @@ dyndbg-firmware)
 	# No quoting needed here: this path goes straight to the dynamic debug
 	# tokenizer with no parse_args in between, and the match is space-free.
 	printf 'format %s %s\n' "$FW_MATCH" "$flag" > "$DYNDBG" \
+		|| die "cannot write $DYNDBG"
+	exit 0
+	;;
+
+dyndbg-hwparams-n)
+	[ $# -eq 1 ] || die "dyndbg-hwparams-n needs on or off"
+	case "$1" in
+	on)  flag='+p' ;;
+	off) flag='-p' ;;
+	*)   die "dyndbg-hwparams-n takes on or off" ;;
+	esac
+	[ -e "$DYNDBG" ] || die "debugfs dynamic_debug not available"
+	# Same reasoning as dyndbg-firmware: matched by format string, fixed in
+	# this file, so the log is not flooded by every other dev_dbg in the
+	# driver. Unlike the firmware message this one fires on every
+	# hw_params() call (every PCM open), not just at probe, so a live write
+	# to the control file is enough -- no modprobe dyndbg= parameter needed.
+	printf 'format %s %s\n' "$HWPARAMS_N_MATCH" "$flag" > "$DYNDBG" \
 		|| die "cannot write $DYNDBG"
 	exit 0
 	;;

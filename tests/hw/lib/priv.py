@@ -117,6 +117,12 @@ def dyndbg_firmware(on=True, timeout=20):
     return rc == 0, (err or "").strip()
 
 
+def dyndbg_hwparams_n(on=True, timeout=20):
+    rc, _out, err = call("dyndbg-hwparams-n", "on" if on else "off",
+                         timeout=timeout)
+    return rc == 0, (err or "").strip()
+
+
 def printk_console(level, timeout=20):
     rc, _out, err = call("printk-console", level, timeout=timeout)
     return rc == 0, (err or "").strip()
