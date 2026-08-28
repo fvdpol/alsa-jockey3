@@ -355,9 +355,16 @@ def detect_n(log, stream, period_bytes, start_mark, end_mark):
 
 def run_one(c, device, stream, ladder, period_frames, seconds, repeats, i, total):
     """Probe once, bracketed by markers so detect_n() can find the N
-    jockey3_pcm_set_n() logged for exactly this period size, then transfer
+    jockey3_pcm_set_n() logged for exactly this period size; transfer
     `repeats` times for the (informational only, see module docstring)
-    xrun/avail_max metrics."""
+    xrun/avail_max metrics; then resolve and report this candidate's
+    verdict before moving on to the next one.
+
+    Reports its own permanent line (Case.progress()) before calling
+    Case.fail(), never after: the runner takes a case's failure reason from
+    the LAST line of stderr, so a progress line printed afterwards would
+    silently bury it (see the jockey3-test-progress-output convention).
+    """
     info = STREAMS[stream]
     buffer_frames = period_frames * PERIODS
     period_bytes = period_frames * FRAME_BYTES[stream]
@@ -382,15 +389,13 @@ def run_one(c, device, stream, ladder, period_frames, seconds, repeats, i, total
         # latency data point -- unlike pcm_latency_sweep.py, there is no
         # "below the legal floor" case on this ladder at all. Nothing to
         # detect N from either: hw_params() never ran.
+        record.update(detected_n=None, n_correct=False, xruns=None,
+                      avail_max=None, transfer_clean=None, error=probe_err)
+        c.progress(f"{stream}: period={period_bytes}B, expected N={n} -- "
+                  f"hw_params refused: {probe_err}")
         c.fail(f"{stream} N={n} period={period_bytes}B: legal-range config "
                f"refused by hw_params: {probe_err}")
-        record["detected_n"] = None
-        record["n_correct"] = False
-        record["xruns"] = None
-        record["avail_max"] = None
-        record["transfer_clean"] = None
-        record["error"] = probe_err
-        return record, None, None
+        return record
 
     total_xruns = 0
     max_avail_max = 0
@@ -418,7 +423,31 @@ def run_one(c, device, stream, ladder, period_frames, seconds, repeats, i, total
     record["xruns"] = total_xruns
     record["avail_max"] = max_avail_max
     record["transfer_clean"] = transfer_clean
-    return record, start_mark, end_mark
+
+    # Read back now, per candidate, rather than once at the very end: this
+    # is what lets run_one() report ITS OWN permanent line before moving on
+    # (see docstring), instead of a wall of transient status updates
+    # followed by every verdict appearing at once when the run finishes.
+    # Cheap either way -- one dmesg read per candidate, not a hot path.
+    log = kmsg.read_log()
+    detected = detect_n(log, stream, period_bytes, start_mark, end_mark)
+    record["detected_n"] = detected
+    record["n_correct"] = (detected == n)
+
+    verdict = "correct" if record["n_correct"] else "WRONG"
+    xrun_note = "" if transfer_clean else " (host xruns, informational)"
+    c.progress(f"{stream}: period={period_bytes}B, expected N={n} -- "
+              f"detected N={detected}: {verdict}{xrun_note}")
+
+    if detected is None:
+        c.fail(f"{stream} N={n} period={period_bytes}B: no hw_params "
+               "dev_dbg message found in the marker window -- N could "
+               "not be verified")
+    elif not record["n_correct"]:
+        c.fail(f"{stream} period={period_bytes}B: driver picked "
+               f"N={detected}, expected N={n}")
+
+    return record
 
 
 def sweep_stream(c, device, stream, seconds, repeats):
@@ -427,14 +456,11 @@ def sweep_stream(c, device, stream, seconds, repeats):
     sweep_stream()."""
     candidates = candidate_periods(stream)
     results = []
-    marks = []
     for i, (ladder, period_frames) in enumerate(candidates, 1):
-        record, start_mark, end_mark = run_one(
-            c, device, stream, ladder, period_frames, seconds, repeats,
-            i, len(candidates))
+        record = run_one(c, device, stream, ladder, period_frames, seconds,
+                         repeats, i, len(candidates))
         results.append(record)
-        marks.append((record, start_mark, end_mark))
-    return results, marks
+    return results
 
 
 def main():
@@ -454,44 +480,10 @@ def main():
         seconds = c.params.get("duration_s", DURATION_S)
         repeats = c.params.get("repeats_per_size", REPEATS_PER_SIZE)
 
-        all_marks = []
         for stream in ("playback", "capture"):
-            results, marks = sweep_stream(c, device, stream, seconds, repeats)
-            all_marks.extend(marks)
-            c.metric(f"{stream}_candidates_tested", len(results))
-
-        # One read for every candidate across both streams -- markers make
-        # each window self-identifying, so there is no need to read once
-        # per candidate (see lib/kmsg.py: read_log() is a single ring-buffer
-        # snapshot, not something to call in a tight loop).
-        log = kmsg.read_log()
-
-        by_stream = {"playback": [], "capture": []}
-        for record, start_mark, end_mark in all_marks:
-            if start_mark is not None:  # None => hw_params was refused, already recorded
-                detected = detect_n(log, record["stream"], record["period_bytes"],
-                                    start_mark, end_mark)
-                record["detected_n"] = detected
-                record["n_correct"] = (detected == record["expected_n"])
-                if detected is None:
-                    c.fail(f"{record['stream']} N={record['expected_n']} "
-                           f"period={record['period_bytes']}B: no hw_params "
-                           "dev_dbg message found in the marker window -- N "
-                           "could not be verified")
-                elif not record["n_correct"]:
-                    c.fail(f"{record['stream']} period={record['period_bytes']}B: "
-                           f"driver picked N={detected}, expected "
-                           f"N={record['expected_n']}")
-            verdict = "correct" if record["n_correct"] else "WRONG"
-            xrun_note = "" if record["transfer_clean"] in (True, None) \
-                else " (host xruns, informational)"
-            c.progress(f"{record['stream']}: period={record['period_bytes']}B, "
-                      f"expected N={record['expected_n']} -- detected "
-                      f"N={record.get('detected_n')}: {verdict}{xrun_note}")
-            by_stream[record["stream"]].append(record)
-
-        for stream, results in by_stream.items():
+            results = sweep_stream(c, device, stream, seconds, repeats)
             c.metric(f"{stream}_results", results)
+            c.metric(f"{stream}_candidates_tested", len(results))
             c.metric(f"{stream}_n_correct_count",
                      sum(1 for r in results if r["n_correct"]))
             c.metric(f"{stream}_xrun_clean_count",
