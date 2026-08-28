@@ -797,10 +797,15 @@ cases:
       to confirm every N the driver can choose runs clean, not just the
       smallest. This case runs the same real-transfer method (sox/aplay,
       arecord, exact period/buffer negotiation) at every rung of the ladder,
-      always, with no early exit. The ladder is not just powers of two: 3, 5
-      and 12 packets' worth of bytes are included specifically to confirm
-      jockey3_pcm_set_n() floors to the nearest legal N (2, 4, 8) rather
-      than rounding up or choosing a non-power-of-two N, which cannot exist.
+      always, with no early exit. The ladder is not just powers of two: 3,
+      5, 7 and 12 packets' worth of bytes are included specifically to
+      confirm jockey3_pcm_set_n() floors to the nearest legal N (2, 4, 4, 8)
+      rather than rounding up, to the nearest, or choosing a non-power-of-two
+      N, which cannot exist. ladder=7 is the sharpest of these: it sits
+      directly below the N=8 boundary, so a formula that rounds to the
+      nearest power of two instead of flooring would wrongly land it on N=8
+      too, indistinguishable from ladder=8 -- only a true floor produces N=4
+      here.
 
       Does NOT confirm the driver actually chose the expected N at each size
       -- that needs the hw_params() dev_dbg line read back from the kernel

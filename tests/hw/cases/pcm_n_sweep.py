@@ -21,19 +21,25 @@ earlier one already came back clean.
 
 Candidates are the exact period sizes that land on each N per
 jockey3_pcm_set_n()'s formula, a handful of NON-power-of-two multiples in
-between to confirm that formula rounds DOWN to the nearest power of two
-rather than up or to the nearest (a period that holds 5 packets' worth of
+between to confirm that formula floors to the nearest power of two rather
+than rounding up or to the nearest (a period that holds 5 packets' worth of
 bytes must still get N=4, not N=5 or N=8 -- N=5 is not a legal choice at
 all, jockey3_pcm_set_n() never produces one), and one point above the N=8
 ceiling as a control that N stays capped rather than growing further:
 
     ladder= 1 -> N=1    1 x packet   ( 120 B playback /  144 B capture)
     ladder= 2 -> N=2    2 x packets  ( 240 B playback /  288 B capture)
-    ladder= 3 -> N=2    3 x packets  ( 360 B playback /  432 B capture, rounds down)
+    ladder= 3 -> N=2    3 x packets  ( 360 B playback /  432 B capture, floors down)
     ladder= 4 -> N=4    4 x packets  ( 480 B playback /  576 B capture)
-    ladder= 5 -> N=4    5 x packets  ( 600 B playback /  720 B capture, rounds down)
+    ladder= 5 -> N=4    5 x packets  ( 600 B playback /  720 B capture, floors down)
+    ladder= 7 -> N=4    7 x packets  ( 840 B playback / 1008 B capture, floors down --
+                                       the sharpest case: 7 is adjacent to 8, so a
+                                       formula that rounds to the NEAREST power of two
+                                       instead of flooring would wrongly land this one
+                                       on N=8 too, indistinguishably from ladder=8. N=4
+                                       here is what proves it floors rather than rounds.)
     ladder= 8 -> N=8    8 x packets  ( 960 B playback / 1152 B capture)
-    ladder=12 -> N=8   12 x packets  (1440 B playback / 1728 B capture, rounds down + capped)
+    ladder=12 -> N=8   12 x packets  (1440 B playback / 1728 B capture, floors + capped)
     ladder=16 -> N=8   16 x packets  (1920 B playback / 2304 B capture, control)
 
 Real-transfer method (sox piped into aplay for playback, arecord to
@@ -93,14 +99,18 @@ PACKET_FRAMES = {"playback": 10, "capture": 8}
 
 PERIODS = 2     # smallest legal period count -- see pcm_limits.py PERIODS_MIN
 
-# Sub-packets/URB steps to exercise, in packets. 3, 5 and 12 are deliberately
-# NOT powers of two -- jockey3_pcm_set_n() must floor them to the nearest
-# legal N (2, 4 and 8 respectively), never round up and never pick a
-# non-power-of-two N, which does not exist. 16 is a control point past the
-# driver's N=8 ceiling (jockey3_pcm_set_n() clamps to JOCKEY3_PLAYBACK_N/
-# JOCKEY3_CAPTURE_N, both 8): it must land on the same N=8 as ladder=8 and
-# ladder=12, not grow further.
-N_LADDER = (1, 2, 3, 4, 5, 8, 12, 16)
+# Sub-packets/URB steps to exercise, in packets. 3, 5, 7 and 12 are
+# deliberately NOT powers of two -- jockey3_pcm_set_n() must floor them to
+# the nearest legal N (2, 4, 4 and 8 respectively), never round up and never
+# pick a non-power-of-two N, which does not exist. ladder=7 is the sharpest
+# of these: it sits directly below the N=8 boundary, so a formula that
+# rounds to the nearest power of two instead of flooring would wrongly land
+# it on N=8 too, indistinguishable from ladder=8 -- only a true floor
+# produces N=4 here. 16 is a control point past the driver's N=8 ceiling
+# (jockey3_pcm_set_n() clamps to JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N, both
+# 8): it must land on the same N=8 as ladder=8 and ladder=12, not grow
+# further.
+N_LADDER = (1, 2, 3, 4, 5, 7, 8, 12, 16)
 MAX_N = 8
 
 
