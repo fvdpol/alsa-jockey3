@@ -13,6 +13,7 @@
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include <linux/bitops.h>
+#include <linux/log2.h>
 #include <linux/timekeeping.h>
 #include <linux/completion.h>
 #include <linux/mutex.h>
@@ -24,6 +25,7 @@
 #include <sound/initval.h>
 #include <sound/rawmidi.h>
 #include <sound/pcm.h>
+#include <sound/pcm_params.h>
 #include "ploytec_proto.h"
 #include "ploytec_codec.h"
 #include "ploytec_midi.h"
@@ -135,38 +137,48 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_N_URBS 8
 
 /*
- * Sub-packets per URB, per direction (E2 -- transfer coalescing,
+ * Packets per URB ("N"), per direction (E2 -- transfer coalescing,
  * re/streaming_overhead.md Part 2). E2a probed the firmware with a
  * throwaway build-time toggle and found it accepts 2 x 512 B bulk transfers
  * cleanly in both directions; this is that finding turned into the real
- * per-sub-packet implementation. Kept as two separate constants, not one,
+ * per-packet implementation. Kept as two separate constants, not one,
  * because E2a's hardware run showed the two directions can have independent
  * answers to "does this firmware accept N x 512 B".
+ *
+ * These are the *allocation width*, not the live N: E2d-exp
+ * (re/streaming_overhead_experiments.md) established that the firmware
+ * cannot tell a bulk transfer's length apart from a run of separate
+ * transfers of the same total length -- PLOYTEC_PKT_SIZE is exactly the USB
+ * high-speed bulk max-packet size, so an N x 512 B transfer is, on the wire,
+ * indistinguishable from N separate 512 B ones. That is what lets
+ * jockey3_pcm_hw_params() pick a smaller N per PCM open and vary
+ * urb->transfer_buffer_length on a running ring (struct
+ * jockey3_pcm_urb_stream's @n_shift/@n_pkts) without tearing it down: the
+ * URB buffers stay allocated JOCKEY3_*_XFER_SIZE wide (8 x 512 B) regardless
+ * of the chosen N.
  *
  * N=1 in both directions must be byte-for-byte identical to the
  * pre-coalescing driver -- this is E2c's regression gate, and every loop
  * keyed off these constants below is written to degenerate to the original
- * single sub-packet code path at N=1.
+ * single packet code path at N=1.
  */
-#define JOCKEY3_PLAYBACK_N	1
-#define JOCKEY3_CAPTURE_N	1
+#define JOCKEY3_PLAYBACK_N	8
+#define JOCKEY3_CAPTURE_N	8
 
 #define JOCKEY3_PLAYBACK_XFER_SIZE	(JOCKEY3_PLAYBACK_N * PLOYTEC_PKT_SIZE)
 #define JOCKEY3_CAPTURE_XFER_SIZE	(JOCKEY3_CAPTURE_N * PLOYTEC_PKT_SIZE)
 
 /*
  * jockey3_check_urb_stream_alive()'s liveness window, per direction, scaled
- * by that direction's own N: the worst-case URB span scales linearly with N
- * (N packet intervals instead of one), so scaling the window the same way
- * keeps the same margin against it at any N instead of eating into a fixed
- * margin as N grows (a fixed 1 ms window left ~77% margin at N=1 but only
- * ~9% at N=4). JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N happen to be powers of
- * two today, which would make this a shift rather than a multiply if N ever
- * became a runtime value (re/streaming_overhead_experiments.md's "N derived
- * from period size" future direction) -- not something this macro or its
- * compile-time constants currently need or enforce.
+ * by that direction's own live N (struct jockey3_pcm_urb_stream's @n_shift):
+ * the worst-case URB span scales linearly with N (N packet intervals instead
+ * of one), so scaling the window the same way keeps the same margin against
+ * it at any N instead of eating into a fixed margin as N grows (a fixed 1 ms
+ * window left ~77% margin at N=1 but only ~9% at N=4). N is always a power
+ * of two (jockey3_pcm_hw_params() only ever derives one), so this is a shift
+ * rather than a multiply.
  */
-#define JOCKEY3_LIVENESS_WINDOW_NS(n)	((u64)NSEC_PER_MSEC * (n))
+#define JOCKEY3_LIVENESS_WINDOW_NS(shift)	((u64)NSEC_PER_MSEC << (shift))
 
 /* Consecutive URB transport errors tolerated before a direction is given up on */
 #define JOCKEY3_MAX_URB_ERRORS 8
@@ -175,11 +187,12 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * URB liveness watchdog.
  *
  * One URB carries JOCKEY3_PLAYBACK_N (playback) or JOCKEY3_CAPTURE_N
- * (capture) Ploytec sub-packets, so a healthy stream completes one URB every
- * N packet intervals: PLOYTEC_PLAYBACK_FRAMES (10) or PLOYTEC_CAPTURE_FRAMES
- * (8) PCM frames' worth of time, per sub-packet. A single sub-packet interval
- * is 226.8 us at 44100 Hz, the slowest supported rate, down to 83.3 us at
- * 96000 Hz; multiply by the relevant N for the actual URB span.
+ * (capture) Ploytec packets, so a healthy stream completes one URB every
+ * N packet intervals:
+ * PLOYTEC_PLAYBACK_FRAMES (10) or PLOYTEC_CAPTURE_FRAMES (8) PCM frames'
+ * worth of time, per packet. A single packet interval is 226.8 us at
+ * 44100 Hz, the slowest supported rate, down to 83.3 us at 96000 Hz;
+ * multiply by the relevant N for the actual URB span.
  * JOCKEY3_WATCHDOG_STALL_MS of silence is therefore many consecutive missed
  * URBs at any supported rate and N, and no scheduling delay or bus
  * contention produces that on a device that is still streaming.
@@ -258,7 +271,10 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * @anchor: anchor holding the submitted URBs, for stop/kill
  * @urbs: the URB ring
  * @bufs: transfer buffer for each URB, JOCKEY3_PLAYBACK_XFER_SIZE or
- *	JOCKEY3_CAPTURE_XFER_SIZE bytes each, as appropriate for the direction
+ *	JOCKEY3_CAPTURE_XFER_SIZE bytes each, as appropriate for the direction.
+ *	This is the allocation width, always the maximum N (see @n_shift);
+ *	@n_pkts, not this size, governs how many of those bytes any given
+ *	URB actually transfers
  * @urbs_in_flight: number of submitted URBs; diagnostic, must reach 0 after a stop
  * @last_callback_time: ktime of the last completion, for stall detection. Zeroed
  *	by jockey3_stop_urbs() so a stopped stream is not reported as alive.
@@ -295,6 +311,18 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * @stall_since: ktime the current stall was measured from; @lock. Only
  *	meaningful while @stall_reported is set, and used to report how long the
  *	outage lasted once the stream comes back.
+ * @n_shift: log2 of the number of Ploytec packets per URB ("N") the
+ *	next URB resubmission on this direction will carry, in [0, 3]; @lock.
+ *	Set by jockey3_pcm_hw_params() from the open substream's period size
+ *	(E2d, re/streaming_overhead_experiments.md), and reset to the
+ *	JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N default by jockey3_pcm_close() so a
+ *	direction with no open stream always re-arms at a safe N rather than a
+ *	stale one left over from its last open. Changing it does not tear the
+ *	URB ring down (E2d-exp confirmed the wire cannot tell one N x 512 B
+ *	transfer apart from N separate ones): each URB picks up the current
+ *	value at its own next resubmission, so the ring turns over within at
+ *	most JOCKEY3_N_URBS completions.
+ * @n_pkts: 1 << @n_shift, mirrored for loop bounds; @lock
  */
 struct jockey3_pcm_urb_stream {
 	struct snd_pcm_substream *substream;
@@ -314,6 +342,8 @@ struct jockey3_pcm_urb_stream {
 	unsigned int consec_errors;
 	bool stall_reported;
 	u64 stall_since;
+	u8 n_shift;
+	u8 n_pkts;
 };
 
 /**
@@ -814,7 +844,7 @@ static void jockey3_capture_callback(struct urb *urb)
 	struct jockey3_chip *chip = urb->context;
 	struct jockey3_pcm_urb_stream *urb_stream = &chip->capture;
 	struct snd_pcm_substream *substream = NULL;
-	int n_subpkts = 0;
+	int n_pkts = 0;
 	bool period_elapsed = false;
 	bool data_valid = true;
 	bool active = false;
@@ -859,22 +889,22 @@ static void jockey3_capture_callback(struct urb *urb)
 		return;
 
 	/*
-	 * E2a found the firmware fills a multi-sub-packet capture URB
-	 * completely rather than always terminating at one 512 B sub-packet
+	 * E2a found the firmware fills a multi-packet capture URB
+	 * completely rather than always terminating at one 512 B packet
 	 * (re/streaming_overhead.md, "E2a result"), so the expected case is
 	 * actual_length == JOCKEY3_CAPTURE_XFER_SIZE. Derive the count from
 	 * what actually came back rather than assuming N, in case that
 	 * changes under load or on other firmware revisions.
 	 */
 	if (data_valid) {
-		n_subpkts = urb->actual_length / PLOYTEC_PKT_SIZE;
-		if (unlikely(n_subpkts == 0)) {
+		n_pkts = urb->actual_length / PLOYTEC_PKT_SIZE;
+		if (unlikely(n_pkts == 0)) {
 			dev_err(&chip->intf0->dev, "Capture URB too small: %d; required at least %d\n",
 				urb->actual_length, PLOYTEC_PKT_SIZE);
 			data_valid = false;
 		} else if (unlikely(urb->actual_length % PLOYTEC_PKT_SIZE)) {
 			/*
-			 * A short trailing partial sub-packet: use the
+			 * A short trailing partial packet: use the
 			 * complete ones and drop the rest, but this should
 			 * not happen on firmware behaving as E2a found it to
 			 * -- log it once so a change in device behavior is
@@ -882,8 +912,8 @@ static void jockey3_capture_callback(struct urb *urb)
 			 * CLAUDE.md's fault-handling principle).
 			 */
 			dev_warn_once(&chip->intf0->dev,
-				      "Capture URB length %d not a multiple of %d, using %d sub-packet(s)\n",
-				      urb->actual_length, PLOYTEC_PKT_SIZE, n_subpkts);
+				      "Capture URB length %d not a multiple of %d, using %d packet(s)\n",
+				      urb->actual_length, PLOYTEC_PKT_SIZE, n_pkts);
 		}
 	}
 
@@ -898,7 +928,7 @@ static void jockey3_capture_callback(struct urb *urb)
 			active = true;
 			substream = urb_stream->substream;
 
-			for (sp = 0; sp < n_subpkts; sp++)
+			for (sp = 0; sp < n_pkts; sp++)
 				period_elapsed |= jockey3_process_in_packet(chip,
 					urb->transfer_buffer + sp * PLOYTEC_PKT_SIZE);
 		}
@@ -927,6 +957,7 @@ static void jockey3_capture_callback(struct urb *urb)
 		 * to an anchor jockey3_stop_urbs() has already drained.
 		 */
 		if (!urb_stream->stopping && !jockey3_is_disconnected(chip)) {
+			urb->transfer_buffer_length = urb_stream->n_pkts * PLOYTEC_PKT_SIZE;
 			atomic_inc(&urb_stream->urbs_in_flight);
 			usb_anchor_urb(urb, &urb_stream->anchor);
 			ret = usb_submit_urb(urb, GFP_ATOMIC);
@@ -1036,6 +1067,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	struct jockey3_pcm_urb_stream *urb_stream = &chip->playback;
 	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
 	struct snd_pcm_substream *substream = NULL;
+	unsigned int submit_pkts;
 	bool period_elapsed = false;
 	bool data_valid = true;
 	bool active = false;
@@ -1080,8 +1112,21 @@ static void jockey3_playback_callback(struct urb *urb)
 	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
 
-	/* Step 1: Safely fetch the pointer and join the safe zone */
+	/*
+	 * Step 1: Safely fetch the pointer and join the safe zone.
+	 *
+	 * @n_pkts is captured once here and reused below for the MIDI/sync
+	 * loop and the resubmit's transfer_buffer_length, rather than re-read
+	 * at each site: jockey3_pcm_hw_params() can change it concurrently
+	 * (under the same lock), and this URB's buffer must only ever claim
+	 * to carry as many freshly written packets as it actually filled
+	 * this callback. Reading a larger value at resubmit than was used to
+	 * fill would send stale packets left over from an earlier, larger
+	 * N instead of tearing the ring down (E2d, E2d-exp).
+	 */
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		submit_pkts = urb_stream->n_pkts;
+
 		if (data_valid)
 			urb_stream->consec_errors = 0;
 
@@ -1091,24 +1136,24 @@ static void jockey3_playback_callback(struct urb *urb)
 			active = true;
 			substream = urb_stream->substream;
 
-			for (sp = 0; sp < JOCKEY3_PLAYBACK_N; sp++)
+			for (sp = 0; sp < submit_pkts; sp++)
 				period_elapsed |= jockey3_process_out_packet(chip,
 					buf + sp * PLOYTEC_PKT_SIZE);
 		} else {
-			for (sp = 0; sp < JOCKEY3_PLAYBACK_N; sp++)
+			for (sp = 0; sp < submit_pkts; sp++)
 				jockey3_silence_out_packet(buf + sp * PLOYTEC_PKT_SIZE);
 		}
 	}
 
 	/*
 	 * The outgoing MIDI data is encapsulated in the playback stream, one
-	 * real (rate-limited) byte per sub-packet: jockey3_get_next_midi_out_byte()'s
+	 * real (rate-limited) byte per packet: jockey3_get_next_midi_out_byte()'s
 	 * leaky-bucket limiter is calibrated on @midi_rate_divisor, which
-	 * assumes exactly one call per sub-packet interval. Calling it once
-	 * per URB instead of once per sub-packet would silently divide MIDI
-	 * OUT throughput by JOCKEY3_PLAYBACK_N.
+	 * assumes exactly one call per packet interval. Calling it once
+	 * per URB instead of once per packet would silently divide MIDI
+	 * OUT throughput by the chosen N.
 	 */
-	for (sp = 0; sp < JOCKEY3_PLAYBACK_N; sp++) {
+	for (sp = 0; sp < submit_pkts; sp++) {
 		u8 *sub = buf + sp * PLOYTEC_PKT_SIZE;
 
 		sub[PLOYTEC_MIDI_OUT_OFFSET] = jockey3_get_next_midi_out_byte(chip);
@@ -1142,6 +1187,7 @@ static void jockey3_playback_callback(struct urb *urb)
 		 * to an anchor jockey3_stop_urbs() has already drained.
 		 */
 		if (!urb_stream->stopping && !jockey3_is_disconnected(chip)) {
+			urb->transfer_buffer_length = submit_pkts * PLOYTEC_PKT_SIZE;
 			atomic_inc(&urb_stream->urbs_in_flight);
 			usb_anchor_urb(urb, &urb_stream->anchor);
 			ret = usb_submit_urb(urb, GFP_ATOMIC);
@@ -1495,7 +1541,21 @@ static int jockey3_start_urbs(struct jockey3_chip *chip)
 	atomic64_set(&chip->playback.urbs_started_time, ktime_get_mono_fast_ns());
 	atomic64_set(&chip->capture.urbs_started_time, ktime_get_mono_fast_ns());
 
+	/*
+	 * Each direction's ring is (re)armed at its own current N
+	 * (jockey3_pcm_hw_params()), which persists across a restart -- the
+	 * whole point of E2d is that this never has to fall back to the
+	 * JOCKEY3_PLAYBACK_N/JOCKEY3_CAPTURE_N default just because the ring
+	 * turned over. A direction with no open stream is held at that
+	 * default by jockey3_pcm_close(), so it always
+	 * re-arms at a safe N.
+	 */
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
+		chip->playback.urbs[i]->transfer_buffer_length =
+			chip->playback.n_pkts * PLOYTEC_PKT_SIZE;
+		chip->capture.urbs[i]->transfer_buffer_length =
+			chip->capture.n_pkts * PLOYTEC_PKT_SIZE;
+
 		atomic_inc(&chip->playback.urbs_in_flight);
 		usb_anchor_urb(chip->playback.urbs[i], &chip->playback.anchor);
 		ret = usb_submit_urb(chip->playback.urbs[i], GFP_KERNEL);
@@ -1667,25 +1727,21 @@ static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int directio
 static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direction,
 				      const char *context, bool report_xrun);
 
-static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *urb_stream,
-					   const int direction)
+static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *urb_stream)
 {
 	u64 last_time = atomic64_read(&urb_stream->last_callback_time);
-	u64 window_ns = direction == SNDRV_PCM_STREAM_PLAYBACK ?
-			JOCKEY3_LIVENESS_WINDOW_NS(JOCKEY3_PLAYBACK_N) :
-			JOCKEY3_LIVENESS_WINDOW_NS(JOCKEY3_CAPTURE_N);
+	u64 window_ns = JOCKEY3_LIVENESS_WINDOW_NS(urb_stream->n_shift);
 
 	if (!last_time)
 		return false;
 
 	/*
 	 * Alive if we had activity within the last window_ns. The window
-	 * must exceed one URB span (JOCKEY3_PLAYBACK_N or JOCKEY3_CAPTURE_N
-	 * packet intervals) or a perfectly healthy stream could sample as
-	 * dead between completions -- and scaling it with N (see
-	 * JOCKEY3_LIVENESS_WINDOW_NS()) keeps the same margin against that
-	 * span at any N, rather than a fixed window eating into a shrinking
-	 * margin as N grows.
+	 * must exceed one URB span (@n_pkts packet intervals) or a
+	 * perfectly healthy stream could sample as dead between completions
+	 * -- and scaling it with N (see JOCKEY3_LIVENESS_WINDOW_NS()) keeps
+	 * the same margin against that span at any N, rather than a fixed
+	 * window eating into a shrinking margin as N grows.
 	 */
 	return (ktime_get_mono_fast_ns() - last_time <= window_ns);
 }
@@ -1951,8 +2007,7 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
 		if (jockey3_is_disconnected(chip))
 			return false;
 
-		if (jockey3_check_urb_stream_alive(jockey3_get_pcm_urb_stream(chip, direction),
-						  direction))
+		if (jockey3_check_urb_stream_alive(jockey3_get_pcm_urb_stream(chip, direction)))
 			return true;
 
 		usleep_range(500, 2000);
@@ -2034,7 +2089,7 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	if (jockey3_check_urb_stream_alive(urb_stream, direction))
+	if (jockey3_check_urb_stream_alive(urb_stream))
 		return 0;
 
 	if (atomic_cmpxchg(&chip->recovery_in_progress, 0, 1) != 0) {
@@ -2083,7 +2138,7 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 		 * recovered on its own never needed. See re/rate_change_stall.md's
 		 * 2026-08-26 follow-up.
 		 */
-		if (jockey3_check_urb_stream_alive(urb_stream, direction))
+		if (jockey3_check_urb_stream_alive(urb_stream))
 			goto out;
 
 		jockey3_stop_urbs(chip);
@@ -2149,13 +2204,15 @@ static const struct snd_pcm_hardware jockey3_pcm_hw_playback = {
 	.channels_max		= 4,
 	.buffer_bytes_max	= 1024 * 1024,
 	/*
-	 * One playback URB carries JOCKEY3_PLAYBACK_N sub-packets of
-	 * 10 frames * 4 channels * 3 bytes = 120 bytes each. period_elapsed
-	 * is OR'd across the sub-packet loop in jockey3_playback_callback(),
-	 * so the minimum must cover a whole URB or two period boundaries in
-	 * one URB would collapse into a single notification.
+	 * One playback URB carries a packet count chosen per open by
+	 * jockey3_pcm_hw_params() (E2d, re/streaming_overhead_experiments.md),
+	 * of 10 frames * 4 channels * 3 bytes = 120 bytes each. period_elapsed
+	 * is OR'd across the packet loop in jockey3_playback_callback(),
+	 * so the minimum must cover at least one packet, the smallest a
+	 * URB can ever carry (N=1), or a period boundary inside a URB could
+	 * be missed entirely.
 	 */
-	.period_bytes_min	= JOCKEY3_PLAYBACK_N * PLOYTEC_PLAYBACK_FRAMES * 4 * 3,
+	.period_bytes_min	= PLOYTEC_PLAYBACK_FRAMES * 4 * 3,
 	.period_bytes_max	= 512 * 1024,
 	.periods_min		= 2,
 	.periods_max		= 1024,
@@ -2171,12 +2228,12 @@ static const struct snd_pcm_hardware jockey3_pcm_hw_capture = {
 	.channels_max		= 6,
 	.buffer_bytes_max	= 1024 * 1024,
 	/*
-	 * One capture URB carries up to JOCKEY3_CAPTURE_N sub-packets of
-	 * 8 frames * 6 channels * 3 bytes = 144 bytes each; see the playback
-	 * .period_bytes_min comment above for why the minimum must cover a
-	 * whole URB.
+	 * One capture URB carries a packet count chosen per open (see
+	 * jockey3_pcm_hw_params()) of up to 8 frames * 6 channels * 3 bytes =
+	 * 144 bytes each; see the playback .period_bytes_min comment above for
+	 * why the minimum must cover at least one packet.
 	 */
-	.period_bytes_min	= JOCKEY3_CAPTURE_N * PLOYTEC_CAPTURE_FRAMES * 6 * 3,
+	.period_bytes_min	= PLOYTEC_CAPTURE_FRAMES * 6 * 3,
 	.period_bytes_max	= 512 * 1024,
 	.periods_min		= 2,
 	.periods_max		= 1024,
@@ -2236,6 +2293,8 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 	struct jockey3_pcm_urb_stream *urb_stream =
 		jockey3_get_pcm_urb_stream(chip, substream->stream);
+	unsigned int default_n = substream->stream == SNDRV_PCM_STREAM_PLAYBACK ?
+				 JOCKEY3_PLAYBACK_N : JOCKEY3_CAPTURE_N;
 
 	dev_dbg(&chip->intf0->dev, "PCM close stream %d\n", substream->stream);
 
@@ -2247,6 +2306,19 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		urb_stream->substream = NULL;
 		urb_stream->running = false;
+
+		/*
+		 * A closed direction is not covered by jockey3_pcm_hw_params()
+		 * any more, so its N would otherwise sit at whatever the last
+		 * open left it at -- possibly a small, period-tuned value that
+		 * has nothing to do with the next stream to open it, or with
+		 * this direction's own idle ring being re-armed by a rate
+		 * change on the *other* direction (jockey3_start_urbs() re-arms
+		 * both unconditionally). Reset to the default here so an idle
+		 * direction always re-arms at a safe N.
+		 */
+		urb_stream->n_shift = ilog2(default_n);
+		urb_stream->n_pkts = default_n;
 	}
 
 	return 0;
@@ -2330,7 +2402,7 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 		 * where acting on a false positive would disrupt a working stream.
 		 * What it flags is confirmed below before anything is done about it.
 		 */
-		stalled = !jockey3_check_urb_stream_alive(urb_stream, substream->stream);
+		stalled = !jockey3_check_urb_stream_alive(urb_stream);
 	}
 
 	/*
@@ -2451,6 +2523,49 @@ static int jockey3_initialize_ploytec(struct jockey3_chip *chip, u32 *fw_version
 	return 0;
 }
 
+/**
+ * jockey3_pcm_set_n() - choose and arm this direction's packets per URB
+ * @chip: driver state
+ * @substream: the substream hw_params was just called for
+ * @hw_params: the negotiated parameters
+ *
+ * Chooses how many Ploytec packets each USB bulk URB on this direction
+ * carries, called "N" below for brevity: the largest power of two with
+ * N * pkt_bytes <= period_bytes (E2d, re/streaming_overhead_experiments.md).
+ * A big period gets the full coalescing saving, a tiny one falls back to
+ * N=1 automatically via .period_bytes_min. Takes effect without tearing the
+ * URB ring down --
+ * E2d-exp found the firmware cannot tell an N x 512 B bulk transfer apart
+ * from N separate 512 B ones, so each URB on this direction simply picks up
+ * the new N at its own next resubmission; the ring turns over onto it within
+ * at most JOCKEY3_N_URBS completions.
+ *
+ * Called unconditionally on every hw_params(), including when the rate is
+ * unchanged and the URB ring is never touched: N is a per-open, per-period
+ * property, independent of whether a rate change happens to be in progress.
+ */
+static void jockey3_pcm_set_n(struct jockey3_chip *chip, struct snd_pcm_substream *substream,
+			      struct snd_pcm_hw_params *hw_params)
+{
+	struct jockey3_pcm_urb_stream *urb_stream =
+		jockey3_get_pcm_urb_stream(chip, substream->stream);
+	unsigned int period_bytes = params_period_bytes(hw_params);
+	bool is_playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
+	unsigned int pkt_bytes = is_playback ? PLOYTEC_PLAYBACK_FRAMES * 4 * 3 :
+						  PLOYTEC_CAPTURE_FRAMES * 6 * 3;
+	unsigned int max_n = is_playback ? JOCKEY3_PLAYBACK_N : JOCKEY3_CAPTURE_N;
+	unsigned int n = max(period_bytes / pkt_bytes, 1U);
+	u8 n_shift = clamp_t(u8, ilog2(n), 0, ilog2(max_n));
+
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		urb_stream->n_shift = n_shift;
+		urb_stream->n_pkts = 1 << n_shift;
+	}
+
+	dev_dbg(&chip->intf0->dev, "hw_params: %s using %u packet(s)/URB (period_bytes=%u)\n",
+		is_playback ? "playback" : "capture", 1U << n_shift, period_bytes);
+}
+
 static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 				 struct snd_pcm_hw_params *hw_params)
 {
@@ -2476,6 +2591,9 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	ret = jockey3_wait_for_reset_completion(chip);
 	if (ret < 0)
 		return ret;
+
+	/* Independent of rate and of whether it changes; see jockey3_pcm_set_n() */
+	jockey3_pcm_set_n(chip, substream, hw_params);
 
 	/*
 	 * rate_mutex is held across the whole stop/set-rate/start sequence, which
@@ -3109,6 +3227,15 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	atomic64_set(&chip->capture.last_callback_time, 0);
 	atomic64_set(&chip->playback.urbs_started_time, 0);
 	atomic64_set(&chip->capture.urbs_started_time, 0);
+	/*
+	 * Default N until the first hw_params() picks a period-tuned value
+	 * (jockey3_pcm_set_n()); matches the width the URB buffers below are
+	 * actually allocated at, and jockey3_init_out_packet() primes.
+	 */
+	chip->playback.n_shift = ilog2(JOCKEY3_PLAYBACK_N);
+	chip->playback.n_pkts = JOCKEY3_PLAYBACK_N;
+	chip->capture.n_shift = ilog2(JOCKEY3_CAPTURE_N);
+	chip->capture.n_pkts = JOCKEY3_CAPTURE_N;
 	INIT_DELAYED_WORK(&chip->watchdog_work, jockey3_watchdog_work);
 
 	chip->xfer_buf = kmalloc(USB_XFER_BUF_SIZE, GFP_KERNEL);
