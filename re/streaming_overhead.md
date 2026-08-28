@@ -921,6 +921,26 @@ callbacks. Whether that nets out favorably is a per-platform, per-rate
 question this table answers directly rather than the flat completion-rate
 model alone.
 
+### 2026-08-27: next step is E2d -- N chosen per PCM open, not compile-time
+
+With coalescing now stable at every N and the per-N trade above being a
+genuine per-platform/per-rate question with no single obviously-right
+answer, the work moves to deriving N per stream open from the requested
+period size (largest power of two that fits, `1 <= N <= 8`, per direction,
+carried as a shift count). The full decision record -- why it is period
+size and not buffer size that binds, why no new `hw_constraint` is needed,
+the power-of-two/`n_shift` representation, and the collision with the
+"URBs run for the device's lifetime" model (shrinking N is mandatory,
+growing it is only an optimization) -- is in
+`re/streaming_overhead_experiments.md`'s **E2d** section.
+
+That section also holds **E2d-exp**, the one experiment that gates the
+design: whether the firmware tolerates `transfer_buffer_length` changing
+between resubmissions of an already-running ring. If it does, runtime N
+never tears the ring down; if it does not, N can only grow when the ring is
+being rebuilt anyway. Patch written (temporary `exp_pb_n`/`exp_cap_n`
+module parameters), hardware run deferred to 2026-08-28.
+
 ### What it costs
 
 Completion rate with 80 frames per URB in both directions:

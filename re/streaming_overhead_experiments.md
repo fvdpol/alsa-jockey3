@@ -265,44 +265,175 @@ Beyond the E1 metrics, three things specific to this change:
   rate, the chosen N and why, the latency cost, and -- if it failed -- exactly
   how.
 
-### Future direction (post-E2c): N derived from the requested period size
+### E2d (post-E2c): N derived from the requested period size
 
-Frank's idea, worth recording before it's lost even though it's out of scope
-for E2b/E2c: instead of a fixed compile-time N, derive it per PCM open from
-the period size the application actually requested, so an application asking
-for a large low-latency-tolerant buffer gets the full coalescing saving, and
-one asking for a tiny period (real-time processing chasing minimum latency)
-falls back to N=1 -- today's uncoalesced behavior -- automatically rather than
-being handed a fixed URB span it did not ask for.
+Now the active line of work, promoted from "future direction" once the
+consolidated N=1/2/4/8 sweep (final row of the cross-reference table below)
+showed coalescing is stable at every N and the per-N differences are small
+enough that no single driver-wide N is obviously right for every workload.
 
-This fits the existing teardown/rebuild path used for rate changes
-(`jockey3_pcm_hw_params()` already tears down and re-creates the URB ring),
-so it is not a new mechanism, just a new input to the existing one. The open
-design question is the mapping itself: `period_bytes_min` today is a
-compile-time `N x subpacket_bytes`; with N derived instead of fixed, the
-relationship inverts -- pick the largest N such that `N x subpacket_bytes <=`
-the period size actually negotiated, floored at N=1 -- and that constraint
-has to be enforced during `hw_params()` rather than declared statically in
-`jockey3_pcm_hw_playback`/`jockey3_pcm_hw_capture`.
+#### The idea
 
-**Refinement (also Frank's): restrict N to powers of two.** With N a
-compile-time constant, as in E2b, the compiler already folds every
-`N x PLOYTEC_PKT_SIZE` and sub-packet-offset multiply into a shift, since
-`PLOYTEC_PKT_SIZE` (512) is itself a power of two -- N's own value doesn't
-matter for that today. It starts to matter the moment N becomes a runtime
-value chosen per PCM open: the compiler can no longer fold a multiply by a
-variable, so a power-of-two-only N (stored as a shift count, `1 << n_shift`)
-keeps `JOCKEY3_*_XFER_SIZE` and the sub-packet loop's offset arithmetic
-shift-only on every architecture, not just ones with a barrel shifter. The
-cost is coarser granularity -- N can only be 1, 2, 4, 8, not 3 or 5 -- but
-that costs nothing here: coalescing's payoff comes from fewer, larger URBs
-regardless of exact period fit, since the device paces the wire itself
-either way (study, Part 2) -- there is no reason to prefer landing on an
-odd N over rounding down to the next power of two.
+Instead of a fixed compile-time N, derive it per PCM open from the period
+size the application actually requested. An application that asks for a
+large, latency-tolerant buffer gets the full coalescing saving; one that
+asks for a tiny period (real-time processing chasing minimum latency) falls
+back to N=1 -- today's uncoalesced behavior -- automatically, rather than
+being handed a fixed URB span it did not ask for. In practice any period
+large enough for ordinary desktop audio lands on the ceiling N=8; only a
+deliberately small period (~16-32 frames) pulls a direction down.
 
-Deliberately not pursued now: it only pays for its added complexity if E2c's
-N=1-vs-N=2 numbers show the saving is worth chasing per-application rather
-than as one fixed driver-wide choice.
+#### Decisions settled (Frank, 2026-08-27)
+
+1. **N is chosen per stream open, per direction**, as the largest power of
+   two that fits, `1 <= N <= 8`. Playback and capture are separate
+   substreams with independent `hw_params`; only the sample rate is shared
+   (already pinned in `jockey3_pcm_open()` via
+   `snd_pcm_hw_constraint_single`). So the two directions can and do settle
+   on different N -- and their sub-packet sizes differ anyway (10 vs 8 PCM
+   frames), so the same period lands them on different N.
+
+2. **It is the period size that binds, not the buffer size.** The reason
+   `period_bytes_min` scales with N today is that `period_elapsed` is OR-folded
+   across the sub-packet loop in the completion handlers, so at most one
+   period boundary may fall inside one URB. That is a per-period relation:
+   `N x subpacket_bytes <= period_bytes`. Buffer size only enters via
+   `periods_min = 2`. The derivation must therefore key off
+   `params_period_bytes()`, not the buffer. ALSA permits a different period
+   size per direction, which is consistent with decision 1.
+
+3. **No new `hw_constraint` rule is needed.** The relation is `<=`, not a
+   divisibility requirement, so the existing form -- a `period_bytes_min`
+   that already equals `N x subpacket_bytes` -- is the right shape. Relax
+   the static `jockey3_pcm_hw_playback`/`_capture` minimums to the N=1
+   values (120 bytes playback, 144 capture) and let N adapt underneath
+   them in `hw_params()`:
+
+   `n_shift = min(3, ilog2(period_bytes / subpacket_bytes))`, guarded for
+   the ratio being zero; use `ilog2()` rather than a hand-rolled loop.
+
+   Sanity vectors (period frames -> N), directions genuinely diverging:
+
+   | period frames | playback (10 f/subpkt) | capture (8 f/subpkt) |
+   |---|---|---|
+   | 16  | N=1 | N=2 |
+   | 32  | N=2 | N=4 |
+   | 64  | N=4 | N=8 |
+   | 128 | N=8 | N=8 |
+
+4. **Restrict N to powers of two, stored as a shift count.** With N a
+   compile-time constant the compiler already folds `N x PLOYTEC_PKT_SIZE`
+   and every sub-packet-offset multiply into a shift, because
+   `PLOYTEC_PKT_SIZE` (512) is itself a power of two. That stops the moment
+   N is a runtime variable: the compiler can no longer fold a multiply by a
+   variable. Carrying N as `n_shift` (`N = 1 << n_shift`, `0 <= n_shift <= 3`)
+   keeps `PLOYTEC_PKT_SIZE << n_shift` and `NSEC_PER_MSEC << n_shift` (the
+   liveness window, `JOCKEY3_LIVENESS_WINDOW_NS`) shift-only on every
+   architecture. Coarser granularity (1/2/4/8, never 3 or 5) costs nothing:
+   coalescing's payoff is fewer, larger URBs regardless of exact period fit,
+   since the device paces the wire itself (study, Part 2).
+
+   **Carve-out:** keep a mirrored `u8 n_subpkts` next to `n_shift` and use
+   *that* as the sub-packet loop bound. `for (sp = 0; sp < (1 << n_shift); sp++)`
+   reads worse than `sp < n_subpkts` for no codegen gain. Both fields are
+   set only while the ring is stopped, or under the stream spinlock.
+
+5. **Allocate every URB for N=8 unconditionally** (8 x 512 B, ~32 KB per
+   direction across the 8-URB ring) and vary only `transfer_buffer_length`.
+   Reallocating transfer buffers on the restart path is added risk on the
+   driver's most fragile code for the sake of ~28 KB.
+
+#### The collision with the URB-lifetime model
+
+URBs run free for the device's lifetime; playback in particular can never
+stop, because MIDI OUT rides in byte 480 of every playback packet. Changing
+N for a direction means tearing that direction's ring down and restarting it
+-- the same destructive path as a rate change, which is the driver's
+known-weakest area (Milestone 13; the capture-restart stall; the whole
+watchdog/recovery ladder that the 2026-08-27 work went into hardening).
+
+That makes the rule asymmetric in a way the plain statement hides:
+
+- **Shrinking N is mandatory** -- a smaller period makes the running N
+  illegal (a period boundary would be missed).
+- **Growing N is purely an optimization** -- a bigger period does not break
+  anything at the current N.
+
+Taken literally, "largest N that fits" forces a teardown in the second case
+too: a small-period application closes, a large-period one opens, and the
+ring is rebuilt to go from N=2 to N=8 for a few percent of IRQ rate --
+trading the fragile path against the optimization, in the wrong direction.
+
+#### E2d-exp: the blocking experiment (does N have to tear the ring down?)
+
+**Question:** does the firmware keep an already-running bulk ring streaming
+if `transfer_buffer_length` changes between resubmissions of the same URBs?
+E2a established `N x 512 B` only as a *static* property, chosen before the
+ring starts; whether it can change mid-stream has never been asked.
+
+- **If yes:** runtime N never tears the ring down. `hw_params()` sets a new
+  `n_shift`, the ring turns over within at most 8 URBs (~14.5 ms worst case
+  at 44.1 kHz, N=8), and `trigger START` lands after that. The
+  shrink/grow-policy question dissolves -- always pick the optimal N.
+- **If no:** shrink N eagerly (mandatory), grow N lazily -- take a larger N
+  only when the ring is being rebuilt anyway (a rate change, or a direction
+  with no active stream).
+
+**Instrumentation (temporary, `dev/streaming-overhead` working tree, marked
+`TEMPORARY EXPERIMENT -- do not merge`):** two live `0644` module
+parameters `exp_pb_n` / `exp_cap_n`, default 8, each snapped to the nearest
+power of two in `[1, 8]` by `jockey3_exp_xfer_len()`. They set
+`transfer_buffer_length` at all three submit sites -- both completion-handler
+resubmit paths and the `jockey3_start_urbs()` loop (so a rate change or
+recovery re-arms at the current experimental N instead of snapping back to
+8). The sub-packet fill and drain loops are deliberately left at the
+compile-time N=8: the experiment isolates "does the wire tolerate a shorter
+transfer on a running ring", not "is the audio bit-correct at that length".
+Buffers are always allocated 8 x 512 wide, so shrinking the length only asks
+USB core to move fewer bytes.
+
+**Procedure:** build `build_module.sh <target> --uncommitted`; deploy with
+`tests/hw/actions/reload_driver.sh`; start a full-duplex stream at the
+default N=8 and let it settle; then flip `exp_pb_n` / `exp_cap_n` live
+(8 -> 2 -> 4 -> 8, and playback-only vs capture-only) on the one continuous
+stream. Watch `dmesg` for `EPROTO` / babble / `-71` resubmit failures and
+the `watchdog_onset_*` / stall counters. Debug vs prod kernel does not
+matter here -- the verdict is EPROTO/stall/onset, not audio quality.
+
+Status: patch written and built (`x86_64-debug --uncommitted`, and
+`build_jockey3.sh --gate build` clean bar the two known `-Wshadow` hits).
+Hardware run deferred to 2026-08-28.
+
+#### Observability requirement (agreed, do it regardless of the experiment)
+
+Every N result to date was produced by editing the compile-time constant
+and rebuilding, so the harness knew N by construction. Once N is derived it
+does not -- and `aplay`/`arecord` coerce a period request the same way they
+near-match a rate, so the harness cannot infer N from what it asked for
+either. Without a read-back, `JT-PERF-001` / `JT-RATE-001` stop being
+reproducible and the feature is unverifiable on hardware.
+
+Add a permanent `dev_dbg` at `hw_params()` naming the chosen N per
+direction. This is shipped diagnostics, not a test hook -- it does not
+violate the driver's no-test-hooks rule. `JT-PCM-007`'s candidate ladder
+can then be rebuilt around period sizes that land on each `n`, which also
+closes its existing gap (its ladder never probes N=8's own tight
+period-headroom boundary, only retests N=4's known-safe size).
+
+#### Open question for Frank
+
+E2c's regression gate says "N=1 must be byte-for-byte identical to the
+pre-coalescing driver". Read as a code-shape claim, a runtime N cannot
+satisfy it. Read as the comment actually words it ("every loop keyed off
+these constants ... degenerates to the original single sub-packet code path
+at N=1"), it is a behavior claim that `n_shift = 0` still meets. Confirm
+which was meant before relying on it.
+
+#### The `jockey3.c:157-168` comment
+
+The `JOCKEY3_LIVENESS_WINDOW_NS` comment currently *predicts* this change
+("would make this a shift rather than a multiply if N ever became a runtime
+value"). When E2d lands, rewrite it as current-state rationale.
 
 **Exit criterion:** either a merged change with numbers behind it, or a
 written-up reason it cannot be done.
@@ -316,6 +447,10 @@ Frank has been noting it alongside each run id in his reports since the N=4
 work started -- collected here as the authoritative index rather than left
 scattered across chat history. Update this table (don't just append below
 it) whenever a new run's N is known.
+
+Once E2d lands, N stops being compile-time and this manual index is
+superseded by the `hw_params()` `dev_dbg` read-back described in the E2d
+section above; entries below this point are all fixed-N builds.
 
 | N | Platform | Test(s) | Run ID(s) |
 |---|---|---|---|
