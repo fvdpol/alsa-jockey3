@@ -777,6 +777,8 @@ cases:
       - capture_xrun_clean_count
       - playback_candidates_tested
       - capture_candidates_tested
+    expect_dmesg:
+      - 'hw_params: (playback|capture) using \d+ packet\(s\)/URB \(period_bytes=\d+\)'
     pass: >
       jockey3_pcm_set_n() picks the expected N at every period size on the
       ladder (landing on N=1, 2, 4 and 8; a few non-power-of-two multiples
@@ -804,7 +806,12 @@ cases:
       hw_params probe. A case reading dmesg for its own targeted diagnostics
       is established practice in this suite (rate_change.py's marker-windowed
       event attribution; perf_baseline.py's direct priv.trace_callbacks_*()
-      calls).
+      calls). expect_dmesg whitelists that same dev_dbg line: it is "ours"
+      (matches OURS in lib/kmsg.py) and fires on every hw_params() call this
+      case makes on purpose -- up to ~70 times in a full sweep -- so without
+      the whitelist the runner's own classifier flags every one of them as
+      an unexpected driver message and fails the run on exactly the
+      diagnostic this case turned on itself.
 
       JT-PCM-007 already runs real transfers at doubling period sizes, but
       stops at the first clean one -- the wrong shape here, since the job is
