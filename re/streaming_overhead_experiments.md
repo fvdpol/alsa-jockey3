@@ -333,10 +333,17 @@ deliberately small period (~16-32 frames) pulls a direction down.
    coalescing's payoff is fewer, larger URBs regardless of exact period fit,
    since the device paces the wire itself (study, Part 2).
 
-   **Carve-out:** keep a mirrored `u8 n_subpkts` next to `n_shift` and use
-   *that* as the sub-packet loop bound. `for (sp = 0; sp < (1 << n_shift); sp++)`
-   reads worse than `sp < n_subpkts` for no codegen gain. Both fields are
+   **Carve-out:** keep a mirrored `u8 n_pkts` next to `n_shift` and use
+   *that* as the packet loop bound. `for (sp = 0; sp < (1 << n_shift); sp++)`
+   reads worse than `sp < n_pkts` for no codegen gain. Both fields are
    set only while the ring is stopped, or under the stream spinlock.
+
+   (Naming note, settled after implementation: the field is `n_pkts`, not
+   `n_subpkts` -- the 512 B Ploytec protocol unit was already called a
+   "packet" throughout the pre-existing driver code (`PLOYTEC_PKT_SIZE`,
+   `jockey3_process_out_packet()`), so "sub-packet" for the same thing was
+   an unnecessary second term. "Packet" is the unit; "URB" is the USB
+   transport container that coalescing packs N of them into.)
 
 5. **Allocate every URB for N=8 unconditionally** (8 x 512 B, ~32 KB per
    direction across the 8-URB ring) and vary only `transfer_buffer_length`.
@@ -366,10 +373,14 @@ trading the fragile path against the optimization, in the wrong direction.
 
 #### E2d-exp: the blocking experiment (does N have to tear the ring down?)
 
-**Question:** does the firmware keep an already-running bulk ring streaming
-if `transfer_buffer_length` changes between resubmissions of the same URBs?
+**Question:** does an already-running bulk ring keep streaming if
+`transfer_buffer_length` changes between resubmissions of the same URBs?
 E2a established `N x 512 B` only as a *static* property, chosen before the
-ring starts; whether it can change mid-stream has never been asked.
+ring starts; whether it can change mid-stream has never been asked. (As the
+result below notes, since `N x 512 B` is always an exact multiple of the
+USB high-speed max-packet size, this is a host-side/USB-core question, not
+a firmware protocol one -- firmware cannot observe a transfer-length change
+on the wire at all.)
 
 - **If yes:** runtime N never tears the ring down. `hw_params()` sets a new
   `n_shift`, the ring turns over within at most 8 URBs (~14.5 ms worst case
@@ -404,6 +415,68 @@ Status: patch written and built (`x86_64-debug --uncommitted`, and
 `build_jockey3.sh --gate build` clean bar the two known `-Wshadow` hits).
 Hardware run deferred to 2026-08-28.
 
+**Result (2026-08-28, x86_64):** run across the `exp_pb_n`/`exp_cap_n`
+sweep on one continuous full-duplex stream -- no `EPROTO`, no babble, no
+`-71`, no kernel log messages of any kind, and (implicitly) no watchdog
+onsets. The only observed effect was playback speeding up at lower
+`exp_pb_n`, which is the fill/drain-loop-left-at-N=8 side effect this
+experiment deliberately does not correct for (see Instrumentation above),
+not a new finding.
+
+**Verdict: YES, for host-side reasons rather than a firmware accommodation.**
+`PLOYTEC_PKT_SIZE` is exactly the USB 2.0 high-speed bulk max-packet size
+(512 B), and `jockey3_exp_xfer_len()` only ever snaps to an exact multiple
+of it -- so `transfer_buffer_length` never produces a short packet or ZLP.
+On the wire, an N=8 URB and eight separate N=1 URBs are the identical byte
+stream of consecutive 512 B bulk transactions: firmware has no way to
+observe a transfer-length change at all, or even that a "URB" boundary
+exists, since nothing wire-visible marks one. What this experiment actually
+exercised is host-side: the USB core / HCD's tolerance of resubmitting the
+same anchored URBs with a different `transfer_buffer_length` mid-ring, plus
+this driver's three submit sites doing so correctly. That question had far
+less genuine uncertainty than "does the firmware tolerate it" implied, but
+the clean sweep is still real evidence for it. Practical conclusion is
+unchanged: runtime N never has to tear the ring down; `hw_params()` can
+always pick the optimal N directly. The shrink-eagerly/grow-lazily fallback
+is moot.
+
+#### Implementation status (2026-08-28)
+
+Landed on `dev/streaming-overhead`, uncommitted: `n_shift`/`n_pkts` on
+`struct jockey3_pcm_urb_stream`, derived in the new `jockey3_pcm_set_n()`
+(called from `jockey3_pcm_hw_params()` unconditionally, independent of
+whether the rate actually changes -- N is a per-open/per-period property,
+not a rate-change side effect). `.period_bytes_min` relaxed to the N=1
+values (120 playback / 144 capture) on both `jockey3_pcm_hw_playback`/
+`_capture`. URBs stay allocated `JOCKEY3_PLAYBACK_N`/`_CAPTURE_N`-wide (8);
+only `transfer_buffer_length` varies, at all three submit sites
+(`jockey3_start_urbs()` and both completion-handler resubmit paths). A
+direction with no open stream is reset to the N=8 default in
+`jockey3_pcm_close()`, so `jockey3_start_urbs()` re-arming *both* directions
+unconditionally (e.g. on a rate change triggered by the other, open
+direction) never re-arms an idle one at a stale, leftover N. The temporary
+`exp_pb_n`/`exp_cap_n` experiment scaffolding is removed -- superseded by
+the real mechanism at the same three call sites. `dev_dbg` at
+`jockey3_pcm_hw_params()` names the chosen N per direction; `CONFIG_DYNAMIC_DEBUG=y`
+is set on every `-prod` config (checked in `tests/configs/`), so it is
+readable on the platforms the perf numbers get measured on, not just
+`-debug`. Builds clean: `build_jockey3.sh --gate build`/full gate suite,
+checkpatch `--strict --codespell` on the isolated diff, same two known
+`-Wshadow` hits as before (none new).
+
+**Not yet done -- hardware validation (current-task.md step 5):** the
+`.period_bytes_min` relaxation opens a parameter space the earlier
+N=1/2/4/8 sweep never exercised -- N=1 *because the period is tiny*
+(as low as 120/144 bytes, an 8-URB ring holding ~1.8 ms of in-flight
+playback audio) rather than N=1 at a normal-sized period. Rebuild
+`JT-PCM-007`'s ladder around period sizes that land on each N (120, 240,
+480, 960 bytes playback) and watch xruns, not just stalls -- that is the
+regression this relaxation could introduce. On capture, watch specifically
+for `-EOVERFLOW` and the existing `dev_warn_once` "not a multiple of" line:
+E2a found the firmware fills a multi-packet capture URB completely, and
+shrinking `transfer_buffer_length` offers it less room than it may want to
+fill, under load, for the first time.
+
 #### Observability requirement (agreed, do it regardless of the experiment)
 
 Every N result to date was produced by editing the compile-time constant
@@ -420,20 +493,26 @@ can then be rebuilt around period sizes that land on each `n`, which also
 closes its existing gap (its ladder never probes N=8's own tight
 period-headroom boundary, only retests N=4's known-safe size).
 
-#### Open question for Frank
+**Done** -- see "Implementation status" above.
+
+#### Open question for Frank (non-blocking)
 
 E2c's regression gate says "N=1 must be byte-for-byte identical to the
 pre-coalescing driver". Read as a code-shape claim, a runtime N cannot
 satisfy it. Read as the comment actually words it ("every loop keyed off
-these constants ... degenerates to the original single sub-packet code path
-at N=1"), it is a behavior claim that `n_shift = 0` still meets. Confirm
-which was meant before relying on it.
+these constants ... degenerates to the original single packet code path
+at N=1"), it is a behavior claim that `n_shift = 0` still meets. The
+implementation proceeded on the behavior reading (`n_shift = 0` produces a
+one-iteration loop, identical to the original single-packet path) since
+that is what the comment's own wording says; still worth confirming with
+Frank, but it does not block anything further.
 
 #### The `jockey3.c:157-168` comment
 
-The `JOCKEY3_LIVENESS_WINDOW_NS` comment currently *predicts* this change
-("would make this a shift rather than a multiply if N ever became a runtime
-value"). When E2d lands, rewrite it as current-state rationale.
+**Done** -- `JOCKEY3_LIVENESS_WINDOW_NS`'s comment (now a few lines earlier
+in the file after the E2d changes) is rewritten from prediction to
+current-state: it describes `n_shift` as the live per-direction value
+rather than a hypothetical future one.
 
 **Exit criterion:** either a merged change with numbers behind it, or a
 written-up reason it cannot be done.
