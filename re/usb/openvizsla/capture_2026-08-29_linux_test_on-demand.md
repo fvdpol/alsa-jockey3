@@ -42,14 +42,18 @@ USB autosuspend is ruled out for this capture: a runtime-PM resume is never
 silent on the wire (`jockey3_restore_device()` always runs a full cold init),
 and no third `init`/`init+rate` event appears inside the 30.747s gap.
 
-**Open, not yet answered from this capture:** `parse_openvizsla.py` drops NAK
-and STALL by default, and this trace was parsed that way -- so it cannot yet
-distinguish "the MIDI IN URB stopped being polled" from "it was polled and
-NAK'd the whole time because the firmware had nothing to report." Resolving
-it needs a re-parse of the raw capture with `--errors` kept, see the working
-document for the exact command. Either answer confirms the same gate result
-(MIDI IN produced no usable data while the PCM rings were down); it only
-changes how precisely that finding is stated.
+**Re-parsed with `--errors` kept (the default-parsed files above have NAK and
+STALL dropped and cannot show this): EP 0x83 is polled continuously and
+NAK'd for the whole gap.** From t=7.793325 -- within microseconds of the last
+real completion -- the host retries the MIDI IN URB in an unbroken chain of
+`ongoing` NAK bursts, ~4636-4639 attempts every ~100ms with sub-microsecond
+gaps between consecutive burst windows (verified over the first 1.9s of the
+gap: 88,103 NAKs, one every 21.6us). The MIDI IN URB stays alive exactly as
+the driver design intends; the firmware has nothing to send while its audio
+engine is idle. This also puts a number on the working document's "What the
+payoff actually is" section, which had only argued from code that the USB
+link cannot leave L0 while MIDI IN stays submitted -- ~46,000 NAK'd
+attempts/s, sustained, is that argument measured rather than inferred.
 
 ## Contents (derived)
 

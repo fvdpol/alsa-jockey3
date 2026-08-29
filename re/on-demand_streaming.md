@@ -5,10 +5,14 @@
 > `x86_64-prod`, with the driver's own dev_dbg confirming the rings were
 > stopped and no MIDI IN URB error of any kind in the log, thirty seconds of
 > jog wheel, fader and button input produced zero bytes on the rawmidi input.
-> As specified from the start, that closes the feature -- see "2026-08-29:
-> the gate fails" below. Phase 1's code stays on `dev/on-demand-streaming`,
-> unmerged; nothing further is planned against it pending Frank's decision on
-> what becomes of the branch.
+> An OpenVizsla trace of a repeat run confirms the mechanism precisely: the
+> MIDI IN URB stays submitted and the host polls it continuously the whole
+> time (~46,000 NAK'd attempts/s, no gap) -- the pipe stays open, the
+> firmware simply has nothing to send while its audio engine is idle. As
+> specified from the start, that closes the feature -- see "2026-08-29: the
+> gate fails" and the OpenVizsla section below. Phase 1's code stays on
+> `dev/on-demand-streaming`, unmerged; nothing further is planned against it
+> pending Frank's decision on what becomes of the branch.
 
 This document is the working document for the feature. It records what is being
 built and why, what the change touches, and -- as evidence arrives -- what the
@@ -138,7 +142,7 @@ own, restart-reliability work is unrelated to on-demand streaming, and that
 document already scopes itself as not a dependency of any feature. It simply
 no longer has an on-demand-streaming gate to unblock.
 
-### 2026-08-29: OpenVizsla trace of the same test -- confirms the timing, opens one new question
+### 2026-08-29: OpenVizsla trace of the same test -- confirms the timing, and how the endpoint actually behaves
 
 Rerun for the wire-level record, not to re-decide anything: `JT-MIDI-008`, run
 `x86_64-prod/20260829T180442Z-functional`, same device and setup as above.
@@ -194,42 +198,47 @@ not the proof; the trace's event count is. To check the live policy on a rig
 directly: `cat /sys/bus/usb/devices/<path>/power/{control,runtime_status,autosuspend_delay_ms,runtime_suspended_time}`
 -- `<path>` is `1-13.1` for this device on this rig.)
 
-**Open, not yet resolved: does the silence on EP 0x83 mean the MIDI IN URB
-stopped being polled, or that it was polled and NAK'd the whole time?**
-`parse_openvizsla.py` drops NAK and STALL by default (`re/usb/README.md`),
-and the trace above was read from that default view. A host that kept issuing
-IN tokens on 0x83 throughout the gap, every one NAK'd because the firmware had
-nothing to report, is indistinguishable in this view from a host that stopped
-issuing them at all -- exactly the trap that document already calls out:
-*"with NAK and STALL dropped, an idle window and a window full of rejected
-transfers are indistinguishable."*
+**Resolved: the host kept polling EP 0x83 continuously throughout the gap;
+every attempt was NAK'd.** Re-parsed from the raw capture with `--errors`
+kept (the already-derived `_parsed.txt`/`_parsed_reduced.txt` files were both
+generated without it and could not answer this after the fact -- exactly the
+trap `re/usb/README.md` documents: *"with NAK and STALL dropped, an idle
+window and a window full of rejected transfers are indistinguishable."*):
 
-The distinction matters. Continuous NAK'd polling would mean the MIDI IN URB
-stayed alive exactly as designed, and would sharpen this document's finding
-from "no MIDI IN traffic" to the more precise "the pipe stays open; the
-firmware silently withholds while idle." A truly silent endpoint -- no IN
-tokens issued at all -- would be surprising given `jockey3_stop_pcm_urbs()`
-never touches `midi_in_urb`, its lock, or its stop fence (also consistent
-with the first run's clean dmesg, `dmesg: expected=3, unexpected=0,
-unrelated=0, unclassified=0, investigate=0`, showing no MIDI IN URB error of
-any kind), and would be worth its own investigation.
-
-Resolving it needs a re-parse of the raw capture with errors kept, since the
-already-derived `_parsed.txt`/`_parsed_reduced.txt` files were both generated
-without `--errors` and cannot answer this after the fact:
-
-```sh
-cd re/usb
-python3 parse_openvizsla.py --errors "../../../usb capture 2026/capture_2026-08-29_linux_test_on-demand.txt" - \
-    | python3 reduce_transactions.py --start 6 --end 39 - openvizsla/capture_2026-08-29_linux_test_on-demand_errors_window.txt
+```
+7.782478     | NAK        | 53.3     | 305   | [NAK x305 over 8.172 ms from 7.775679, resolved]
+7.783872     | IN         | 53.3     | 5     | fd fd fd b1 f9
+7.793258     | NAK        | 53.6     | 2     | [NAK x2 over 0.034 ms from 7.782489, abandoned]
+7.793258     | IN         | 53.3     | 5     | fd fd fd 28 f9
+7.793264     | IN         | 53.3     | 5     | fd fd fd 21 f9
+7.893335     | NAK        | 53.3     | 4638  | [NAK x4638 over 99.990 ms from 7.793325, ongoing]
+7.993344     | NAK        | 53.3     | 4636  | [NAK x4636 over 99.987 ms from 7.893336, ongoing]
+8.093350     | NAK        | 53.3     | 4636  | [NAK x4636 over 99.986 ms from 7.993344, ongoing]
+...
 ```
 
-`--errors` bare (not `--errors=0`, which restricts to EP0) so bursts on 0x83
-are aggregated. An `ongoing` burst spanning the gap resolves it one way; no
-burst record on 0x83 at all resolves it the other. Neither outcome reopens
-the feature -- the gate result stands regardless -- but it changes how
-precisely the finding should be stated, which is worth getting right since
-this document is the reference for anyone who revisits the question.
+The last three real IN completions (the padding-byte packets already noted)
+end at 7.793264; the tiny `abandoned` burst on `53.6` two lines up is the
+last capture URB being killed. From 7.793325 -- essentially the same instant
+-- `53.3` (EP 0x83) settles into an unbroken chain of `ongoing` NAK bursts,
+~4636-4639 NAKs every ~100 ms with **sub-microsecond gaps between consecutive
+burst windows**: verified over the first 1.9 s of the gap (88,103 NAKs
+sampled), a rate of one attempt every 21.6 us. There is no mechanism by which
+this would stop on its own before something explicitly kills the URB -- the
+host is retrying a still-submitted bulk transfer, not waiting out a timeout --
+and nothing does kill it until the closing rebind's `disconnect()`.
+
+**This sharpens the finding rather than changing it.** The MIDI IN URB stays
+submitted and the host polls it exactly as designed
+(`jockey3_stop_pcm_urbs()` never touches `midi_in_urb`); the correct
+statement of this document's central result is not "MIDI IN traffic stops"
+but **"the pipe stays open; the firmware silently withholds while its audio
+engine is idle."** It also puts a number on something asserted earlier in
+this document only as a mechanism: "MIDI IN stays submitted... so the host
+controller keeps polling EP 0x83 and the link does not leave L0" (see "What
+the payoff actually is") is now measured, not just argued -- roughly 46,000
+NAK'd attempts per second, sustained, is what "the link does not leave L0"
+looks like on the wire.
 
 ## What happened to E3
 
@@ -568,12 +577,12 @@ reached, except question 2, which is redirected to
    "the feature does not exist", which is the `idle_timeout=0` baseline
    `re/streaming_overhead.md` already has.
 6. ~~Does the idle timer ever fire in practice?~~ -- moot.
-7. **Open, not moot: does EP 0x83 stay polled-and-NAK'd, or does polling stop
-   entirely, while the PCM rings are down?** See "2026-08-29: OpenVizsla trace
-   of the same test" above -- doesn't change the gate result either way, but
-   sharpens (or corrects) how precisely this document's central finding is
-   stated. Needs a re-parse of the raw capture with `--errors` kept; not yet
-   done.
+7. ~~Does EP 0x83 stay polled-and-NAK'd, or does polling stop entirely, while
+   the PCM rings are down?~~ **Polled and NAK'd, continuously** -- ~46,000
+   attempts/s, sub-microsecond gaps between burst windows, confirmed 2026-08-29.
+   See "2026-08-29: OpenVizsla trace of the same test" above. Sharpens the
+   central finding to "the pipe stays open; the firmware silently withholds"
+   rather than changing it.
 
 ## Conclusion
 
