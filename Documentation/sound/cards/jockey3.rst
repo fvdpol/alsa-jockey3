@@ -12,16 +12,25 @@ reverse engineering.
 Supported devices
 =================
 
-=================================  ===========  ================
+=================================  ===========  =========
 Device                             VID:PID      Status
-=================================  ===========  ================
+=================================  ===========  =========
 Reloop Jockey 3 Remix              200c:1037    Tested
+<<<<<<< HEAD
 Reloop Jockey 3 Master Edition     200c:1019    Limited testing
 =================================  ===========  ================
 
 The Master Edition is believed to be protocol-compatible, but the driver author
 does not own one. User feedback on the Master Edition has been received 
 confirming the device is fully functional.
+=======
+Reloop Jockey 3 Master Edition     200c:1019    Tested
+=================================  ===========  =========
+
+The Master Edition is confirmed to be protocol-compatible. The driver author
+does not own one, but user feedback on the Master Edition has been received
+confirming the device is fully functional with this driver.
+>>>>>>> 89e4f1d (Remove references to incorrect Jockey3 ME USB Product ID (PID).)
 
 Audio
 =====

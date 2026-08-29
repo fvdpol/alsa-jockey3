@@ -8,7 +8,7 @@ driver_version: Reloop/Ploytec Windows driver 2.9.73
 application: Native Instruments Traktor Pro 3, version 3.11.117
 module_build_id: n/a (vendor driver)
 kernel_config: n/a (not Linux)
-device: Reloop Jockey 3 (confirm Remix 200c:1037 or Master Edition 200c:1009)
+device: Reloop Jockey 3 (confirm Remix 200c:1037 or Master Edition 200c:1019)
 size_raw: 804.4 MB
 usb_address: 0, 16, 17, 18, 19
 has_control_traffic: yes
