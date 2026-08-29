@@ -138,6 +138,99 @@ own, restart-reliability work is unrelated to on-demand streaming, and that
 document already scopes itself as not a dependency of any feature. It simply
 no longer has an on-demand-streaming gate to unblock.
 
+### 2026-08-29: OpenVizsla trace of the same test -- confirms the timing, opens one new question
+
+Rerun for the wire-level record, not to re-decide anything: `JT-MIDI-008`, run
+`x86_64-prod/20260829T180442Z-functional`, same device and setup as above.
+Identical result -- `deactivations_observed: 1`, `bytes_received_while_stopped:
+0` -- with an OpenVizsla capture running throughout. Two independent hardware
+runs now agree.
+
+Capture `capture_2026-08-29_linux_test_on-demand.txt` (sidecar:
+`re/usb/openvizsla/capture_2026-08-29_linux_test_on-demand.md`), parsed with
+`re/usb/parse_openvizsla.py` and `reduce_transactions.py` per the pipeline in
+`re/usb/README.md`. `extract_events.py` finds five control-plane events:
+
+| # | kind | at (s) | span (ms) |
+|---|---|---|---|
+| 1 | enumeration | 2.030689 | 3.557 |
+| 2 | init | 2.403042 | 2.093 |
+| 3 | init+rate | 2.693785 | 82.620 |
+| 4 | init | 38.540304 | 1.048 |
+| 5 | init+rate | 38.823622 | 83.832 |
+
+Events 1-3 are the case's opening rebind (unbind/bind, forcing the fresh probe
+this document's design calls for); events 4-5 are its closing rebind. Nothing
+else appears on EP0 between them.
+
+**The timing correlates with the driver's own dev_dbg to within 1 ms, computed
+from the trace's own clock alone -- no dmesg wall-clock conversion needed.**
+Event 3 (the opening rebind's init+rate) ends at capture t = 2.693785 + 0.082620
+= 2.776 s. The driver logged the deactivation as `idle for 5005 ms`. Predicted
+stop: 2.776 + 5.005 = **7.781 s**. The last real PCM packet on the wire (a
+bulk OUT on EP 0x05 immediately followed by two bulk IN on EP 0x86) is
+timestamped **7.782163 s**. That is the on-demand deactivation, confirmed
+independently of dmesg, not merely "around the right time."
+
+Three MIDI IN completions on EP 0x83 follow immediately after (7.783872,
+7.793258, 7.793264 s), each a 5-byte packet mostly `0xFD` padding with one or
+two other bytes -- the device's ordinary idle heartbeat frames, filtered out
+downstream by `jockey3_midi_in_callback()`'s `buf[i] < 0xF0` strip (see
+`re/protocol_analysis.md` and `cases/midi_padding.py`), which is why they
+never reach `bytes_received_while_stopped`. Then: **nothing at all on the bus
+for 30.747 s**, until event 4's `SET_INTERFACE` at t = 38.540304 -- matching
+`watch_seconds: 30` plus a little case bookkeeping.
+
+**Ruled out: this is not USB autosuspend.** `jockey3_resume()` and
+`jockey3_reset_resume()` both route through `jockey3_restore_device()`, which
+is never silent on the wire -- it always runs a full cold init
+(`SET_INTERFACE`, `GET_RATE`/`SET_RATE`, the closing `SET_STATUS`). A
+runtime-PM suspend-then-resume inside the 30.747 s gap would show up as a
+*third* `init`/`init+rate` event pair, distinct from the two rebinds. There
+isn't one -- only five events, two rebinds, nothing between. (The driver also
+never calls `usb_autopm_get_interface()`/`_put_interface()` and does not set
+`.supports_autosuspend` on its `usb_driver` struct, consistent with this but
+not the proof; the trace's event count is. To check the live policy on a rig
+directly: `cat /sys/bus/usb/devices/<path>/power/{control,runtime_status,autosuspend_delay_ms,runtime_suspended_time}`
+-- `<path>` is `1-13.1` for this device on this rig.)
+
+**Open, not yet resolved: does the silence on EP 0x83 mean the MIDI IN URB
+stopped being polled, or that it was polled and NAK'd the whole time?**
+`parse_openvizsla.py` drops NAK and STALL by default (`re/usb/README.md`),
+and the trace above was read from that default view. A host that kept issuing
+IN tokens on 0x83 throughout the gap, every one NAK'd because the firmware had
+nothing to report, is indistinguishable in this view from a host that stopped
+issuing them at all -- exactly the trap that document already calls out:
+*"with NAK and STALL dropped, an idle window and a window full of rejected
+transfers are indistinguishable."*
+
+The distinction matters. Continuous NAK'd polling would mean the MIDI IN URB
+stayed alive exactly as designed, and would sharpen this document's finding
+from "no MIDI IN traffic" to the more precise "the pipe stays open; the
+firmware silently withholds while idle." A truly silent endpoint -- no IN
+tokens issued at all -- would be surprising given `jockey3_stop_pcm_urbs()`
+never touches `midi_in_urb`, its lock, or its stop fence (also consistent
+with the first run's clean dmesg, `dmesg: expected=3, unexpected=0,
+unrelated=0, unclassified=0, investigate=0`, showing no MIDI IN URB error of
+any kind), and would be worth its own investigation.
+
+Resolving it needs a re-parse of the raw capture with errors kept, since the
+already-derived `_parsed.txt`/`_parsed_reduced.txt` files were both generated
+without `--errors` and cannot answer this after the fact:
+
+```sh
+cd re/usb
+python3 parse_openvizsla.py --errors "../../../usb capture 2026/capture_2026-08-29_linux_test_on-demand.txt" - \
+    | python3 reduce_transactions.py --start 6 --end 39 - openvizsla/capture_2026-08-29_linux_test_on-demand_errors_window.txt
+```
+
+`--errors` bare (not `--errors=0`, which restricts to EP0) so bursts on 0x83
+are aggregated. An `ongoing` burst spanning the gap resolves it one way; no
+burst record on 0x83 at all resolves it the other. Neither outcome reopens
+the feature -- the gate result stands regardless -- but it changes how
+precisely the finding should be stated, which is worth getting right since
+this document is the reference for anyone who revisits the question.
+
 ## What happened to E3
 
 `re/streaming_overhead_experiments.md` E3 specified a temporary,
@@ -475,6 +568,12 @@ reached, except question 2, which is redirected to
    "the feature does not exist", which is the `idle_timeout=0` baseline
    `re/streaming_overhead.md` already has.
 6. ~~Does the idle timer ever fire in practice?~~ -- moot.
+7. **Open, not moot: does EP 0x83 stay polled-and-NAK'd, or does polling stop
+   entirely, while the PCM rings are down?** See "2026-08-29: OpenVizsla trace
+   of the same test" above -- doesn't change the gate result either way, but
+   sharpens (or corrects) how precisely this document's central finding is
+   stated. Needs a re-parse of the raw capture with `--errors` kept; not yet
+   done.
 
 ## Conclusion
 
