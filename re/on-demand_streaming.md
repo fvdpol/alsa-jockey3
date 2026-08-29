@@ -284,12 +284,30 @@ state that now expires.
 
 ## The second gate: can the STREAMING bit be cleared?
 
-`ploytec_start_streaming()` arms the device by reading its status byte and
-writing it back with `PLOYTEC_STATUS_STREAMING` (0x20) set. The obvious question
-this design never asks is the mirror image: **what happens if the host clears
-that bit?** If the device then stops sending, that is a graceful, protocol-level
-stop rather than the host simply going silent -- and it would tell us what state
-the firmware believes it is in while idle, which is currently unknown.
+`ploytec_start_streaming()` reads the device's status byte and writes it back
+with bit 5 (0x20) set. The obvious question this design never asks is the mirror
+image: **what happens if the host clears that bit?** If the device then stops
+sending, that is a graceful, protocol-level stop rather than the host simply
+going silent -- and it would tell us what state the firmware believes it is in
+while idle, which is currently unknown.
+
+**First, a caveat about the name.** `PLOYTEC_STATUS_STREAMING` is not a
+documented firmware constant. It was named from observation: writing the byte
+with bit 5 set is what the vendors do at the end of every initialization and
+every rate change, and doing it ourselves is what took the post-rate-change
+capture stall from roughly one change in six to zero (`re/rate_change_stall.md`).
+That establishes a correlation between the write and the device resuming, not
+that bit 5 *is* an enable. The working assumption is that these `SET_STATUS`
+calls set and clear bits in some internal Ploytec register whose mapping is
+unknown -- the header already hedges by calling bits 0-4 "observed but not
+understood", and the observed byte is 0x32, so at least two other bits are set
+that nobody has explained.
+
+So the experiment below should be read as "what does clearing bit 5 do", not as
+"what does disabling streaming do". Establishing what the register actually
+means is a separate and larger piece of work; it has its own document,
+`re/ploytec_status_register.md`, and it is deliberately not a dependency of this
+feature.
 
 ### What the corpus already says
 
@@ -298,12 +316,11 @@ Mined from `re/usb/openvizsla/*_events.txt`, no hardware needed:
 - **177 `SET_STATUS` writes across the entire corpus. Every single one writes
   `wValue=0x0032`.** The bit is never cleared -- not once, by either vendor.
 - Every `GET_STATUS` reply in the corpus is `0x32` as well, so the write is a
-  read-modify-write that does not change the value. Note that the full byte is
-  0x32, not 0x20: bits 0x02 and 0x10 are also set and remain unexplained
-  (`ploytec_proto.h` calls bits 0-4 "observed but not understood"). Our own
-  `status | PLOYTEC_STATUS_STREAMING` therefore writes 0x32 too, identical to
-  the vendors. "Clearing the streaming bit" means writing **0x12**, a value no
-  host has ever been observed sending to this device.
+  read-modify-write that does not change the value -- in the captures the
+  vendors never actually *change* the register, they just rewrite it. Our own
+  `status | PLOYTEC_STATUS_STREAMING` writes 0x32 too, identical to the vendors.
+  Clearing bit 5 means writing **0x12**, a value no host has ever been observed
+  sending to this device.
 - **Not even at teardown.** `capture_2026-08-13_macos_usb_disconnect_96k`
   contains nine `SET_STATUS` writes, all 0x32. macOS tears the device down
   without ever telling it to stop.
@@ -390,9 +407,11 @@ what idle actually costs now, written back into this document.
 
 1. **Does the device deliver MIDI IN while the PCM URBs are stopped?** The gate.
    Everything below is moot if this is no.
-2. **Can the STREAMING bit be cleared, and should it be?** See "The second gate"
-   above. Not a bus-traffic question -- a restart-reliability one. Runs after
-   question 1, and no host has ever been observed doing it.
+2. **Can bit 5 of the status register be cleared, and should it be?** See "The
+   second gate" above. Not a bus-traffic question -- a restart-reliability one.
+   Runs after question 1, and no host has ever been observed doing it. What the
+   register actually means is a separate topic,
+   `re/ploytec_status_register.md`, and not a dependency of this feature.
 3. **How long does a cold-start activation actually take**, from the trigger to
    the first completion, on each of the three prod targets? "Hundreds of
    milliseconds is acceptable" is an assumption about the user's tolerance, not a
