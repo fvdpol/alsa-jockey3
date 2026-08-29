@@ -94,6 +94,7 @@ profiles:
       - {id: JT-PCM-005,   iterations: 1}
       - {id: JT-PCM-006,   iterations: 1}
       - {id: JT-PCM-009,   iterations: 1}
+      - {id: JT-PCM-011,   iterations: 1}
       - {id: JT-RATE-001,  iterations: 1, params: {iterations_per_run: 25}}
       - {id: JT-RATE-002,  iterations: 1}
       - {id: JT-AUDIO-001, iterations: 1, params: {rates: [44100, 96000]}}

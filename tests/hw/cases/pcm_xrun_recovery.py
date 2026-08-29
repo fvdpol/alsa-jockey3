@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""JT-PCM-009: deterministic xrun recovery via /proc's xrun_injection.
+"""JT-PCM-009 (playback) / JT-PCM-011 (capture): deterministic xrun
+recovery via /proc's xrun_injection.
 
 No case in this suite specifically exercises the driver's xrun-recovery
 path -- jockey3_pcm_prepare()'s liveness check, which ALSA core runs on

@@ -831,6 +831,48 @@ cases:
       of flooring would wrongly land it on N=8 too, indistinguishable from
       ladder=8 -- only a true floor produces N=4 here.
 
+  - id: JT-PCM-011
+    title: Xrun injection and recovery, capture
+    area: PCM
+    level: L3
+    mode: automated
+    status: implemented
+    requires: [device, root, sox]
+    exec: cases/pcm_xrun_recovery.py
+    args: [capture]
+    params:
+      rate: 48000
+      seconds: 6
+      injections: 3
+    metrics:
+      - injections_requested
+      - injections_confirmed
+      - xruns
+      - avail_max
+    pass: >
+      Every injected xrun raises the capture substream's xrun counter, and
+      arecord recovers from each one and runs to completion.
+    expect_dmesg:
+      - 'Playback URB has stalled\.'
+      - 'Capture URB has stalled\.'
+    notes: >
+      The capture-direction counterpart of JT-PCM-009. Same case file,
+      same method, args: [capture] instead of [playback] -- kept as its own
+      catalog id rather than a per-profile args override so the capture run
+      is scheduled, reported and trend-tracked in its own right, the way
+      JT-PCM-002/004 are two ids over one cases/pcm.py.
+
+      Everything in JT-PCM-009's notes applies here: it forces real xruns
+      on the open substream through CONFIG_SND_PCM_XRUN_DEBUG's
+      xrun_injection proc file (jockey3-testctl xrun-inject), exercises the
+      FAST recovery path only because this driver's URBs run free of PCM
+      trigger state, and covers jockey3_pcm_prepare()'s liveness check that
+      ALSA core runs on every xrun recovery. The capture direction is worth
+      its own run because overrun recovery drives arecord's read side and
+      the capture URB ring, a different path through
+      jockey3_check_urb_stream_alive() than the playback underrun in
+      JT-PCM-009.
+
   # ------------------------------------------------------------------- RATE
 
   - id: JT-RATE-001
