@@ -40,7 +40,6 @@ Unlike most modern DJ controllers, the Reloop Jockey 3 does not use a class-comp
   round trip is analog, so it cannot settle bit-exactness either; that stays
   open.
 - Long-term stability testing
-- Confirmation of other Reloop Jockey 3 hardware
 - Kernel tree integration (eventual goal)
 
 See [`docs/test_status.md`](docs/test_status.md) for hardware test coverage by
@@ -48,12 +47,12 @@ target — what's passed, what hasn't, and whether that result is still current.
 
 ## Supported Devices
 
-| Device                        | Status              | Notes                     |
-|-------------------------------|---------------------|---------------------------|
-| Reloop Jockey 3 Remix         | ✅ Tested & Working | Primary development target |
-| Reloop Jockey 3 Master Edition| ⚠️ Untested         | Should work — feedback welcome |
+| Device                        | Status              | Notes                       |
+|-------------------------------|---------------------|-----------------------------|
+| Reloop Jockey 3 Remix         | ✅ Tested & Working | Primary development target  |
+| Reloop Jockey 3 Master Edition| ✅ Tested & Working | Confirmed via user feedback |
 
-> **Note**: I do not personally own a Master Edition. Testing reports from users with this model would be very helpful.
+> **Note**: I do not personally own a Master Edition, so have to rely on testing reports from users.
 
 ## Installation
 
@@ -117,7 +116,7 @@ The driver was developed by analyzing USB traffic between the controller and off
 Contributions are very welcome! This is a complex reverse-engineered driver.
 Areas especially appreciated:
 
-- Testing on Master Edition
+- Testing / validation on Master Edition
 - Stability / error handling improvements
 - Code review & refactoring
 - Documentation

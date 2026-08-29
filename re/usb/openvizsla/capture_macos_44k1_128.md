@@ -8,7 +8,7 @@ driver_version: Reloop/Ploytec CoreAudio driver 3.3.17
 application: Native Instruments Traktor Pro 3, version 3.8.46
 module_build_id: n/a (vendor driver)
 kernel_config: n/a (not Linux)
-device: Reloop Jockey 3 (confirm Remix 200c:1037 or Master Edition 200c:1009)
+device: Reloop Jockey 3 (confirm Remix 200c:1037 or Master Edition 200c:1019)
 size_raw: 89.8 MB
 usb_address: 27
 has_control_traffic: no

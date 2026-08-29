@@ -30,7 +30,7 @@
 #include "ploytec_midi.h"
 
 #define RELOOP_VENDOR_ID         0x200c
-#define RELOOP_JOCKEY3_ME_PID    0x1009
+#define RELOOP_JOCKEY3_ME_PID    0x1019
 #define RELOOP_JOCKEY3_REMIX_PID 0x1037
 
 enum { JOCKEY3_ME, JOCKEY3_REMIX };
