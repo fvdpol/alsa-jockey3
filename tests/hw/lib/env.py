@@ -267,8 +267,7 @@ def firmware_from_log(lines):
 def usb_device_info():
     """Locate the Jockey 3 on the USB bus."""
     for vid, pid, name in (("200c", "1037", "Jockey 3 Remix"),
-                           ("200c", "1019", "Jockey 3 Master Edition"),
-                           ("200c", "1009", "Jockey 3 Master Edition")):
+                           ("200c", "1019", "Jockey 3 Master Edition")):
         for idv in glob.glob("/sys/bus/usb/devices/*/idVendor"):
             base = os.path.dirname(idv)
             if _read(idv).lower() != vid:

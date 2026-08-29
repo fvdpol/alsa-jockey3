@@ -17,11 +17,11 @@ Device                             VID:PID      Status
 =================================  ===========  ================
 Reloop Jockey 3 Remix              200c:1037    Tested
 Reloop Jockey 3 Master Edition     200c:1019    Limited testing
-Reloop Jockey 3 Master Edition     200c:1009    Untested
 =================================  ===========  ================
 
 The Master Edition is believed to be protocol-compatible, but the driver author
-does not own one, so it has not been verified on hardware.
+does not own one. User feedback on the Master Edition has been received 
+confirming the device is fully functional.
 
 Audio
 =====

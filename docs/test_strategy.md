@@ -37,7 +37,7 @@ Deliberately **out of scope**:
   properties of the hardware. The driver's job is to move bits without
   corrupting or dropping them. Corruption is audible, and a human ear catches
   it faster and more reliably than a measurement rig would.
-- **The Master Edition (`200c:1009`).** It is in the device table but no
+- **The Master Edition (`200c:1019`).** It is in the device table but no
   hardware is available to test it. This is stated plainly in the README rather
   than papered over, and depends on user feedback.
 - **An ALM-style tracking system.** Test IDs and a results file, nothing more.
