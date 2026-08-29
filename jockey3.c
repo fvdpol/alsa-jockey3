@@ -30,7 +30,8 @@
 #include "ploytec_midi.h"
 
 #define RELOOP_VENDOR_ID         0x200c
-#define RELOOP_JOCKEY3_ME_PID    0x1009
+#define RELOOP_JOCKEY3_ME_PID    0x1019
+#define RELOOP_JOCKEY3_ME_ALT_PID 0x1009
 #define RELOOP_JOCKEY3_REMIX_PID 0x1037
 
 enum { JOCKEY3_ME, JOCKEY3_REMIX };
@@ -3434,6 +3435,7 @@ static int jockey3_reset_resume(struct usb_interface *intf)
 
 static const struct usb_device_id jockey3_ids[] = {
 	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_ME_PID), .driver_info = JOCKEY3_ME },
+	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_ME_ALT_PID), .driver_info = JOCKEY3_ME },
 	{ USB_DEVICE(RELOOP_VENDOR_ID, RELOOP_JOCKEY3_REMIX_PID), .driver_info = JOCKEY3_REMIX },
 	{}
 };

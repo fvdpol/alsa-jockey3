@@ -126,7 +126,7 @@ def render(info, trace_name, trace_path, platform_hint):
 		"application: TODO -- the software driving the device, with version",
 		"module_build_id: TODO -- Linux only, from /sys/module/snd_reloop_jockey3/notes/",
 		"kernel_config: TODO -- Linux only; debug or production, and which config",
-		"device: Reloop Jockey 3 (confirm Remix 200c:1037 or Master Edition 200c:1009)",
+		"device: Reloop Jockey 3 (confirm Remix 200c:1037 or Master Edition 200c:1019 / 200c:1009)",
 		f"size_raw: {size}",
 		f"usb_address: {addresses or 'unknown'}",
 		f"has_control_traffic: {'yes' if has_ep0 else 'no'}",

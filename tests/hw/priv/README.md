@@ -30,7 +30,7 @@ sudo ./install.sh --remove
 ### `usb-power` takes an action, never a target
 
 The hub location and port are **not** arguments. They are resolved inside the
-helper from the Jockey 3's own USB ids (`200c:1037`, `200c:1009`), and only a
+helper from the Jockey 3's own USB ids (`200c:1037`, `200c:1019`, `200c:1009`), and only a
 port on a hub advertising `ppps` is accepted. A verb that accepted `-l 1-3 -p 1`
 would grant the suite the right to cut power to any port on any hub — and on
 the test rig, hub `1-3` carries the keyboard, the mouse, and the hub the device
