@@ -1935,6 +1935,15 @@ cases:
       already be in) and again after (so a PASS or a FAIL leaves the PCM
       rings running for whatever case runs next on this target).
 
+      2026-08-29: run x86_64-prod/20260829T171709Z-functional, Jockey 3
+      Remix. deactivations_observed=1 (the driver's own dev_dbg confirmed the
+      stop within 5ms of idle_timeout), bytes_received_while_stopped=0 over a
+      30s window of jog wheel / fader / button input, dmesg entirely
+      expected (0 unexpected/unclassified/investigate, no MIDI IN URB error
+      of any kind). THE GATE FAILS: this device does not deliver MIDI IN
+      while its audio engine is idle. On-demand streaming is closed --
+      see re/on-demand_streaming.md.
+
   - id: JT-MIDI-009
     title: An outgoing MIDI byte restarts a stopped stream
     area: MIDI

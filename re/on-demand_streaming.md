@@ -1,10 +1,14 @@
 # On-demand PCM streaming: starting the URBs only when something is using them
 
-> **Status 2026-08-29: design agreed, not started.** This is lever 3 of
-> `re/streaming_overhead.md`, which recommends against it. It is being pursued
-> anyway, on a narrower justification than the study assumed and behind a
-> hardware gate that can still close it. Work happens on
-> `dev/on-demand-streaming`.
+> **CLOSED 2026-08-29.** The gate failed on real hardware: MIDI IN does not
+> survive the PCM URB rings being stopped. On a `Jockey 3 Remix` on
+> `x86_64-prod`, with the driver's own dev_dbg confirming the rings were
+> stopped and no MIDI IN URB error of any kind in the log, thirty seconds of
+> jog wheel, fader and button input produced zero bytes on the rawmidi input.
+> As specified from the start, that closes the feature -- see "2026-08-29:
+> the gate fails" below. Phase 1's code stays on `dev/on-demand-streaming`,
+> unmerged; nothing further is planned against it pending Frank's decision on
+> what becomes of the branch.
 
 This document is the working document for the feature. It records what is being
 built and why, what the change touches, and -- as evidence arrives -- what the
@@ -86,6 +90,53 @@ Note the asymmetry: the *other* direction needs no gate. Host-to-device MIDI
 rides byte 480 of the playback packet, so with the playback URBs stopped that
 path does not physically exist -- and it does not need to, because an outgoing
 MIDI byte is one of the two start triggers.
+
+### 2026-08-29: the gate fails
+
+`JT-MIDI-008`, run `x86_64-prod/20260829T171709Z-functional`, device `Jockey 3
+Remix` (`200c:1037`, firmware `1.0.6`), operator Frank.
+
+The case forced a fresh probe (unbind/bind), set `idle_timeout` to 5 s, wrote a
+marker, and waited. The kernel log:
+
+```
+[341430.479022] JT-MARK JT-MIDI-008-wait e9521b733e52
+[341435.474661] snd-reloop-jockey3 1-13.1:1.0: On-demand: stopping PCM streaming, idle for 5035 ms (idle_timeout=5 s)
+```
+
+4995.6 ms after the marker -- within a rounding error of `idle_timeout`, which
+is what confirms `jockey3_idle_work()`'s remaining-time rearm is computing
+correctly rather than drifting on a flat poll. The operator then moved a jog
+wheel, a fader and pressed several buttons for the full 30 s watch window.
+
+**Result: `bytes_received_while_stopped: 0`.** Zero bytes arrived on the
+rawmidi input for the entire window.
+
+This is not a driver-side failure to be debugged. `jockey3_stop_pcm_urbs()`
+never touches the MIDI IN URB, its lock, or its stop fence -- confirmed by the
+run's own dmesg, which contains nothing else at all for the whole window: no
+MIDI IN submit error, no "cancelled without a driver-initiated stop", no
+retry, nothing in `investigate` or `unexpected` (`dmesg: expected=3,
+unexpected=0, unrelated=0, unclassified=0, investigate=0`). The MIDI IN URB
+stayed submitted and healthy throughout and simply received nothing. That is
+the firmware's own answer: **this device does not deliver MIDI IN while its
+audio engine is not streaming.**
+
+**Per the design stated at the top of this document, this closes the
+feature.** A DJ controller whose jog wheels, faders and buttons go dead
+whenever the PCM rings are idled down is a functional regression, not a
+tradeoff, and no amount of refinement to the start/stop mechanism changes
+what the firmware does with EP 0x83. The unique payoff on-demand streaming
+could still have offered after the L0/power correction earlier in this
+document -- the CPU and interrupt saving during genuine idle -- is not worth
+that cost.
+
+What this does *not* close: the STREAMING-bit experiment
+("The second gate", above) still has independent value for
+`re/ploytec_status_register.md` -- understanding the register is useful on its
+own, restart-reliability work is unrelated to on-demand streaming, and that
+document already scopes itself as not a dependency of any feature. It simply
+no longer has an on-demand-streaming gate to unblock.
 
 ## What happened to E3
 
@@ -405,30 +456,45 @@ what idle actually costs now, written back into this document.
 
 ## Open questions, in the order worth attacking
 
-1. **Does the device deliver MIDI IN while the PCM URBs are stopped?** The gate.
-   Everything below is moot if this is no.
-2. **Can bit 5 of the status register be cleared, and should it be?** See "The
-   second gate" above. Not a bus-traffic question -- a restart-reliability one.
-   Runs after question 1, and no host has ever been observed doing it. What the
-   register actually means is a separate topic,
-   `re/ploytec_status_register.md`, and not a dependency of this feature.
-3. **How long does a cold-start activation actually take**, from the trigger to
-   the first completion, on each of the three prod targets? "Hundreds of
-   milliseconds is acceptable" is an assumption about the user's tolerance, not a
-   measurement of the delay.
-4. **How reliable is activation, over many cycles?** The rate-change path
-   measures zero stalls in 486 changes since `5505b28` but still shows a small
-   residual on `arm64-prod`. Activation runs the same code. A failure rate that is
-   invisible at a few changes per session may not be at one activation per
-   application launch.
-5. **What does idle actually cost after this change**, measured rather than
-   reasoned? `JT-PERF-001` at `idle_timeout=5` against `idle_timeout=0`.
-6. **Does the idle timer ever fire in practice?** Any software doing LED feedback
-   keeps MIDI OUT active and the stream permanently non-idle, which the study
-   argues shrinks the benefit window to "plugged in with no controlling software
-   running at all". That argument is not refuted by this design; it is accepted,
-   and the 600 second default is chosen to suit that window rather than to fight
-   it.
+**Question 1 is answered; the feature is closed. Questions 2-6 are moot for
+on-demand streaming** and are kept below only as a record of what was never
+reached, except question 2, which is redirected to
+`re/ploytec_status_register.md` where it still has independent value.
+
+1. ~~Does the device deliver MIDI IN while the PCM URBs are stopped?~~ **No.**
+   Confirmed on hardware 2026-08-29 -- see "2026-08-29: the gate fails" above.
+   The gate. Everything below was moot the moment this answer came back.
+2. **Can bit 5 of the status register be cleared, and should it be?** No longer
+   an on-demand-streaming question -- see `re/ploytec_status_register.md`,
+   which absorbs it as a restart-reliability and register-understanding
+   question in its own right, unblocked by anything here.
+3. ~~How long does a cold-start activation actually take~~ -- moot, there is no
+   activation to measure.
+4. ~~How reliable is activation, over many cycles?~~ -- moot, same reason.
+5. ~~What does idle actually cost after this change?~~ -- moot; idle now means
+   "the feature does not exist", which is the `idle_timeout=0` baseline
+   `re/streaming_overhead.md` already has.
+6. ~~Does the idle timer ever fire in practice?~~ -- moot.
+
+## Conclusion
+
+**Not pursued further.** The gate specified at the outset of this document was
+unconditional -- "if the answer is no, the feature is closed" -- and the
+answer, on real hardware, is no. This is not a case for revisiting the design:
+no amount of restart-reliability work, timeout tuning, or activation-latency
+optimization changes what the firmware does with EP 0x83 while its audio
+engine is idle, and that is the one fact the whole feature turned on.
+
+Phase 1's driver code (`dev/on-demand-streaming`, `8352ff1`) is mechanically
+sound -- the split URB lifecycle, the flag-as-ring-property fix, the idle
+timer -- but it exists to serve a feature that is now closed. What happens to
+the branch (revert, keep unmerged for reference, or salvage the URB-split
+refactor on its own merits independent of on-demand streaming) is Frank's
+call, not recorded here as a decision.
+
+`re/streaming_overhead.md` Part 4 and `re/streaming_overhead_experiments.md`
+E3 should both be updated to point at this conclusion rather than at an
+open question.
 
 ## What this document does not claim
 
