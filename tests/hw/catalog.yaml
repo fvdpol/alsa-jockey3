@@ -873,6 +873,40 @@ cases:
       jockey3_check_urb_stream_alive() than the playback underrun in
       JT-PCM-009.
 
+  - id: JT-PCM-012
+    title: On-demand streaming stops when idle and restarts on a PCM open
+    area: PCM
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, root]
+    metrics:
+      - deactivations_observed
+      - activations_observed
+      - activation_latency_ms
+      - xruns
+    pass: >
+      With idle_timeout set short and nothing open, the driver stops the PCM
+      URBs exactly once and says so. A subsequent aplay/arecord open restarts
+      them, the transfer runs to completion without xruns, and no recovery or
+      device reset was needed to get there.
+    notes: >
+      Covers the core of the on-demand streaming feature -- see
+      re/on-demand_streaming.md. Sets idle_timeout through the module's
+      writable parameter rather than a modprobe argument: an unknown module
+      parameter is itself classified as a driver failure by lib/rules.yaml, so
+      passing it at load time would turn every target still running an older
+      module red instead of skipping.
+
+      The activation latency is the number the feature's whole cost/benefit
+      rests on, and it is deliberately measured from kernel-log timestamps
+      rather than from wall clock in the harness -- the restart is a cold init
+      and the interesting boundaries are inside the driver.
+
+      Depends on JT-MIDI-008 passing first. If the device does not deliver MIDI
+      IN while the PCM URBs are stopped, the feature is closed and this case
+      never becomes implemented.
+
   # ------------------------------------------------------------------- RATE
 
   - id: JT-RATE-001
@@ -1842,6 +1876,70 @@ cases:
       standing in for; each former SOAK case moved into the area it actually
       belongs to and kept its level: L5.
 
+  - id: JT-MIDI-008
+    title: MIDI IN survives while the PCM URBs are stopped
+    area: MIDI
+    level: L3
+    mode: semi-automated
+    status: planned
+    requires: [device, root]
+    metrics:
+      - bytes_received_while_stopped
+      - controls_moved
+      - deactivations_observed
+    pass: >
+      With idle_timeout set short, nothing open, and the kernel log confirming
+      the PCM URBs are stopped, moving a jog wheel or fader still produces MIDI
+      bytes on the card's rawmidi input.
+    steps:
+      - Confirm no PCM stream is open and the driver has logged the deactivation.
+      - Move a jog wheel, then a fader, then press a button.
+      - Confirm the case reports bytes arriving for each.
+    notes: >
+      THE GATE for on-demand streaming, and a kick-out criterion: if the
+      firmware only pumps EP 0x83 while its audio engine is running, a
+      controller's knobs and faders go dead whenever audio is closed. That is a
+      functional regression, not a tradeoff, on a device whose primary job is
+      MIDI -- and the feature is abandoned. See re/on-demand_streaming.md.
+
+      Nothing in the OpenVizsla corpus can answer this: neither vendor driver
+      ever stops streaming, so no capture exists of a device with a stopped
+      audio engine and a live MIDI endpoint.
+
+      Semi-automated because no actuator exists for a jog wheel; follows
+      JT-MIDI-002's shape, where the operator supplies the physical stimulus
+      and the case reads the result.
+
+  - id: JT-MIDI-009
+    title: An outgoing MIDI byte restarts a stopped stream
+    area: MIDI
+    level: L3
+    mode: semi-automated
+    status: planned
+    requires: [device, root]
+    metrics:
+      - activation_latency_ms
+      - write_failures
+      - bytes_dropped
+    pass: >
+      After the PCM URBs have been stopped for idleness, a write to the rawmidi
+      output restarts them and the commanded LED lights. No bytes are lost
+      across the restart.
+    steps:
+      - Confirm the driver has logged the deactivation.
+      - Watch the device while the case writes the LED command.
+      - Confirm the expected LEDs light.
+    notes: >
+      The second start trigger, and the one with a user-visible delay: MIDI OUT
+      is multiplexed into byte 480 of the playback packet, so an outgoing byte
+      while the stream is stopped has nowhere to go until the stream restarts.
+      jockey3_midi_out_trigger() runs atomic and can only queue the work, so
+      this measures workqueue latency plus a full cold init.
+
+      Byte loss is asserted on because there is no driver-side MIDI FIFO -- the
+      bytes wait in the rawmidi core's own ring, which is finite. See
+      re/on-demand_streaming.md.
+
   # --------------------------------------------------------------------- PM
 
   - id: JT-PM-001
@@ -1898,6 +1996,29 @@ cases:
         Confirm the machine resumes, and that aplay exited with an error rather
         than hanging or continuing silently.
       - Confirm the card is still present in /proc/asound/cards.
+
+  - id: JT-PM-003
+    title: On-demand idle/active state survives suspend and resume
+    area: PM
+    level: L3
+    mode: automated
+    status: planned
+    requires: [device, root, rtc-wake]
+    metrics:
+      - resumed_streaming
+      - resumed_idle
+      - resume_ms
+    pass: >
+      A device that was streaming when the machine suspended is streaming after
+      resume; a device that was idle is still idle, with MIDI IN alive and the
+      inactivity timer restarted. Neither case leaves the driver believing it is
+      streaming when the URBs are down, or the reverse.
+    notes: >
+      On-demand streaming adds a second state the device can be suspended in,
+      and jockey3_restore_device() currently has only one restore path. See
+      re/on-demand_streaming.md. Runs both directions in one case because the
+      failure worth catching is the state being lost, which only shows up as a
+      difference between the two.
       - Start playback again and confirm audio is restored without reloading
         the driver.
       - Check dmesg for an oops, a hung task, or a stuck reference count.
