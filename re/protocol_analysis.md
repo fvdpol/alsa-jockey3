@@ -24,6 +24,11 @@ The device follows the standard Ploytec handshake:
    - `22 01 00 01 05 00 03 00` (SET_CUR on EP 0x05) -> 3-byte LE rate.
 4. **Confirm Status**:
    - Write back the status byte read in step 1 with bit 5 set (Request 0x49, bmRequestType 0x40).
+   - The observed byte is `0x32`, so bits 1 and 4 are set as well and are not
+     understood. Bit 5 is called "streaming" in the driver on the strength of
+     observation alone, not of any documentation. What this register actually
+     maps to is an open reverse-engineering topic --
+     see `re/ploytec_status_register.md`.
 
 ## Audio/MIDI Packet Layout (EP 0x05 OUT / 0x86 IN)
 
