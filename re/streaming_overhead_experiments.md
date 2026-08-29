@@ -564,6 +564,15 @@ found at N=4/N=8 pre-fix was not N=4-or-above-specific, it was present
 
 ## E3 -- The on-demand gate question, and only this question
 
+> **Superseded 2026-08-29 by `re/on-demand_streaming.md`.** On-demand streaming
+> is being built, and the design treats a restart as a full cold start rather
+> than trying to fit a 20 ms budget -- so the escalation ladder, the budget and
+> the stop rules below no longer apply, and the temporary dev-only hook will not
+> be built (a runtime-writable `idle_timeout` on the real feature answers the
+> same question without code that never ships). What survives, promoted from a
+> secondary check to *the* gate, is whether MIDI IN keeps arriving on EP 0x83
+> while the PCM URBs are stopped. The plan below is kept for the record.
+
 **Question:** can the device resume bulk OUT and IN after a multi-second idle
 gap with no EP0 traffic, within 20 ms?
 

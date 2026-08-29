@@ -1139,6 +1139,13 @@ to force `jockey3_set_rate(44100)` dropped interrupts from ~30,000/s to
 
 ## Part 4: lever 3 -- on-demand streaming
 
+> **2026-08-29: lever 3 is being pursued after all**, on a narrower
+> justification than this Part assumes -- and notably *without* the L0/power
+> benefit Part 5 point 5 attributes to it, because MIDI IN stays submitted
+> across the idle period. `re/on-demand_streaming.md` is the working document
+> for the feature and supersedes experiment E3. The analysis below is kept as
+> written; where the two disagree, the newer document says so explicitly.
+
 The proposal: keep the URBs stopped while nothing is open, start them on PCM
 open or on the first outgoing MIDI byte, stop them again after N seconds of
 inactivity.
@@ -1232,6 +1239,12 @@ experiments whose only purpose would be to unlock that small remainder.
 
 If it is pursued anyway, the order is fixed: answer the gate question first
 (Experiment E3 below), and stop if it fails.
+
+**2026-08-29: it is being pursued** -- see `re/on-demand_streaming.md`. The gate
+question changed shape: restarting is deliberately treated as a full cold start
+rather than being held to a 20 ms budget, so the only gate left is whether MIDI
+IN survives on EP 0x83 while the PCM URBs are stopped. That one is still
+terminal.
 
 ---
 
