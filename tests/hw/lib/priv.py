@@ -128,6 +128,23 @@ def printk_console(level, timeout=20):
     return rc == 0, (err or "").strip()
 
 
+def set_idle_timeout(seconds, timeout=20):
+    """Write on-demand streaming's idle_timeout module parameter (0-86400 s).
+
+    See re/on-demand_streaming.md. The parameter is 0644 -- a genuine runtime
+    knob, not a test-only hook -- but the sysfs file is root-owned regardless.
+    """
+    rc, _out, err = call("set-idle-timeout", int(seconds), timeout=timeout)
+    return rc == 0, (err or "").strip()
+
+
+def dyndbg_ondemand(on=True, timeout=20):
+    """Toggle jockey3_idle_work()'s "On-demand: stopping ..." dev_dbg line."""
+    rc, _out, err = call("dyndbg-ondemand", "on" if on else "off",
+                         timeout=timeout)
+    return rc == 0, (err or "").strip()
+
+
 def xrun_inject(pcm, timeout=20):
     """Force an xrun on the open substream named pcm ('pcm0p' or 'pcm0c').
 

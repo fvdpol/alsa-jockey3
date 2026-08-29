@@ -1881,16 +1881,22 @@ cases:
     area: MIDI
     level: L3
     mode: semi-automated
-    status: planned
+    status: implemented
     requires: [device, root]
+    exec: cases/midi_survives_idle.py
+    params:
+      idle_timeout_s: 5
+      wait_margin_s: 15
+      watch_seconds: 30
     metrics:
       - bytes_received_while_stopped
-      - controls_moved
       - deactivations_observed
     pass: >
-      With idle_timeout set short, nothing open, and the kernel log confirming
-      the PCM URBs are stopped, moving a jog wheel or fader still produces MIDI
-      bytes on the card's rawmidi input.
+      With idle_timeout set short and nothing open, the driver logs stopping
+      the PCM URB rings on its own, and moving a jog wheel or fader afterwards
+      still produces MIDI bytes on the card's rawmidi input.
+    expect_dmesg:
+      - 'On-demand: stopping PCM streaming, idle for \d+ ms \(idle_timeout=\d+ s\)'
     steps:
       - Confirm no PCM stream is open and the driver has logged the deactivation.
       - Move a jog wheel, then a fader, then press a button.
@@ -1908,7 +1914,26 @@ cases:
 
       Semi-automated because no actuator exists for a jog wheel; follows
       JT-MIDI-002's shape, where the operator supplies the physical stimulus
-      and the case reads the result.
+      and the case reads the result. The stop itself IS automated and
+      verified from the kernel log (jockey3_idle_work(), toggled via the new
+      dyndbg-ondemand jockey3-testctl verb) rather than assumed from the
+      clock -- only the physical stimulus and the "did the controller respond"
+      judgment are the operator's.
+
+      idle_timeout is set through jockey3-testctl's set-idle-timeout verb,
+      not a modprobe argument: an unknown module parameter is itself
+      classified as a driver failure by lib/rules.yaml, so passing it at load
+      time would turn every target still running an older module red instead
+      of skipping. The case restores idle_timeout to 600 (the shipped
+      default) when it finishes, so a case that runs after it does not
+      inherit a 5s idle window it never asked for.
+
+      Phase 1 only (re/on-demand_streaming.md): there is no restart path on
+      this branch yet. The case unbinds and rebinds the driver both before
+      the wait (so it starts from a device known to be streaming, not from
+      whatever state a rig that has sat idle for the default 600s happens to
+      already be in) and again after (so a PASS or a FAIL leaves the PCM
+      rings running for whatever case runs next on this target).
 
   - id: JT-MIDI-009
     title: An outgoing MIDI byte restarts a stopped stream

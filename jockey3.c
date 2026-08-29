@@ -47,6 +47,23 @@ MODULE_PARM_DESC(id, "ID string for " CARD_NAME " soundcard.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 
+/*
+ * On-demand streaming (re/on-demand_streaming.md). 0644, unlike the three
+ * params above: this one is a runtime tuning knob, not a probe-time-only
+ * setting, and a hardware test that wants a short timeout must not have to
+ * reload the module to get one.
+ *
+ * Phase 1 only: jockey3_idle_work() stops the PCM URB rings after this many
+ * idle seconds, but nothing yet restarts them -- there is no reactivation
+ * path on this branch until Phase 2 lands. Once the rings stop, they stay
+ * stopped until the device is unbound and rebound. MIDI IN is never touched
+ * by this parameter.
+ */
+static unsigned int idle_timeout = 600;
+module_param(idle_timeout, uint, 0644);
+MODULE_PARM_DESC(idle_timeout,
+		 "Seconds of inactivity before PCM streaming stops (0 = always stream).");
+
 /**
  * DOC: Device model
  *
@@ -68,6 +85,12 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * carries MIDI OUT, and the device expects a continuous packet stream. The PCM
  * callbacks therefore only toggle whether a URB's payload is filled from (or
  * copied to) an ALSA buffer.
+ *
+ * That said, the PCM rings -- not the MIDI IN ring -- are stopped after
+ * idle_timeout idle seconds by jockey3_idle_work(); see
+ * re/on-demand_streaming.md. This is Phase 1 only: nothing on this branch yet
+ * restarts a stopped ring, so once it stops it stays stopped until the device
+ * is unbound and rebound. Read that document before extending this further.
  *
  * A sample-rate change requires tearing the URBs down, reprogramming the
  * device over EP0, and starting them again. jockey3_pcm_hw_params() checks
@@ -241,6 +264,15 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_STREAM_STARTUP_GRACE_MS	200
 
 /*
+ * Recheck cadence for jockey3_idle_work() (re/on-demand_streaming.md) while
+ * streaming is disabled (idle_timeout == 0) or a stream is open or MIDI OUT
+ * is in use: cheap relative to the USB traffic this feature exists to
+ * eliminate, and short enough that a runtime change to idle_timeout takes
+ * effect promptly rather than waiting out a stale, much longer window.
+ */
+#define JOCKEY3_IDLE_RECHECK_MS		1000
+
+/*
  * Bounded-retry budget for jockey3_recover_urb_stream(), chip-wide because the
  * remedy it escalates to (a full usb_reset_device()) is shared by both
  * directions -- a per-direction counter would double the effective rate for
@@ -263,6 +295,7 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 /* Chip flags */
 #define JOCKEY3_FLAG_DISCONNECTED	0
 #define JOCKEY3_FLAG_RESETTING		1
+#define JOCKEY3_FLAG_STREAMING		2	// PCM URB rings are (or should be) running
 
 /**
  * struct jockey3_pcm_urb_stream - per-direction PCM streaming state
@@ -385,6 +418,10 @@ struct jockey3_pcm_urb_stream {
  *	the second one wanted too. Test-and-set via atomic_cmpxchg() rather than
  *	a mutex held across the whole ladder, since jockey3_check_urb_stream_alive()
  *	callers elsewhere poll rather than block on recovery finishing.
+ * @idle_work: on-demand streaming's idle timer; jockey3_idle_work()
+ * @last_activity: ktime of the last PCM or MIDI OUT activity; not
+ *	mutex-protected, for the same reason as @recovery_attempts --
+ *	jockey3_idle_work() reads it before it takes @rate_mutex
  * @midi_in_substream: open MIDI IN substream, or NULL; @midi_lock
  * @midi_out_substream: open MIDI OUT substream, or NULL; @midi_lock
  * @midi_in_urb: the single MIDI IN URB; not anchored, killed directly
@@ -417,6 +454,16 @@ struct jockey3_chip {
 	atomic_t recovery_attempts;
 	atomic64_t recovery_window_start;
 	atomic_t recovery_in_progress;
+
+	/*
+	 * On-demand streaming (re/on-demand_streaming.md), Phase 1: idle_work
+	 * stops the PCM URB rings after last_activity is this stale. Neither
+	 * field is under rate_mutex -- idle_work reads both before it takes the
+	 * mutex, the same way jockey3_recover_urb_stream() reads the PCM
+	 * liveness timestamps.
+	 */
+	struct delayed_work idle_work;
+	atomic64_t last_activity;
 
 	/* MIDI Path */
 	struct snd_rawmidi_substream *midi_in_substream;
@@ -453,6 +500,17 @@ static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
 static inline bool jockey3_is_resetting(const struct jockey3_chip *chip)
 {
 	return test_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
+}
+
+/*
+ * Stamp the moment PCM or MIDI OUT activity was last seen. Called from
+ * process context (jockey3_pcm_open()/_close()) and from atomic context
+ * (jockey3_pcm_trigger(), jockey3_midi_out_trigger()), so this must stay a
+ * single atomic64_set() -- no lock, no sleep.
+ */
+static inline void jockey3_stream_mark_active(struct jockey3_chip *chip)
+{
+	atomic64_set(&chip->last_activity, ktime_get_mono_fast_ns());
 }
 
 /*
@@ -1383,16 +1441,26 @@ static void jockey3_watchdog_disarm(struct jockey3_chip *chip)
 }
 
 /**
- * jockey3_stop_urbs() - stop all PCM and MIDI URBs
+ * jockey3_stop_pcm_urbs() - kill the playback and capture URB rings
  * @chip: driver state
  *
- * Fences the completion handlers, then kills every URB. Sleeps, so it must not
- * be called from atomic context. On return no completion handler is running and
- * none can resubmit.
+ * The PCM half of what jockey3_stop_urbs() used to do in one function; the
+ * MIDI IN URB is jockey3_stop_midi_in_urb()'s job, kept separate so
+ * jockey3_idle_work() (re/on-demand_streaming.md) can stop the PCM rings
+ * without touching the control surface's input path.
  */
-static void jockey3_stop_urbs(struct jockey3_chip *chip)
+static void jockey3_stop_pcm_urbs(struct jockey3_chip *chip)
 {
-	dev_dbg(&chip->intf0->dev, "Stopping all URBs\n");
+	dev_dbg(&chip->intf0->dev, "Stopping playback/capture URBs\n");
+
+	/*
+	 * Property of the rings, not of any one caller: clearing it here, rather
+	 * than separately in each of jockey3_idle_work()/jockey3_pre_reset()/
+	 * jockey3_suspend()/etc, is what keeps jockey3_recover_urb_stream()'s
+	 * on-demand-streaming gate (re/on-demand_streaming.md) correct after a
+	 * reset or a resume without auditing every stop site by hand.
+	 */
+	clear_bit(JOCKEY3_FLAG_STREAMING, &chip->flags);
 
 	jockey3_watchdog_disarm(chip);
 
@@ -1414,16 +1482,13 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 		chip->playback.stopping = true;
 	scoped_guard(spinlock_irqsave, &chip->capture.lock)
 		chip->capture.stopping = true;
-	scoped_guard(spinlock_irqsave, &chip->midi_lock)
-		chip->midi_stopping = true;
 
 	/*
-	 * usb_kill_urb()/usb_kill_anchored_urbs() do not return until the
-	 * completion handler of each URB has finished, so no callback can still
-	 * be in its safe zone once these return -- no separate drain is needed
-	 * here (jockey3_pcm_sync_stop() covers the ALSA buffer-teardown path).
+	 * usb_kill_anchored_urbs() does not return until the completion handler
+	 * of each URB has finished, so no callback can still be in its safe zone
+	 * once these return -- no separate drain is needed here
+	 * (jockey3_pcm_sync_stop() covers the ALSA buffer-teardown path).
 	 */
-	usb_kill_urb(chip->midi_in_urb);
 	usb_kill_anchored_urbs(&chip->playback.anchor);
 	usb_kill_anchored_urbs(&chip->capture.anchor);
 
@@ -1450,22 +1515,53 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 }
 
 /**
- * jockey3_start_urbs() - submit all PCM and MIDI URBs
+ * jockey3_stop_midi_in_urb() - kill the MIDI IN URB
  * @chip: driver state
  *
- * Clears the stop fences and error budgets, then submits the full URB ring for
- * both directions plus the MIDI IN URB. Uses GFP_KERNEL, so process context
- * only. A failure to submit one URB does not prevent the others being tried.
+ * Kept separate from jockey3_stop_pcm_urbs() so on-demand streaming
+ * (re/on-demand_streaming.md) can stop the PCM rings while this one stays
+ * submitted. This URB is unanchored, so it is killed directly rather than
+ * via usb_kill_anchored_urbs().
+ */
+static void jockey3_stop_midi_in_urb(struct jockey3_chip *chip)
+{
+	dev_dbg(&chip->intf0->dev, "Stopping MIDI IN URB\n");
+
+	scoped_guard(spinlock_irqsave, &chip->midi_lock)
+		chip->midi_stopping = true;
+
+	usb_kill_urb(chip->midi_in_urb);
+}
+
+/**
+ * jockey3_stop_urbs() - stop all PCM and MIDI URBs
+ * @chip: driver state
  *
- * The return value must be checked. Only a completion handler resubmits a URB,
- * so a ring that comes up short stays short: nothing retries the URBs that
- * failed here, and the direction runs at reduced depth for as long as the
- * device stays bound, with no bookkeeping that would ever notice. Callers pass
- * the result to jockey3_start_urbs_failed(), or return it to their own caller.
+ * Fences the completion handlers, then kills every URB. Sleeps, so it must not
+ * be called from atomic context. On return no completion handler is running and
+ * none can resubmit.
+ */
+static void jockey3_stop_urbs(struct jockey3_chip *chip)
+{
+	jockey3_stop_pcm_urbs(chip);
+	jockey3_stop_midi_in_urb(chip);
+}
+
+/**
+ * jockey3_start_pcm_urbs() - submit the playback and capture URB rings
+ * @chip: driver state
+ *
+ * The PCM half of what jockey3_start_urbs() used to do in one function; the
+ * MIDI IN URB is jockey3_start_midi_in_urb()'s job. Uses GFP_KERNEL, so
+ * process context only.
+ *
+ * The return value must be checked; see jockey3_start_urbs()'s kernel-doc,
+ * which still applies. Also arms the watchdog, which only ever watches these
+ * two streams.
  *
  * Return: 0 on success, or the first submit error encountered.
  */
-static int jockey3_start_urbs(struct jockey3_chip *chip)
+static int jockey3_start_pcm_urbs(struct jockey3_chip *chip)
 {
 	int i, ret, first_err = 0;
 	int n_playback = 0, n_capture = 0;
@@ -1473,7 +1569,7 @@ static int jockey3_start_urbs(struct jockey3_chip *chip)
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	dev_dbg(&chip->intf0->dev, "Starting all URBs\n");
+	dev_dbg(&chip->intf0->dev, "Starting playback/capture URBs\n");
 
 	/*
 	 * Clear the error budget as well: a stream that was given up on must get
@@ -1488,10 +1584,6 @@ static int jockey3_start_urbs(struct jockey3_chip *chip)
 	scoped_guard(spinlock_irqsave, &chip->capture.lock) {
 		chip->capture.stopping = false;
 		chip->capture.consec_errors = 0;
-	}
-	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
-		chip->midi_stopping = false;
-		chip->midi_consec_errors = 0;
 	}
 
 	/* Report and clear any stall this restart is about to end */
@@ -1548,12 +1640,6 @@ static int jockey3_start_urbs(struct jockey3_chip *chip)
 			n_capture++;
 		}
 	}
-	ret = usb_submit_urb(chip->midi_in_urb, GFP_KERNEL);
-	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to submit MIDI IN URB: %d\n", ret);
-		if (!first_err)
-			first_err = ret;
-	}
 
 	if (n_playback < JOCKEY3_N_URBS || n_capture < JOCKEY3_N_URBS)
 		dev_err(&chip->intf0->dev,
@@ -1565,10 +1651,156 @@ static int jockey3_start_urbs(struct jockey3_chip *chip)
 	 * up at all, is precisely the state worth watching: when the endpoints
 	 * have been disabled underneath us every submit fails and nothing is left
 	 * to report the resulting silence.
+	 *
+	 * Set the streaming flag for the same reason and at the same point: a
+	 * ring this driver just tried to start is what jockey3_idle_work() and
+	 * jockey3_recover_urb_stream() (re/on-demand_streaming.md) need to treat
+	 * as "should be running", regardless of whether every URB in it made it.
 	 */
 	jockey3_watchdog_arm(chip);
+	set_bit(JOCKEY3_FLAG_STREAMING, &chip->flags);
 
 	return first_err;
+}
+
+/**
+ * jockey3_start_midi_in_urb() - submit the MIDI IN URB
+ * @chip: driver state
+ *
+ * Uses GFP_KERNEL, so process context only.
+ *
+ * Return: 0 on success, or the submit error.
+ */
+static int jockey3_start_midi_in_urb(struct jockey3_chip *chip)
+{
+	int ret;
+
+	if (jockey3_is_disconnected(chip))
+		return -ENODEV;
+
+	dev_dbg(&chip->intf0->dev, "Starting MIDI IN URB\n");
+
+	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
+		chip->midi_stopping = false;
+		chip->midi_consec_errors = 0;
+	}
+
+	ret = usb_submit_urb(chip->midi_in_urb, GFP_KERNEL);
+	if (ret < 0)
+		dev_err(&chip->intf0->dev, "Failed to submit MIDI IN URB: %d\n", ret);
+
+	return ret;
+}
+
+/**
+ * jockey3_start_urbs() - submit all PCM and MIDI URBs
+ * @chip: driver state
+ *
+ * Clears the stop fences and error budgets, then submits the full URB ring for
+ * both directions plus the MIDI IN URB. Uses GFP_KERNEL, so process context
+ * only. A failure to submit one URB does not prevent the others being tried.
+ *
+ * The return value must be checked. Only a completion handler resubmits a URB,
+ * so a ring that comes up short stays short: nothing retries the URBs that
+ * failed here, and the direction runs at reduced depth for as long as the
+ * device stays bound, with no bookkeeping that would ever notice. Callers pass
+ * the result to jockey3_start_urbs_failed(), or return it to their own caller.
+ *
+ * Return: 0 on success, or the first submit error encountered (the PCM rings'
+ * error takes priority over the MIDI IN URB's, matching the single combined
+ * loop this used to be).
+ */
+static int jockey3_start_urbs(struct jockey3_chip *chip)
+{
+	int ret, midi_ret;
+
+	ret = jockey3_start_pcm_urbs(chip);
+	midi_ret = jockey3_start_midi_in_urb(chip);
+	if (!ret)
+		ret = midi_ret;
+
+	return ret;
+}
+
+/**
+ * jockey3_idle_work() - on-demand streaming's idle timer (Phase 1)
+ * @work: embedded in chip->idle_work
+ *
+ * See re/on-demand_streaming.md. Reschedules itself at JOCKEY3_IDLE_RECHECK_MS
+ * (or sooner, if idle_timeout says less time remains) for as long as the
+ * device is bound, a PCM stream is open, MIDI OUT is in use, or idle_timeout
+ * is 0. Once none of those hold, it stops the PCM URB rings and does not
+ * requeue itself.
+ *
+ * Phase 1 only: there is no reactivation path on this branch yet, so once
+ * this fires, the PCM rings stay down until the device is unbound and
+ * rebound. MIDI IN is never touched here.
+ */
+static void jockey3_idle_work(struct work_struct *work)
+{
+	struct jockey3_chip *chip = container_of(to_delayed_work(work),
+						 struct jockey3_chip, idle_work);
+	unsigned int timeout_s = READ_ONCE(idle_timeout);
+	bool open, midi_busy;
+	u64 now, last, elapsed_ms, timeout_ms;
+	unsigned long remaining_ms;
+
+	if (jockey3_is_disconnected(chip))
+		return;		/* teardown in progress; do not requeue */
+
+	if (!timeout_s) {
+		queue_delayed_work(system_wq, &chip->idle_work,
+				   msecs_to_jiffies(JOCKEY3_IDLE_RECHECK_MS));
+		return;
+	}
+
+	open = jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_PLAYBACK) ||
+	       jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE);
+
+	scoped_guard(spinlock_irqsave, &chip->midi_lock)
+		midi_busy = chip->midi_out_substream;
+
+	now = ktime_get_mono_fast_ns();
+	last = atomic64_read(&chip->last_activity);
+	elapsed_ms = div_u64(now - last, NSEC_PER_MSEC);
+	timeout_ms = (u64)timeout_s * MSEC_PER_SEC;
+
+	if (open || midi_busy || elapsed_ms < timeout_ms) {
+		remaining_ms = open || midi_busy ?
+			JOCKEY3_IDLE_RECHECK_MS :
+			clamp_t(u64, timeout_ms - elapsed_ms,
+				JOCKEY3_IDLE_RECHECK_MS, timeout_ms);
+		queue_delayed_work(system_wq, &chip->idle_work,
+				   msecs_to_jiffies(remaining_ms));
+		return;
+	}
+
+	scoped_guard(mutex, &chip->rate_mutex) {
+		/*
+		 * Re-check everything under the mutex rather than trusting the
+		 * snapshot taken above it: an open, a rate change, a reset or a
+		 * resume, or another jockey3_idle_work() invocation could all have
+		 * changed the picture while this one waited for the lock -- the
+		 * same reasoning jockey3_recover_urb_stream() uses to re-check
+		 * liveness once it holds the mutex.
+		 */
+		if (jockey3_is_disconnected(chip))
+			return;
+		if (!test_bit(JOCKEY3_FLAG_STREAMING, &chip->flags))
+			return;		/* already stopped by something else */
+		if (jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_PLAYBACK) ||
+		    jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE))
+			return;
+		scoped_guard(spinlock_irqsave, &chip->midi_lock) {
+			if (chip->midi_out_substream)
+				return;
+		}
+		jockey3_stop_pcm_urbs(chip);
+	}
+
+	dev_dbg(&chip->intf0->dev,
+		"On-demand: stopping PCM streaming, idle for %llu ms (idle_timeout=%u s)\n",
+		elapsed_ms, timeout_s);
 }
 
 /**
@@ -2014,6 +2246,17 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
+	/*
+	 * On-demand streaming (re/on-demand_streaming.md): a deliberately idled
+	 * ring looks identical to a stalled one -- jockey3_stop_pcm_urbs() zeroes
+	 * the same timestamp jockey3_check_urb_stream_alive() reads. Without this
+	 * check, every idle period would end in a spurious "stalled" recovery,
+	 * up to and including a USB reset, for a stream that stopped exactly as
+	 * asked.
+	 */
+	if (!test_bit(JOCKEY3_FLAG_STREAMING, &chip->flags))
+		return 0;
+
 	if (jockey3_check_urb_stream_alive(urb_stream))
 		return 0;
 
@@ -2208,6 +2451,8 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 		urb_stream->substream = substream;
 	}
 
+	jockey3_stream_mark_active(chip);
+
 	return 0;
 }
 
@@ -2243,6 +2488,8 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 		urb_stream->n_shift = ilog2(default_n);
 		urb_stream->n_pkts = default_n;
 	}
+
+	jockey3_stream_mark_active(chip);
 
 	return 0;
 }
@@ -2393,6 +2640,7 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 			return -EINVAL;
 		}
 	}
+	jockey3_stream_mark_active(chip);
 	return 0;
 }
 
@@ -2700,6 +2948,7 @@ static void jockey3_midi_out_trigger(struct snd_rawmidi_substream *substream, in
 
 	guard(spinlock_irqsave)(&chip->midi_lock);
 	chip->midi_out_substream = up ? substream : NULL;
+	jockey3_stream_mark_active(chip);
 }
 
 static const struct snd_rawmidi_ops jockey3_midi_in_ops = {
@@ -2788,6 +3037,19 @@ static int jockey3_initialize(struct jockey3_chip *chip)
 		return ret;
 	}
 
+	/*
+	 * On-demand streaming (re/on-demand_streaming.md), Phase 1: the device
+	 * starts out streaming, exactly as before this feature existed --
+	 * jockey3_start_urbs() above (via jockey3_start_pcm_urbs()) already set
+	 * JOCKEY3_FLAG_STREAMING, which is what still proves on every plug-in
+	 * that the device can actually stream, something jockey3_idle_work()
+	 * alone could never do. It drops to idle idle_timeout seconds later if
+	 * nothing uses it.
+	 */
+	jockey3_stream_mark_active(chip);
+	queue_delayed_work(system_wq, &chip->idle_work,
+			   msecs_to_jiffies(JOCKEY3_IDLE_RECHECK_MS));
+
 	dev_dbg(&chip->intf0->dev, "Initialization complete.\n");
 
 	return 0;
@@ -2834,6 +3096,14 @@ static void jockey3_cancel_watchdog_action(void *data)
 	 * are freed further down the unwind.
 	 */
 	cancel_delayed_work_sync(&chip->watchdog_work);
+}
+
+static void jockey3_cancel_idle_work_action(void *data)
+{
+	struct jockey3_chip *chip = data;
+
+	/* Same reasoning as jockey3_cancel_watchdog_action() above. */
+	cancel_delayed_work_sync(&chip->idle_work);
 }
 
 static int jockey3_init_midi_urb(struct jockey3_chip *chip)
@@ -3159,6 +3429,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->capture.n_shift = ilog2(JOCKEY3_CAPTURE_N);
 	chip->capture.n_pkts = JOCKEY3_CAPTURE_N;
 	INIT_DELAYED_WORK(&chip->watchdog_work, jockey3_watchdog_work);
+	INIT_DELAYED_WORK(&chip->idle_work, jockey3_idle_work);
 
 	chip->xfer_buf = kmalloc(USB_XFER_BUF_SIZE, GFP_KERNEL);
 	if (!chip->xfer_buf)
@@ -3204,6 +3475,15 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	 * would leave a queued tick pointing at a freed chip.
 	 */
 	ret = devm_add_action_or_reset(&intf->dev, jockey3_cancel_watchdog_action, chip);
+	if (ret)
+		return ret;
+
+	/*
+	 * Same reasoning as the watchdog's cancel action above, for
+	 * chip->idle_work: it must be gone before jockey3_stop_urbs_action()
+	 * runs, and registered before jockey3_initialize() first queues it.
+	 */
+	ret = devm_add_action_or_reset(&intf->dev, jockey3_cancel_idle_work_action, chip);
 	if (ret)
 		return ret;
 
@@ -3282,6 +3562,7 @@ static void jockey3_disconnect(struct usb_interface *intf)
 		 * requeue itself.
 		 */
 		cancel_delayed_work_sync(&chip->watchdog_work);
+		cancel_delayed_work_sync(&chip->idle_work);
 
 		jockey3_stop_urbs(chip);
 		/*

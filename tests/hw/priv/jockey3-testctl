@@ -69,6 +69,12 @@ FW_MATCH='Firmware'
 # via the modprobe dyndbg= path -- see dyndbg-hwparams-n below.
 HWPARAMS_N_MATCH='packet(s)/URB'
 
+# The dev_dbg jockey3_idle_work() emits when it stops the PCM URB rings for
+# idleness (re/on-demand_streaming.md). Space-free for the same reason
+# FW_MATCH is; the colon keeps it from ever matching some other unrelated
+# "On-demand" text a future dev_dbg might add.
+ONDEMAND_MATCH='On-demand:'
+
 # The two URB completion handlers trace-callbacks profiles, for JT-PERF-001.
 # Fixed here for the same reason FW_MATCH is: the caller names an ACTION
 # (start/collect/stop), never a target function -- an arbitrary function name
@@ -112,6 +118,9 @@ usage() {
 #   dmesg-mark <token>     write a JT-MARK boundary token to /dev/kmsg
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
 #   dyndbg-hwparams-n on|off enable/disable the hw_params() packets/URB (N) message
+#   set-idle-timeout <0-86400>  write on-demand streaming's idle_timeout
+#                          module parameter (seconds; 0 = always stream)
+#   dyndbg-ondemand on|off enable/disable jockey3_idle_work()'s stop message
 #   printk-console <1-8>   set the console loglevel
 #   xrun-debug 0|1        make the ALSA core log every xrun to the kernel log
 #   xrun-inject pcm0p|pcm0c   force an xrun on that substream's sub0, via
@@ -350,6 +359,38 @@ dyndbg-hwparams-n)
 	# hw_params() call (every PCM open), not just at probe, so a live write
 	# to the control file is enough -- no modprobe dyndbg= parameter needed.
 	printf 'format %s %s\n' "$HWPARAMS_N_MATCH" "$flag" > "$DYNDBG" \
+		|| die "cannot write $DYNDBG"
+	exit 0
+	;;
+
+set-idle-timeout)
+	# On-demand streaming's idle_timeout module parameter
+	# (re/on-demand_streaming.md). It is 0644 by design -- a genuine
+	# runtime tuning knob, not a test-only hook -- but the sysfs parameter
+	# file is root-owned regardless, so a case still needs this to change
+	# it. Bounded well under UINT_MAX so a typo cannot park a target
+	# effectively-never-idling for the rest of a test run.
+	[ $# -eq 1 ] || die "set-idle-timeout needs a value in seconds"
+	[[ $1 =~ ^[0-9]{1,5}$ ]] || die "idle_timeout must be 0-86400 seconds"
+	[ "$1" -le 86400 ] || die "idle_timeout must be 0-86400 seconds"
+	PARAM=/sys/module/$MODULE_U/parameters/idle_timeout
+	[ -e "$PARAM" ] || die "$PARAM not present -- is the driver loaded?"
+	printf '%s\n' "$1" > "$PARAM" || die "cannot write $PARAM"
+	exit 0
+	;;
+
+dyndbg-ondemand)
+	[ $# -eq 1 ] || die "dyndbg-ondemand needs on or off"
+	case "$1" in
+	on)  flag='+p' ;;
+	off) flag='-p' ;;
+	*)   die "dyndbg-ondemand takes on or off" ;;
+	esac
+	[ -e "$DYNDBG" ] || die "debugfs dynamic_debug not available"
+	# Same reasoning as dyndbg-hwparams-n: matched by format string, fixed in
+	# this file, and a live write to the control file is enough since the
+	# message fires on demand rather than only at probe.
+	printf 'format %s %s\n' "$ONDEMAND_MATCH" "$flag" > "$DYNDBG" \
 		|| die "cannot write $DYNDBG"
 	exit 0
 	;;
