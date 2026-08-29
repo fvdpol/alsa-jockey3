@@ -2,7 +2,7 @@
 
 > **Status 2026-08-29: design agreed, not started.** This is lever 3 of
 > `re/streaming_overhead.md`, which recommends against it. It is being pursued
-> anyway, on a narrower justification than the study assumed and behind one
+> anyway, on a narrower justification than the study assumed and behind a
 > hardware gate that can still close it. Work happens on
 > `dev/on-demand-streaming`.
 
@@ -282,6 +282,93 @@ their notes and pass text updated -- `JT-PERF-001` most of all, whose idle
 measurement points assume a bound device with URBs running and nothing open, a
 state that now expires.
 
+## The second gate: can the STREAMING bit be cleared?
+
+`ploytec_start_streaming()` arms the device by reading its status byte and
+writing it back with `PLOYTEC_STATUS_STREAMING` (0x20) set. The obvious question
+this design never asks is the mirror image: **what happens if the host clears
+that bit?** If the device then stops sending, that is a graceful, protocol-level
+stop rather than the host simply going silent -- and it would tell us what state
+the firmware believes it is in while idle, which is currently unknown.
+
+### What the corpus already says
+
+Mined from `re/usb/openvizsla/*_events.txt`, no hardware needed:
+
+- **177 `SET_STATUS` writes across the entire corpus. Every single one writes
+  `wValue=0x0032`.** The bit is never cleared -- not once, by either vendor.
+- Every `GET_STATUS` reply in the corpus is `0x32` as well, so the write is a
+  read-modify-write that does not change the value. Note that the full byte is
+  0x32, not 0x20: bits 0x02 and 0x10 are also set and remain unexplained
+  (`ploytec_proto.h` calls bits 0-4 "observed but not understood"). Our own
+  `status | PLOYTEC_STATUS_STREAMING` therefore writes 0x32 too, identical to
+  the vendors. "Clearing the streaming bit" means writing **0x12**, a value no
+  host has ever been observed sending to this device.
+- **Not even at teardown.** `capture_2026-08-13_macos_usb_disconnect_96k`
+  contains nine `SET_STATUS` writes, all 0x32. macOS tears the device down
+  without ever telling it to stop.
+
+So there is no vendor-sanctioned stop sequence to copy. This is genuinely new
+territory, which is what makes it worth probing -- and also what makes it risky:
+writing an unobserved value to this firmware is the same class of action that
+has wedged the device before (`re/playback_stall_wedge.md`).
+
+### What it would and would not buy
+
+**It would not, by itself, reduce bus traffic.** Wire activity on a bulk
+endpoint is driven by the *host controller* issuing tokens, which it does for as
+long as a URB is queued -- IN tokens on 0x86 and 0x83, PINGs on 0x05 -- and the
+device's status bit cannot stop that. Clearing the bit with URBs still submitted
+would leave the host polling and the device NAKing: the same traffic, or more of
+it. Conversely, once the URBs *are* stopped the host has already ceased issuing
+tokens for those endpoints, so there is nothing left for the bit to remove. The
+residual traffic in this design is EP 0x83 polling, and that persists as long as
+the MIDI IN URB is submitted, whatever the status bit says.
+
+**What it plausibly buys is restart reliability**, and that is the reason to
+run it. `re/rate_change_stall.md` established that this firmware has a
+*latching* notion of streaming which the host must actively re-arm -- before
+that was understood, capture failed to restart on roughly one rate change in
+six. Stopping the URBs without telling the device leaves that latch set while
+the host goes quiet, which is an undefined state we would be entering on every
+idle period. Making the stop symmetric with the start is plausibly the
+difference between an activation that works every time and one that does not.
+Given that activation reliability is open question 3 below, that is worth real
+effort.
+
+Secondary: whatever the device's audio engine costs in power and heat while it
+is streaming into a host that has stopped listening.
+
+### Experiment design
+
+Runs **after** `JT-MIDI-008`, and only if that passes. If the device stops
+pumping EP 0x83 merely because the PCM URBs went away, it will certainly stop
+when explicitly told to, and the feature is closed before this question matters.
+
+Staged, stopping at the first failure:
+
+1. **Does the write survive at all?** With everything streaming normally, write
+   0x12, then `GET_STATUS`. Does the device accept it, does it report the bit
+   cleared, and is it still enumerated afterwards? A stall or a wedge here ends
+   the experiment.
+2. **Does device-side traffic actually stop?** With the URBs still submitted,
+   clear the bit and watch. This is the half that only an OpenVizsla trace can
+   answer -- no ALSA counter reports wire activity, which is precisely the
+   documented last-resort case for wire tracing. The expected observation is a
+   transition from data packets to NAKs, *not* silence; if the trace shows the
+   host still polling at the same rate, that confirms the mechanism above.
+3. **Does MIDI IN survive it?** The same question `JT-MIDI-008` asks, under the
+   stronger condition. If MIDI IN dies when the bit is cleared but survives a
+   plain URB stop, then the bit is not usable in this design and the answer is
+   simply "keep it set while idle".
+4. **Does re-arming from a cleared bit restart cleanly**, and does it do so more
+   reliably than a restart from a latch that was never cleared? This is the
+   payoff, and it needs enough cycles to compare failure rates, not a single
+   observation.
+
+Every capture needs its metadata sidecar -- system and OS, driver version, and
+the objective of the capture -- per `re/usb/README.md`.
+
 ## Plan
 
 **Phase 0 -- reserve.** Claim the new test IDs in `tests/hw/catalog.yaml` as
@@ -303,18 +390,21 @@ what idle actually costs now, written back into this document.
 
 1. **Does the device deliver MIDI IN while the PCM URBs are stopped?** The gate.
    Everything below is moot if this is no.
-2. **How long does a cold-start activation actually take**, from the trigger to
+2. **Can the STREAMING bit be cleared, and should it be?** See "The second gate"
+   above. Not a bus-traffic question -- a restart-reliability one. Runs after
+   question 1, and no host has ever been observed doing it.
+3. **How long does a cold-start activation actually take**, from the trigger to
    the first completion, on each of the three prod targets? "Hundreds of
    milliseconds is acceptable" is an assumption about the user's tolerance, not a
    measurement of the delay.
-3. **How reliable is activation, over many cycles?** The rate-change path
+4. **How reliable is activation, over many cycles?** The rate-change path
    measures zero stalls in 486 changes since `5505b28` but still shows a small
    residual on `arm64-prod`. Activation runs the same code. A failure rate that is
    invisible at a few changes per session may not be at one activation per
    application launch.
-4. **What does idle actually cost after this change**, measured rather than
+5. **What does idle actually cost after this change**, measured rather than
    reasoned? `JT-PERF-001` at `idle_timeout=5` against `idle_timeout=0`.
-5. **Does the idle timer ever fire in practice?** Any software doing LED feedback
+6. **Does the idle timer ever fire in practice?** Any software doing LED feedback
    keeps MIDI OUT active and the stream permanently non-idle, which the study
    argues shrinks the benefit window to "plugged in with no controlling software
    running at all". That argument is not refuted by this design; it is accepted,
