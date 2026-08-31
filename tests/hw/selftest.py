@@ -1664,22 +1664,38 @@ def test_restart_timing():
     """The URB-restart timing dataset: extraction, binning, percentiles."""
     print("\nrestart timing dataset")
 
-    dmesg = "\n".join([
-        "[10.0] snd-reloop-jockey3 1-1:1.0: Starting all URBs (cold start, grace 200 ms)",
-        "[10.1] snd-reloop-jockey3 1-1:1.0: Waiting up to 200 ms for Playback to show liveness",
-        "[10.2] snd-reloop-jockey3 1-1:1.0: Playback confirmed alive after 8 ms",
-        "[10.3] snd-reloop-jockey3 1-1:1.0: Capture confirmed alive after 0 ms",
-        "[20.0] snd-reloop-jockey3 1-1:1.0: Playback confirmed alive after 8 ms",
-        "[20.1] snd-reloop-jockey3 1-1:1.0: Playback confirmed alive after 112 ms",
-        "[30.0] snd-reloop-jockey3 1-1:1.0: Waiting up to 150 ms for Playback to stream steadily",
-        "[30.1] snd-reloop-jockey3 1-1:1.0: Playback confirmed streaming after 48 ms",
+    D = "snd-reloop-jockey3 1-1:1.0: "
+    dmesg = "\n".join("[%s] %s%s" % (t, D, msg) for t, msg in [
+        # A genuine cold restart: "Starting all URBs" arms, both directions
+        # confirm against it.
+        ("10.0", "PCM hw_params rate 48000, active_streams 1"),
+        ("10.1", "Starting all URBs (cold start, grace 200 ms)"),
+        ("10.2", "Waiting up to 200 ms for Playback to show liveness"),
+        ("10.3", "Playback confirmed alive after 8 ms"),
+        ("10.4", "Capture confirmed alive after 0 ms"),
+        # A bare prepare() liveness check that waited out a stall: no
+        # "Starting all URBs", and the PCM prepare disarmed the earlier one.
+        ("20.0", "PCM prepare stream 0"),
+        ("20.1", "Waiting up to 200 ms for Playback to show liveness"),
+        ("20.2", "Playback confirmed alive after 112 ms"),
+        # A warm restart. A "trigger cmd 1" between the two directions'
+        # confirmations must NOT disarm.
+        ("30.0", "PCM prepare stream 1"),
+        ("30.1", "Starting all URBs (warm start, grace 150 ms)"),
+        ("30.2", "Waiting up to 150 ms for Capture to stream steadily"),
+        ("30.3", "Playback confirmed alive after 56 ms"),
+        ("30.4", "PCM trigger stream 1, cmd 1"),
+        ("30.5", "Capture confirmed streaming after 60 ms"),
     ])
     hist, grace = restart_timing.extract(dmesg)
-    check(hist["playback|cold"] == {8: 2, 112: 1},
-          "cold ('alive') samples bin per stream and millisecond", str(hist))
-    check(hist["capture|cold"] == {0: 1}, "a 0 ms sample still counts")
-    check(hist["playback|warm"] == {48: 1},
-          "'streaming' is the warm start type", str(hist))
+    check(hist["playback|cold"] == {8: 1} and hist["capture|cold"] == {0: 1},
+          "a confirmation after 'Starting all URBs' is a cold restart", str(hist))
+    check(hist["playback|liveness"] == {112: 1},
+          "a confirmation with no preceding restart is a liveness wait, not cold",
+          str(hist))
+    check(hist["playback|warm"] == {56: 1} and hist["capture|warm"] == {60: 1},
+          "both directions bin as warm across an intervening 'trigger cmd 1'",
+          str(hist))
     check(grace == {"cold": [200], "warm": [150]},
           "the grace ceilings in effect are recorded", str(grace))
 
@@ -1724,7 +1740,8 @@ def test_restart_timing():
           "a changed record replaces rather than duplicates")
 
     agg = restart_timing.aggregate(data, dims=("arch", "stream", "start_type"))
-    check(agg[("x86_64", "playback", "cold")] == {8: 2, 112: 1},
+    check(agg[("x86_64", "playback", "cold")] == {8: 1}
+          and agg[("x86_64", "playback", "liveness")] == {112: 1},
           "aggregation groups per-source histograms by the requested dims", str(agg))
 
 

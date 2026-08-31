@@ -41,14 +41,28 @@ DATASET = os.path.join(HERE, os.pardir, "data", "restart_timing.json")
 # Bump when the extraction below changes in a way that would give a different
 # result from the same dmesg.txt. `restart_timing.py rebuild --reparse` then
 # re-reads every source run folder that still exists.
-EXTRACTOR_VERSION = 1
+#
+# v2: a "confirmed alive" line is only a cold *restart* sample when a
+#     "Starting all URBs (... start ...)" preceded it since the last PCM ioctl.
+#     jockey3_wait_urb_stream_started() logs the same line for a bare
+#     prepare()/hw_params() liveness check that merely waited out a mid-stream
+#     stall on a *running* ring -- those now land under "<stream>|liveness"
+#     instead of polluting the cold-start distribution.
+EXTRACTOR_VERSION = 2
 
 _CONFIRM = re.compile(
     r"(Playback|Capture) confirmed (alive|streaming) after (\d+) ms")
 _WAIT = re.compile(
     r"Waiting up to (\d+) ms for (Playback|Capture) to (show liveness|stream steadily)")
+_START = re.compile(r"Starting all URBs \((cold|warm) start")
+# prepare() and hw_params() are the paths that run a bare liveness check on a
+# possibly-running ring. Seeing one disarms the last "Starting all URBs" so a
+# later "confirmed" that was really a stall-wait-out is not counted as a
+# restart. trigger/open/close do not run a liveness wait, so they must not
+# disarm -- a "trigger cmd 1" often sits between a warm restart and its second
+# direction's confirmation.
+_PCM_LIVENESS = re.compile(r"PCM (?:prepare|hw_params) ")
 
-_VERB_START = {"alive": "cold", "streaming": "warm"}
 _MODE_START = {"show liveness": "cold", "stream steadily": "warm"}
 
 # From env.HEAVY_DEBUG_OPTIONS; duplicated rather than imported so this module
@@ -61,15 +75,28 @@ def extract(dmesg_text):
     """Pull restart timings out of one run's dmesg.txt.
 
     Returns (hist, grace_seen):
-      hist       {"playback|cold": {ms: count, ...}, "capture|warm": {...}, ...}
+      hist       {"playback|cold": {ms: count}, "capture|warm": {...},
+                  "playback|liveness": {...}, ...}
+                 cold/warm are restart latencies (a "Starting all URBs" line
+                 preceded the confirmation); liveness is a bare prepare()/
+                 hw_params() check that waited out a stall on a running ring.
       grace_seen {"cold": [ms, ...], "warm": [ms, ...]}  -- the grace ceilings
                  that were in effect, so a censored tail (samples cannot exceed
                  the grace) is visible later.
     """
     hist = {}
     grace = {"cold": set(), "warm": set()}
+    armed = None  # "cold" | "warm": a restart happened and its confirmations
+                  # have not been overtaken by a new PCM ioctl yet.
 
     for line in dmesg_text.splitlines():
+        m = _START.search(line)
+        if m:
+            armed = m.group(1)
+            continue
+        if _PCM_LIVENESS.search(line):
+            armed = None
+            continue
         m = _WAIT.search(line)
         if m:
             grace[_MODE_START[m.group(3)]].add(int(m.group(1)))
@@ -77,9 +104,9 @@ def extract(dmesg_text):
         m = _CONFIRM.search(line)
         if m:
             stream = m.group(1).lower()
-            start = _VERB_START[m.group(2)]
+            kind = armed or "liveness"
             ms = int(m.group(3))
-            key = f"{stream}|{start}"
+            key = f"{stream}|{kind}"
             hist.setdefault(key, {})
             hist[key][ms] = hist[key].get(ms, 0) + 1
 

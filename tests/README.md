@@ -85,15 +85,24 @@ sudo priv/install.sh                      # once per machine; the only password
 ```
 
 `restart_timing.py` folds each prod-kernel run that had dynamic debug on into a
-growing histogram keyed by architecture, stream and start type (cold = first
-open / rate change / reset, warm = the stall watchdog's own restart). `runner.py`
-ingests automatically at the end of a run; `ingest` / `rebuild` are there for
-back-filling and for re-reading the source runs after the extractor changes. It
-stores per-run histograms plus the run's identity, not the raw samples, so any
-percentile band is one `report` away and the source runs stay listed for
-re-derivation. Every sample is a "dynamic debug on" sample by construction (the
-measurement is a `dev_dbg` line), which reads slightly slow versus production —
-the safe direction for sizing a timeout.
+growing histogram keyed by architecture, stream and start type:
+
+  - **cold** — a URB ring (re)start: first open, rate change, USB reset, resume.
+    Latency to the first real completion; what `cold_start_grace_ms` is sized
+    against.
+  - **warm** — the stall watchdog's own light restart of a running ring.
+  - **liveness** — `prepare()`/`hw_params()` found the (still-running) ring
+    mid-stall and waited it out. Not a restart latency; kept separate so it
+    does not inflate the cold tail.
+
+`runner.py` ingests automatically at the end of a run; `ingest` / `rebuild` are
+there for back-filling and for re-reading the source runs after the extractor
+changes (`EXTRACTOR_VERSION` in `lib/restart_timing.py`, then
+`rebuild --reparse`). It stores per-run histograms plus the run's identity, not
+the raw samples, so any percentile band is one `report` away and the source
+runs stay listed for re-derivation. Every sample is a "dynamic debug on" sample
+by construction (the measurement is a `dev_dbg` line), which reads slightly slow
+versus production — the safe direction for sizing a timeout.
 
 Parameters come from `catalog.yaml`, then the profile entry, then the
 per-target override, and `--param KEY=VALUE` last — the operator at the bench
