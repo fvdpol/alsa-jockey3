@@ -68,6 +68,7 @@ that way.
 | `actions/` | Small reusable steps (load the driver, play a tone, change rate). |
 | `checklist.py` | Renders manual cases to a checklist and reads the answers back. |
 | `ledger.py` | What has been tested, on what, how recently — and metric trends. |
+| `restart_timing.py` | Accumulates URB cold/warm-restart timings from runs into `data/restart_timing.json`, for sizing the driver's grace periods. |
 | `selftest.py` | Tests for the framework itself. No hardware, no root. |
 | `priv/` | The suite's entire privileged surface: one root-owned helper, one sudoers entry. Guide: **[priv/README.md](hw/priv/README.md)** |
 | `results/` | Generated; git-ignored. |
@@ -79,8 +80,20 @@ sudo priv/install.sh                      # once per machine; the only password
 ./runner.py --profile smoke --dry-run     # what would run here
 ./runner.py --profile smoke               # run it -- as an ordinary user
 ./ledger.py                               # coverage and staleness
+./restart_timing.py report                # cold/warm restart latency, per arch/stream
 ./selftest.py                             # check the framework itself
 ```
+
+`restart_timing.py` folds each prod-kernel run that had dynamic debug on into a
+growing histogram keyed by architecture, stream and start type (cold = first
+open / rate change / reset, warm = the stall watchdog's own restart). `runner.py`
+ingests automatically at the end of a run; `ingest` / `rebuild` are there for
+back-filling and for re-reading the source runs after the extractor changes. It
+stores per-run histograms plus the run's identity, not the raw samples, so any
+percentile band is one `report` away and the source runs stay listed for
+re-derivation. Every sample is a "dynamic debug on" sample by construction (the
+measurement is a `dev_dbg` line), which reads slightly slow versus production —
+the safe direction for sizing a timeout.
 
 Parameters come from `catalog.yaml`, then the profile entry, then the
 per-target override, and `--param KEY=VALUE` last — the operator at the bench

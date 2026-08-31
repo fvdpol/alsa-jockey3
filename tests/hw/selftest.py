@@ -27,7 +27,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from lib import alsa, env, kmsg, results, yamlio    # noqa: E402
+from lib import alsa, env, kmsg, restart_timing, results, yamlio    # noqa: E402
 
 if not yamlio.available():
     sys.exit("PyYAML is required: apt install python3-yaml")
@@ -1660,6 +1660,66 @@ def test_run_log_trimming():
           "and is not misreported as the marker never being written")
 
 
+def test_restart_timing():
+    """The URB-restart timing dataset: extraction, binning, percentiles."""
+    print("\nrestart timing dataset")
+
+    dmesg = "\n".join([
+        "[10.0] snd-reloop-jockey3 1-1:1.0: Starting all URBs (cold start, grace 200 ms)",
+        "[10.1] snd-reloop-jockey3 1-1:1.0: Waiting up to 200 ms for Playback to show liveness",
+        "[10.2] snd-reloop-jockey3 1-1:1.0: Playback confirmed alive after 8 ms",
+        "[10.3] snd-reloop-jockey3 1-1:1.0: Capture confirmed alive after 0 ms",
+        "[20.0] snd-reloop-jockey3 1-1:1.0: Playback confirmed alive after 8 ms",
+        "[20.1] snd-reloop-jockey3 1-1:1.0: Playback confirmed alive after 112 ms",
+        "[30.0] snd-reloop-jockey3 1-1:1.0: Waiting up to 150 ms for Playback to stream steadily",
+        "[30.1] snd-reloop-jockey3 1-1:1.0: Playback confirmed streaming after 48 ms",
+    ])
+    hist, grace = restart_timing.extract(dmesg)
+    check(hist["playback|cold"] == {8: 2, 112: 1},
+          "cold ('alive') samples bin per stream and millisecond", str(hist))
+    check(hist["capture|cold"] == {0: 1}, "a 0 ms sample still counts")
+    check(hist["playback|warm"] == {48: 1},
+          "'streaming' is the warm start type", str(hist))
+    check(grace == {"cold": [200], "warm": [150]},
+          "the grace ceilings in effect are recorded", str(grace))
+
+    st = restart_timing.stats({8: 90, 12: 8, 64: 2}, percentiles=(50, 90, 99))
+    check(st["n"] == 100 and st["p50"] == 8 and st["p99"] == 64,
+          "percentiles are nearest-rank on the binned counts", str(st))
+
+    check(restart_timing.tail_is_censored({8: 5, 190: 1}, [200]) is True,
+          "a max that reaches the grace ceiling flags the tail as censored")
+    check(restart_timing.tail_is_censored({8: 5, 40: 1}, [200]) is False,
+          "a tail well short of the ceiling does not")
+
+    # A debug kernel must not pollute the dataset.
+    rj = {"run_id": "x/y", "results": [{"id": "JT-RATE-001"}],
+          "env": {"detected_target": "x86_64-debug", "driver": {},
+                  "kernel": {"arch": "x86_64", "release": "r",
+                             "debug_options": ["KASAN", "DEBUG_KERNEL"]}}}
+    rec, reason = restart_timing.source_from_run(rj, dmesg)
+    check(rec is None and "debug kernel" in reason,
+          "a KASAN kernel's timings are refused", reason)
+
+    rj["env"]["kernel"]["debug_options"] = ["DEBUG_KERNEL"]
+    rec, _ = restart_timing.source_from_run(rj, dmesg)
+    check(rec and rec["dyndbg"] == "on" and "playback|cold" in rec["hist"],
+          "a prod kernel with the lines present is ingested")
+
+    # add_source is idempotent and replaces on change.
+    data = {"version": 1, "sources": []}
+    check(restart_timing.add_source(data, rec) is True, "first insert changes the dataset")
+    check(restart_timing.add_source(data, dict(rec)) is False,
+          "re-adding an identical record is a no-op")
+    rec2 = dict(rec, driver_git="deadbee")
+    check(restart_timing.add_source(data, rec2) is True and len(data["sources"]) == 1,
+          "a changed record replaces rather than duplicates")
+
+    agg = restart_timing.aggregate(data, dims=("arch", "stream", "start_type"))
+    check(agg[("x86_64", "playback", "cold")] == {8: 2, 112: 1},
+          "aggregation groups per-source histograms by the requested dims", str(agg))
+
+
 def test_pointer_rate():
     """The steady-state rate measurement, on synthetic traces.
 
@@ -1866,6 +1926,7 @@ def main():
     test_rate_change_log_attribution()
     test_marker_labels()
     test_run_log_trimming()
+    test_restart_timing()
     test_log_buf_len()
     test_pointer_rate()
     test_param_overrides()

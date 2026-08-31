@@ -1,0 +1,199 @@
+{
+  "extractor_version": 1,
+  "sources": [
+    {
+      "arch": "arm64",
+      "case": "JT-RATE-001",
+      "driver_build_id": "20e3d428dd3760b838e892933e7cff4f35ebcd6e",
+      "driver_git": "55d94ed",
+      "dyndbg": "on",
+      "extractor_version": 1,
+      "grace_ms": {
+        "cold": [
+          200
+        ],
+        "warm": []
+      },
+      "hist": {
+        "capture|cold": {
+          "0": 59,
+          "4": 1
+        },
+        "playback|cold": {
+          "0": 2,
+          "4": 16,
+          "8": 21,
+          "12": 6,
+          "16": 3,
+          "20": 1,
+          "32": 1,
+          "36": 1,
+          "40": 2,
+          "44": 1,
+          "48": 3,
+          "52": 2,
+          "56": 1
+        }
+      },
+      "kernel_debug_options": [
+        "SND_PCM_XRUN_DEBUG",
+        "DEBUG_KERNEL",
+        "WQ_WATCHDOG"
+      ],
+      "kernel_release": "7.2.0-rc7-alsa-prod-rpi-v8",
+      "run_id": "arm64-prod-20260831T181613Z-functional",
+      "run_path": "arm64-prod/20260831T181613Z-functional",
+      "target": "arm64-prod"
+    },
+    {
+      "arch": "arm64",
+      "case": "JT-RATE-001",
+      "driver_build_id": "20e3d428dd3760b838e892933e7cff4f35ebcd6e",
+      "driver_git": "55d94ed",
+      "dyndbg": "on",
+      "extractor_version": 1,
+      "grace_ms": {
+        "cold": [
+          200
+        ],
+        "warm": []
+      },
+      "hist": {
+        "capture|cold": {
+          "0": 60
+        },
+        "playback|cold": {
+          "0": 3,
+          "4": 12,
+          "8": 18,
+          "12": 10,
+          "16": 3,
+          "20": 1,
+          "24": 1,
+          "28": 3,
+          "32": 2,
+          "40": 2,
+          "48": 3,
+          "52": 2
+        }
+      },
+      "kernel_debug_options": [
+        "SND_PCM_XRUN_DEBUG",
+        "DEBUG_KERNEL",
+        "WQ_WATCHDOG"
+      ],
+      "kernel_release": "7.2.0-rc7-alsa-prod-rpi-v8",
+      "run_id": "arm64-prod-20260831T183042Z-functional",
+      "run_path": "arm64-prod/20260831T183042Z-functional",
+      "target": "arm64-prod"
+    },
+    {
+      "arch": "x86_64",
+      "case": "JT-RATE-001",
+      "driver_build_id": "f1d1962a4659c3c2058ec452866a53439a66f92e",
+      "driver_git": "55d94ed",
+      "dyndbg": "on",
+      "extractor_version": 1,
+      "grace_ms": {
+        "cold": [
+          200
+        ],
+        "warm": [
+          150
+        ]
+      },
+      "hist": {
+        "capture|cold": {
+          "8": 74,
+          "12": 26,
+          "16": 1,
+          "56": 1
+        },
+        "capture|warm": {
+          "12": 1,
+          "48": 1
+        },
+        "playback|cold": {
+          "8": 53,
+          "12": 23,
+          "16": 3,
+          "20": 5,
+          "24": 14,
+          "28": 1,
+          "32": 2,
+          "44": 1,
+          "88": 1,
+          "100": 2,
+          "104": 2,
+          "108": 3,
+          "112": 1,
+          "120": 1
+        },
+        "playback|warm": {
+          "48": 1,
+          "80": 1
+        }
+      },
+      "kernel_debug_options": [
+        "SND_PCM_XRUN_DEBUG",
+        "DEBUG_KERNEL",
+        "WQ_WATCHDOG"
+      ],
+      "kernel_release": "7.2.0-rc7-alsa-prod+",
+      "run_id": "x86_64-prod-20260831T181533Z-functional",
+      "run_path": "x86_64-prod/20260831T181533Z-functional",
+      "target": "x86_64-prod"
+    },
+    {
+      "arch": "x86_64",
+      "case": "JT-RATE-001",
+      "driver_build_id": "f1d1962a4659c3c2058ec452866a53439a66f92e",
+      "driver_git": "55d94ed",
+      "dyndbg": "on",
+      "extractor_version": 1,
+      "grace_ms": {
+        "cold": [
+          200
+        ],
+        "warm": [
+          150
+        ]
+      },
+      "hist": {
+        "capture|cold": {
+          "8": 75,
+          "12": 25,
+          "64": 1
+        },
+        "playback|cold": {
+          "8": 54,
+          "12": 19,
+          "16": 6,
+          "20": 11,
+          "24": 6,
+          "28": 2,
+          "32": 2,
+          "80": 1,
+          "96": 1,
+          "100": 3,
+          "104": 3,
+          "112": 1
+        },
+        "playback|warm": {
+          "8": 1,
+          "92": 1
+        }
+      },
+      "kernel_debug_options": [
+        "SND_PCM_XRUN_DEBUG",
+        "DEBUG_KERNEL",
+        "WQ_WATCHDOG"
+      ],
+      "kernel_release": "7.2.0-rc7-alsa-prod+",
+      "run_id": "x86_64-prod-20260831T183059Z-functional",
+      "run_path": "x86_64-prod/20260831T183059Z-functional",
+      "target": "x86_64-prod"
+    }
+  ],
+  "version": 1
+}

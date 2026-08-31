@@ -1024,6 +1024,20 @@ def main():
     with open(os.path.join(run_path, "dmesg.txt"), "w", encoding="utf-8") as f:
         f.write(dmesg_text)
 
+    # Fold this run's URB-restart timings into the growing dataset. Best-effort:
+    # a prod-kernel run with dynamic debug on contributes samples, anything else
+    # is a no-op. Never fail a completed run over the bookkeeping.
+    try:
+        from lib import restart_timing
+        data = restart_timing.load()
+        record, _reason = restart_timing.source_from_run(run.as_dict(), dmesg_text)
+        if record and restart_timing.add_source(data, record):
+            restart_timing.save(data)
+            n = sum(sum(b.values()) for b in record["hist"].values())
+            print(f"restart_timing: +{n} samples ({', '.join(sorted(record['hist']))})")
+    except Exception as exc:  # noqa: BLE001 -- diagnostics only
+        print(f"restart_timing: skipped ({exc})")
+
     counts = run.counts()
     print("\n" + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     print(f"outcome: {run.outcome.upper()}")
