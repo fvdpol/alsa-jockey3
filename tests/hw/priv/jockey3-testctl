@@ -306,12 +306,18 @@ bind)
 
 dmesg-read)
 	[ $# -eq 0 ] || die "dmesg-read takes no arguments"
-	# --raw keeps the "<N>" syslog-priority prefix on every line. The kmsg
-	# classifier uses it to recognize any KERN_DEBUG line from this driver as
-	# a trace, so turning dynamic debug up during an investigation does not
-	# turn every case red. lib/kmsg.PREFIX_RE already strips the "<N>[time]"
-	# pair, so message-text rules are unaffected.
-	exec dmesg --color=never --raw
+	# --raw keeps the "<N>" syslog-priority prefix on every line, which the
+	# kmsg classifier uses to recognize any KERN_DEBUG line from this driver
+	# as a trace -- so turning dynamic debug up during an investigation does
+	# not turn every case red. lib/kmsg.PREFIX_RE already strips the
+	# "<N>[time]" pair, so message-text rules are unaffected.
+	#
+	# --raw is mutually exclusive with --color on util-linux and is rejected
+	# outright on some builds, so it is not safe to assume it works. Fall
+	# back to a plain read on any failure: the run still captures its kernel
+	# log, the priority-based dev_dbg classification just does not engage.
+	dmesg --raw 2>/dev/null && exit 0
+	exec dmesg --color=never
 	;;
 
 dmesg-mark)

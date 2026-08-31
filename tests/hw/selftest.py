@@ -1646,6 +1646,19 @@ def test_run_log_trimming():
     check("WHOLE kernel ring buffer" in text,
           "and the header warns rather than implying a clean window")
 
+    # dmesg-read returning nothing (a helper that rejects its own dmesg
+    # options, a permission change) is a different failure from a marker that
+    # was never written, and the header must say which -- the fixes do not
+    # overlap. 20260831T1815 runs lost every by-change figure on both hosts
+    # this way and the artifact blamed the marker.
+    dead = kmsg.Marker("run#no-log-at-all")
+    dead.written = True
+    text, trimmed = kmsg.run_log([], dead)
+    check(trimmed is False and "NO KERNEL LOG" in text,
+          "an empty dmesg-read is called out as a read failure, not a marker one")
+    check("WHOLE kernel ring buffer" not in text,
+          "and is not misreported as the marker never being written")
+
 
 def test_pointer_rate():
     """The steady-state rate measurement, on synthetic traces.

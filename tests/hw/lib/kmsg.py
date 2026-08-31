@@ -125,14 +125,20 @@ def read_log():
     it is not on the test machines, so this normally goes through the helper.
     Tried directly first so the function still works on a box where dmesg is
     unrestricted and no helper is installed.
+
+    --raw keeps the "<N>" priority prefix the classifier wants, but it is
+    mutually exclusive with --color on util-linux and rejected outright on some
+    builds, so a plain read is tried next. Losing the prefix only disables the
+    KERN_DEBUG shortcut; losing the log entirely would suppress every by-change
+    figure a case reports, so the fallback matters.
     """
-    try:
-        out = subprocess.run(["dmesg", "--color=never", "--raw"],
-                             capture_output=True, text=True, timeout=30)
-        if out.returncode == 0:
-            return out.stdout.splitlines()
-    except (OSError, subprocess.SubprocessError):
-        pass
+    for argv in (["dmesg", "--raw"], ["dmesg", "--color=never"]):
+        try:
+            out = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+            if out.returncode == 0 and out.stdout:
+                return out.stdout.splitlines()
+        except (OSError, subprocess.SubprocessError):
+            pass
     return priv.dmesg_read()
 
 
@@ -184,6 +190,17 @@ def run_log(lines, marker):
         head = (f"# kernel log from the start of this run\n"
                 f"# marker: {marker.token}\n"
                 f"# {len(lines) - len(kept)} earlier line(s) trimmed\n")
+    elif marker and marker.written and not lines:
+        # The marker went to /dev/kmsg but the log came back empty, so it
+        # could not be found to slice on. Almost always dmesg-read itself
+        # failing -- an option the installed helper does not accept, or a
+        # permission change -- not a marker problem. Named precisely because
+        # the two have completely different fixes.
+        head = ("# NO KERNEL LOG -- dmesg-read returned nothing, so this run's\n"
+                "# messages could not be captured at all. The run-start marker\n"
+                "# was written but there was no log to find it in. Check that\n"
+                "# the privileged helper's dmesg-read verb still works on this\n"
+                "# host; every by-change figure is suppressed until it does.\n")
     else:
         head = ("# WHOLE kernel ring buffer -- the run-start marker was not\n"
                 "# written, so this file also covers earlier runs. Lines below\n"
