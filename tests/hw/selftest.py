@@ -105,6 +105,37 @@ def test_classifier(rules):
     check(len(b2[kmsg.INVESTIGATE]) == 1,
           "escalation wins over an expected-message match")
 
+    # dev_dbg() traces are classified on syslog priority, not per-message
+    # rules: with `dmesg --raw` every line keeps its "<N>" prefix, and any
+    # line that is ours and KERN_DEBUG (<7>) is a trace. So an operator can
+    # turn dynamic debug up without any case going red over a message no rule
+    # names.
+    dbg = "<7>[ 5870.1] " + DRIVER + "brand-new trace nobody whitelisted x=3\n"
+    b3, _ = c.classify([dbg], [])
+    check(len(b3[kmsg.EXPECTED]) == 1 and not b3[kmsg.UNEXPECTED]
+          and not b3[kmsg.UNCLASSIFIED],
+          "an unwhitelisted KERN_DEBUG line from our driver is a trace")
+
+    # ...but priority is not a free pass: a defect in a debug line still
+    # escalates, because the investigate pass runs before the level check.
+    b4, _ = c.classify(["<7>[ 5870.2] " + DRIVER + "trace BUG: at foo.c:1\n"], [])
+    check(len(b4[kmsg.INVESTIGATE]) == 1,
+          "a defect in a KERN_DEBUG line still escalates")
+
+    # A non-debug driver message no rule names is still unexpected -- the
+    # shortcut is for KERN_DEBUG only.
+    b5, _ = c.classify(["<4>[ 5870.3] " + DRIVER + "something new at warning level\n"], [])
+    check(len(b5[kmsg.UNEXPECTED]) == 1,
+          "a KERN_WARNING line no rule names is still a failure")
+
+    # The rate limiter's own summary: bare function name, no device prefix, no
+    # priority -- covered by an explicit rule, not by the shortcut.
+    b6, m6 = c.classify(["jockey3_stream_streaming_healthy: 7 callbacks suppressed\n"], [])
+    check(len(b6[kmsg.EXPECTED]) == 1 and not b6[kmsg.UNCLASSIFIED],
+          "a ratelimit 'callbacks suppressed' summary is benign")
+    check(m6.get("dbg_ratelimit_suppressed") == 1,
+          "suppressed-callback summaries are counted")
+
 
 def test_wedged_device(rules):
     """The 2026-08-11 lockup, replayed line for line.
@@ -1578,6 +1609,18 @@ def test_run_log_trimming():
     check("Capture URB has stalled" not in text,
           "and an earlier run's stall line does not survive the trim")
     check("Rate set OK" in text, "while this run's own lines do")
+
+    # read_log() runs `dmesg --raw` for the classifier, but the saved artifact
+    # drops the "<N>" priority prefix -- the "[time] message" body is what a
+    # human reads, and it is unchanged from before --raw.
+    raw = [f"[300.0] {mk.token}",
+           "<7>[301.0] snd-reloop-jockey3 1-2.2:1.0: Starting all URBs (warm start)",
+           "<4>[302.0] snd-reloop-jockey3 1-2.2:1.0: Playback URB has stalled."]
+    rtext, _ = kmsg.run_log(raw, mk)
+    check("<7>" not in rtext and "<4>" not in rtext,
+          "the saved log drops the raw syslog-priority prefix")
+    check("[301.0] snd-reloop-jockey3" in rtext,
+          "while the timestamp and message are untouched")
     # Three, not two: slice_since() consumes the marker line as well as the
     # two that preceded it.
     check("3 earlier line(s) trimmed" in text,

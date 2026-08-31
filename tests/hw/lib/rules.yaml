@@ -122,37 +122,39 @@ benign:
       device re-reports on every rate change -- 63 times in one smoke run.
       Listing it only under JT-PROBE-001 failed every case that changes rate.
   # ------------------------------------------------------------------------
-  # The driver's dev_dbg traces.
+  # The driver's dev_dbg() traces.
   #
   # These are silent unless someone turns dynamic debug up, which is a normal
-  # thing to do while investigating -- and the moment they did, every case
-  # that saw one failed, because an unrecognized message that looks like ours
-  # is a failure by default. A run should not turn red because the operator
-  # asked the driver to be talkative.
+  # thing to do while investigating -- and the moment they did, every case that
+  # saw one failed, because an unrecognized message that looks like ours is a
+  # failure by default. A run should not turn red because the operator asked
+  # the driver to be talkative.
   #
-  # Classified as a group rather than one rule per string: there are 25 of
-  # them, they are all traces, and this driver reports every actual problem
-  # through dev_warn or dev_err. Nothing here indicates a fault; the ones that
-  # do are in driver_fail below.
+  # There is no longer a rule per dev_dbg() string. dmesg-read now runs
+  # `dmesg --raw`, so every line keeps its "<N>" syslog priority, and
+  # lib/kmsg.classify() treats any line that is ours AND KERN_DEBUG as a
+  # trace -- see lib/kmsg.msg_level(). Adding a dev_dbg() to the driver no
+  # longer needs a matching entry here.
   #
-  # A cleaner future fix is to classify on syslog priority -- KERN_DEBUG from
-  # our driver is by definition a trace -- which needs dmesg-read to emit raw
-  # priorities. lib/kmsg.PREFIX_RE already tolerates the "<7>" they come with.
+  # The only dev_dbg() rules kept below are the ones that also feed a metric
+  # (the priority shortcut alone would classify them but not count them) or
+  # that must stay recognized even when read without --raw on an unrestricted
+  # box (no "<N>" prefix, so the shortcut cannot fire).
   - pattern: '(Starting|Stopping) all URBs'
     metric: dbg_urb_lifecycle
-  - pattern: 'PCM (open|close|prepare|trigger|hw_params) '
-  - pattern: 'Setting (rate|new hardware rate)'
-  - pattern: 'Rate (set OK|verified as|changed to|already set to)'
-  - pattern: '(Current hardware rate|Hardware rate already at requested value)'
-  - pattern: 'USB (suspend, stopping URBs|resume, restoring device|reset resume, restoring device)'
-  - pattern: 'Using (32-bit optimized|64-bit optimized|portable) codec'
-  - pattern: '(Ploytec initialized successfully|Initialization complete)'
-  - pattern: 'Waiting for reset completion'
-  - pattern: 'Start Streaming: Status: 0x'
-  # A trace, not a fault: the counterpart of the driver_fail "Failed to start
-  # URBs ..." rules, for the one case that is expected -- the device was already
-  # detached, so there was nothing to start and disconnect is on its way.
+  # The counterpart of the driver_fail "Failed to start URBs ..." rules, for
+  # the one case that is expected -- the device was already detached, so there
+  # was nothing to start and disconnect is on its way. Kept explicit so it is
+  # still benign, not unexpected, on a box read without --raw.
   - pattern: 'Could not start URBs after .*: device is gone'
+  # A dev_*_ratelimited() call site hit its limit; the kernel prints this with
+  # the bare function name, no device prefix and no syslog priority, so neither
+  # the ownership test nor the KERN_DEBUG shortcut covers it. It means the
+  # driver had more to say and the limiter cut it -- the limiter working, not a
+  # fault. Long an unclassified line for jockey3_urb_error_give_up; also covers
+  # jockey3_stream_streaming_healthy and any future ratelimited site.
+  - pattern: 'jockey3_\w+: \d+ callbacks suppressed'
+    metric: dbg_ratelimit_suppressed
   # ------------------------------------------------------------------------
   - pattern: 'loading out-of-tree module taints kernel'
     metric: taint_out_of_tree

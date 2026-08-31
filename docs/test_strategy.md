@@ -533,6 +533,20 @@ a noisy allowlist and silently discarding unknown messages, unclassified lines
 are surfaced for a human to look at once, and then either added to the
 allowlist or turned into a real finding.
 
+### `dev_dbg()` output is classified by priority, not by rule
+
+`dmesg-read` runs `dmesg --raw`, so every line keeps its `<N>` syslog priority.
+The driver reports real problems through `dev_warn()`/`dev_err()`; everything at
+`KERN_DEBUG` is a trace. So the classifier treats **any line that is ours and
+`<7>`** as expected, without a rule per message. Turning dynamic debug up during
+an investigation (`dyndbg=+p`, or the targeted `dyndbg-*` verbs) therefore does
+not turn a run red, and adding a `dev_dbg()` to the driver needs no matching
+`rules.yaml` entry. Defect detection is unaffected — the escalation pass below
+runs before the priority check, so a `BUG:`/`WARNING:` inside a debug line still
+aborts. The only `dev_dbg()` rules left in `rules.yaml` are the few that also
+feed a metric, plus the rate limiter's prefix-less `"N callbacks suppressed"`
+summary, which carries no priority.
+
 ### Escalation
 
 Some messages are not test failures but defects:

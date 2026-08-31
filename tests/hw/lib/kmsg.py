@@ -11,6 +11,12 @@ Classification produces four buckets. The fourth is the one that earns its
 keep: rather than choosing between an ever-growing allowlist and silently
 discarding unknown messages, anything unrecognized is surfaced for a human to
 look at once and then either allow or act on.
+
+The driver's dev_dbg() output is the exception to that. It is silent unless an
+operator turns dynamic debug up, there is a lot of it, and none of it signals a
+fault -- so it is classified on syslog priority (see msg_level()): a line that
+is ours and KERN_DEBUG is a trace, no per-message rule required. That keeps the
+allowlist from growing every time a dev_dbg() is added to the driver.
 """
 
 import os
@@ -42,8 +48,30 @@ INVESTIGATE = "investigate"  # a defect, not a test failure -> abort
 # failed the ownership test -- and since a case's expect_dmesg entries are only
 # consulted for messages that are ours, no expect rule could ever whitelist it.
 # That is why "jockey3_urb_error_give_up: N callbacks suppressed" sat in the
-# unclassified bucket of every run the suite has ever produced.
+# unclassified bucket of every run the suite has ever produced. There is now an
+# explicit benign rule for it in rules.yaml (the "callbacks suppressed" one),
+# because the summary line carries no syslog priority and so is not covered by
+# the KERN_DEBUG shortcut below.
 OURS = re.compile(r"snd[-_]reloop[-_]jockey3|ploytec|jockey3_\w+")
+
+# dmesg --raw prefixes every line with its syslog priority as "<N>". The low
+# three bits are the level; 7 is KERN_DEBUG. Every dev_dbg() in this driver --
+# and every line dynamic debug turns on -- comes out at that level, and this
+# driver reports real problems through dev_warn()/dev_err() (KERN_WARNING and
+# below). So a line that is ours AND KERN_DEBUG is a trace by construction:
+# classify() treats it as expected without needing a rule per message, which is
+# what lets an operator run "dyndbg=+p" during an investigation without turning
+# every case red. Falls back cleanly when the prefix is absent (a box where
+# dmesg is unrestricted and read without --raw): level is None and the shortcut
+# simply does not fire.
+LEVEL_RE = re.compile(r"^<(\d+)>")
+KERN_DEBUG = 7
+
+
+def msg_level(raw):
+    """Syslog level (0-7) from a dmesg --raw line, or None if unprefixed."""
+    m = LEVEL_RE.match(raw)
+    return int(m.group(1)) & 7 if m else None
 
 
 # The label charset the privileged helper accepts. It validates the token it is
@@ -99,8 +127,8 @@ def read_log():
     unrestricted and no helper is installed.
     """
     try:
-        out = subprocess.run(["dmesg", "--color=never"], capture_output=True,
-                             text=True, timeout=30)
+        out = subprocess.run(["dmesg", "--color=never", "--raw"],
+                             capture_output=True, text=True, timeout=30)
         if out.returncode == 0:
             return out.stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
@@ -147,6 +175,11 @@ def run_log(lines, marker):
     """
     kept = slice_since(lines, marker)
     trimmed = bool(marker and marker.written and len(kept) < len(lines))
+    # read_log() runs `dmesg --raw` for the classifier's sake; the saved
+    # artifact does not need the "<N>" priority prefix and reads better
+    # without it, so it comes off here. The "[time] message" body is
+    # unchanged from before --raw.
+    kept = [LEVEL_RE.sub("", ln) for ln in kept]
     if trimmed:
         head = (f"# kernel log from the start of this run\n"
                 f"# marker: {marker.token}\n"
@@ -215,6 +248,7 @@ class Classifier:
             if MARKER_PREFIX in raw:
                 continue
             line = strip_prefix(raw)
+            level = msg_level(raw)
 
             # Defects first: an oops inside an otherwise expected message is
             # still an oops, and ordering here is a correctness property.
@@ -247,6 +281,17 @@ class Classifier:
                     # count, so it becomes a metric and the case decides. A
                     # rate case fails when stalls do not recover; a MIDI case
                     # simply records that one happened.
+                    buckets[EXPECTED].append(raw)
+                    continue
+
+                # A KERN_DEBUG line from our driver is a trace by construction
+                # (see msg_level()). Checked after driver_fail and the benign
+                # rules, so a debug line that carries a metric is still counted,
+                # but before the per-case expect list, so no case has to
+                # enumerate the driver's dev_dbg() output to run with dynamic
+                # debug on. Defects were already handled by the investigate
+                # pass above, which runs regardless of level.
+                if level == KERN_DEBUG:
                     buckets[EXPECTED].append(raw)
                     continue
 

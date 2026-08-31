@@ -108,7 +108,7 @@ usage() {
 #                          (no-op if already unbound)
 #   bind                   reattach the driver to interface 0
 #                          (no-op if already bound)
-#   dmesg-read             print the kernel log
+#   dmesg-read             print the kernel log (dmesg --raw: keeps <N> priority)
 #   dmesg-mark <token>     write a JT-MARK boundary token to /dev/kmsg
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
 #   dyndbg-hwparams-n on|off enable/disable the hw_params() packets/URB (N) message
@@ -306,7 +306,12 @@ bind)
 
 dmesg-read)
 	[ $# -eq 0 ] || die "dmesg-read takes no arguments"
-	exec dmesg --color=never
+	# --raw keeps the "<N>" syslog-priority prefix on every line. The kmsg
+	# classifier uses it to recognize any KERN_DEBUG line from this driver as
+	# a trace, so turning dynamic debug up during an investigation does not
+	# turn every case red. lib/kmsg.PREFIX_RE already strips the "<N>[time]"
+	# pair, so message-text rules are unaffected.
+	exec dmesg --color=never --raw
 	;;
 
 dmesg-mark)
