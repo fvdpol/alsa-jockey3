@@ -167,6 +167,14 @@ is not part of any `tests/configs/*.config` and is not something
 `derive-prod.sh` touches — it has to be set once per machine and survives
 across every kernel it boots.
 
+`4M` still is not enough for a full 20000-change soak with dynamic debug on
+(that is closer to 70 MB of log). For those, `runner.py` also streams the whole
+kernel log to `<run>/kmsg.log` as it is emitted — immune to ring-buffer wrap,
+and cheap on memory because the follower writes straight to the file. `dmesg.txt`
+is taken from that capture when it is present, and from the live buffer
+otherwise. The capture needs the `kmsg-follow` helper verb, so re-run
+`priv/install.sh` after updating the suite.
+
 ### Live feedback while a case runs
 
 Hardware cases are slow. `JT-AUDIO-005` takes about 125 seconds, because it

@@ -21,6 +21,7 @@ sudo ./install.sh --remove
 | ↳ | `load` also passes `dyndbg=` so the firmware revision is logged at probe |
 | `dmesg-read` | `kernel.dmesg_restrict=1` on the test machines |
 | `dmesg-mark <token>` | `/dev/kmsg` is writable only by root |
+| `kmsg-follow` | streams `dmesg --follow` for a whole-run capture; same restriction as `dmesg-read` |
 | `dyndbg-firmware on\|off` | `/sys/kernel/debug` is mode 0700 root |
 | `printk-console <1-8>` | `/proc/sys/kernel/printk` is root-owned |
 | `rtcwake-mem <1-3600>` | suspend to RAM |

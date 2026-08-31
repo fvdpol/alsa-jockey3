@@ -19,6 +19,7 @@ is ours and KERN_DEBUG is a trace, no per-message rule required. That keeps the
 allowlist from growing every time a dev_dbg() is added to the driver.
 """
 
+import atexit
 import os
 import re
 import subprocess
@@ -140,6 +141,85 @@ def read_log():
         except (OSError, subprocess.SubprocessError):
             pass
     return priv.dmesg_read()
+
+
+def read_lines(path):
+    """A saved kmsg capture as a list of lines, or None if it is absent/empty."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    return text.splitlines() if text.strip() else None
+
+
+class KmsgCapture:
+    """Stream the kernel log to a file for the whole run.
+
+    read_log() reads the kernel ring buffer, which holds only a few MB. A long
+    rate soak with dynamic debug on writes far more than that, so by the time
+    the run ends most of it has scrolled out -- the same way the marker-loss
+    incidents lost every by-change figure. This copies every record to
+    <run>/kmsg.log as it is emitted, so nothing is lost to wrap. It matters
+    most where memory is tight (the Pi 1): the child writes straight to the
+    file descriptor, this side buffers nothing.
+
+    Best-effort throughout. If the capture cannot start -- no privilege, an old
+    helper without the verb -- the run falls back to read_log() and its
+    dmesg.txt is bounded by the ring buffer as before.
+    """
+
+    def __init__(self, dest):
+        self.dest = dest
+        self._proc = None
+        self._fh = None
+
+    def start(self):
+        argv = None
+        if os.geteuid() == 0:
+            argv = ["dmesg", "--follow", "--raw"]
+        elif priv.available()[0]:
+            argv = priv.verb_argv("kmsg-follow")
+        if not argv:
+            return False
+        try:
+            self._fh = open(self.dest, "w", encoding="utf-8")
+            self._proc = subprocess.Popen(argv, stdout=self._fh,
+                                          stderr=subprocess.DEVNULL)
+        except OSError:
+            self._cleanup_fh()
+            return False
+        atexit.register(self._kill)
+        return True
+
+    def stop(self):
+        """Terminate the capture. Returns the path if it holds anything."""
+        if self._proc is not None:
+            self._kill()
+        self._cleanup_fh()
+        try:
+            return self.dest if os.path.getsize(self.dest) > 0 else None
+        except OSError:
+            return None
+
+    def _kill(self):
+        p, self._proc = self._proc, None
+        if p is None or p.poll() is not None:
+            return
+        p.terminate()
+        try:
+            p.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+
+    def _cleanup_fh(self):
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
 
 
 def slice_since(lines, marker):

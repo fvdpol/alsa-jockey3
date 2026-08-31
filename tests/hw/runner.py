@@ -838,6 +838,12 @@ def main():
     run_marker = kmsg.Marker(f"run#{stamp}")
     run_marker.write()
 
+    # Copy the kernel log to <run>/kmsg.log for the whole run, so a long soak
+    # with dynamic debug on does not lose most of it to ring-buffer wrap.
+    # Best-effort: dmesg.txt falls back to read_log() if this cannot start.
+    kmsg_capture = kmsg.KmsgCapture(os.path.join(run_path, "kmsg.log"))
+    kmsg_capture.start()
+
     run = results.Run(
         run_id=f"{target_name}-{stamp}-{args.profile}",
         profile=args.profile, target=target_name,
@@ -1003,9 +1009,9 @@ def main():
         built = env.built_driver_info(kernel.get("tree") or "")
         if built and built.get("build"):
             run.env["driver"] = built
-    # Read once and reuse: the firmware probe wants the whole buffer, since a
-    # module loaded before the run announced itself before the marker, while
-    # dmesg.txt wants only this run's slice.
+    # The firmware probe wants the whole current buffer: a module loaded before
+    # the run announced itself before the marker, and before the capture below
+    # started, so it can only be found there.
     full_log = kmsg.read_log()
     run.env["firmware"] = env.firmware_from_log(full_log)
     if run.env["firmware"] is None and run.env["driver"]["loaded"]:
@@ -1014,9 +1020,12 @@ def main():
             "not enabled before the module was loaded, so this run does not "
             "know which firmware it tested")
 
-    # Trimmed to this run's own window; see run_marker above. Falls back to the
-    # whole log if the marker never made it, and says so in the file's header.
-    dmesg_text, dmesg_trimmed = kmsg.run_log(full_log, run_marker)
+    # dmesg.txt is this run's own slice. Prefer the whole-run capture -- immune
+    # to ring-buffer wrap -- and fall back to the live buffer if it never
+    # started or came back empty.
+    captured = kmsg_capture.stop()
+    log_for_slice = kmsg.read_lines(captured) if captured else None
+    dmesg_text, dmesg_trimmed = kmsg.run_log(log_for_slice or full_log, run_marker)
     run.env["dmesg_trimmed_to_run"] = dmesg_trimmed
 
     results.write(run, run_json)

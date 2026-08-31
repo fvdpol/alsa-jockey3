@@ -1017,10 +1017,12 @@ def test_privilege_boundary():
 
     # Verbs the script implements, taken from the case labels of its dispatch.
     implemented = set(re.findall(r"^([a-z][a-z-]*)\)$", src, re.M))
-    called = set(re.findall(r'call\(\s*"([a-z][a-z-]*)"',
-                            open(os.path.join(HERE, "lib", "priv.py"),
-                                 encoding="utf-8").read()))
-    check(called <= implemented, "every verb priv.py calls is implemented",
+    driver_src = "".join(
+        open(os.path.join(HERE, "lib", f), encoding="utf-8").read()
+        for f in ("priv.py", "kmsg.py"))
+    # call("verb", ...) and the streaming route, verb_argv("verb").
+    called = set(re.findall(r'(?:call|verb_argv)\(\s*"([a-z][a-z-]*)"', driver_src))
+    check(called <= implemented, "every verb the framework invokes is implemented",
           f"missing: {sorted(called - implemented)}")
 
     # The marker token is generated in kmsg.py and validated in the helper.
@@ -1660,6 +1662,54 @@ def test_run_log_trimming():
           "and is not misreported as the marker never being written")
 
 
+def test_kmsg_capture():
+    """The whole-run kernel-log capture (KmsgCapture)."""
+    print("\nwhole-run kmsg capture")
+    from lib import priv
+
+    real_avail, real_argv = priv.available, priv.verb_argv
+    tmp = tempfile.mkdtemp()
+    try:
+        priv.available = lambda: (True, "")
+
+        # A stand-in for `dmesg --follow`: emit two lines, then block.
+        dest = os.path.join(tmp, "kmsg.log")
+        priv.verb_argv = lambda *_a: [
+            "sh", "-c",
+            "printf '%s\\n%s\\n' "
+            "'<7>[1.0] snd-reloop-jockey3 1-1:1.0: Starting all URBs (cold start, grace 200 ms)' "
+            "'<7>[1.1] snd-reloop-jockey3 1-1:1.0: Playback confirmed alive after 8 ms'; "
+            "sleep 30"]
+        cap = kmsg.KmsgCapture(dest)
+        check(cap.start() is True, "capture starts when a helper is available")
+        deadline = time.time() + 5
+        while time.time() < deadline and not (
+                os.path.exists(dest) and os.path.getsize(dest) > 0):
+            time.sleep(0.05)
+        path = cap.stop()
+        check(path == dest, "stop() returns the path when the file has content")
+        lines = kmsg.read_lines(dest)
+        check(lines and any("confirmed alive after 8 ms" in ln for ln in lines),
+              "the streamed lines land in the file", str(lines))
+        check(cap._proc is None, "the follower process is reaped by stop()")
+
+        # An empty capture is reported as nothing, not an empty path.
+        dest2 = os.path.join(tmp, "empty.log")
+        priv.verb_argv = lambda *_a: ["sh", "-c", "sleep 30"]
+        cap2 = kmsg.KmsgCapture(dest2)
+        cap2.start()
+        time.sleep(0.2)
+        check(cap2.stop() is None, "an empty capture returns None")
+        check(kmsg.read_lines(dest2) is None, "and read_lines() agrees")
+
+        # No helper, not root -> start() declines rather than raising.
+        priv.available = lambda: (False, "no helper")
+        check(kmsg.KmsgCapture(os.path.join(tmp, "x.log")).start() is False,
+              "capture declines cleanly with no privileged route")
+    finally:
+        priv.available, priv.verb_argv = real_avail, real_argv
+
+
 def test_restart_timing():
     """The URB-restart timing dataset: extraction, binning, percentiles."""
     print("\nrestart timing dataset")
@@ -1951,6 +2001,7 @@ def main():
     test_rate_change_log_attribution()
     test_marker_labels()
     test_run_log_trimming()
+    test_kmsg_capture()
     test_restart_timing()
     test_log_buf_len()
     test_pointer_rate()

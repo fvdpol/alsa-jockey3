@@ -110,6 +110,7 @@ usage() {
 #                          (no-op if already bound)
 #   dmesg-read             print the kernel log (dmesg --raw: keeps <N> priority)
 #   dmesg-mark <token>     write a JT-MARK boundary token to /dev/kmsg
+#   kmsg-follow            stream the kernel log until killed (whole-run capture)
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
 #   dyndbg-hwparams-n on|off enable/disable the hw_params() packets/URB (N) message
 #   printk-console <1-8>   set the console loglevel
@@ -318,6 +319,25 @@ dmesg-read)
 	# log, the priority-based dev_dbg classification just does not engage.
 	dmesg --raw 2>/dev/null && exit 0
 	exec dmesg --color=never
+	;;
+
+kmsg-follow)
+	[ $# -eq 0 ] || die "kmsg-follow takes no arguments"
+	# Streams the kernel log for the life of a run so the whole thing
+	# survives even when it would overflow the ring buffer -- a 20000-change
+	# rate soak with dynamic debug on writes far more than log_buf_len holds,
+	# and matters most on a memory-constrained node like the Pi 1. The runner
+	# kills this with SIGTERM at the end of the run.
+	#
+	# --follow prints the current buffer and then blocks for new records;
+	# --raw keeps the "<N>" prefix. As with dmesg-read, --raw is not safe to
+	# assume, so probe it with a non-following read first (fast, output
+	# discarded) and pick the follow variant that works. A plain follow still
+	# captures the log, only the priority shortcut stops working on it.
+	if dmesg --raw >/dev/null 2>&1; then
+		exec dmesg --follow --raw
+	fi
+	exec dmesg --follow --color=never
 	;;
 
 dmesg-mark)

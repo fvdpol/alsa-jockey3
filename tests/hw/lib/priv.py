@@ -101,6 +101,13 @@ def bind(timeout=30):
     return call("bind", timeout=timeout)
 
 
+def verb_argv(verb, *args):
+    """The exact argv `call()` would run for a verb. For a caller that needs
+    to stream a long-running verb through subprocess.Popen rather than wait for
+    it (see lib/kmsg.KmsgCapture)."""
+    return _argv(verb, args)
+
+
 def dmesg_read(timeout=30):
     rc, out, _err = call("dmesg-read", timeout=timeout)
     return out.splitlines() if rc == 0 else []
