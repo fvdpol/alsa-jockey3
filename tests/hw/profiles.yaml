@@ -154,7 +154,6 @@ profiles:
         JT-BUILD-002: {iterations: 0}
         JT-BUILD-003: {iterations: 0}
         JT-BUILD-004: {iterations: 0}
-        JT-RATE-001:  {params: {iterations_per_run: 15}}
         # Same reasoning as armhf-prod above: the Pi 4B has no onboard RTC
         # and no suspend-to-RAM support.
         JT-PM-001:    {iterations: 0}
@@ -200,6 +199,9 @@ profiles:
       - {id: JT-PCM-005,   iterations: 3}
       - {id: JT-PCM-006,   iterations: 1}
       - {id: JT-PCM-007,   iterations: 1}
+      - {id: JT-PCM-009,   iterations: 1}
+      - {id: JT-PCM-010,   iterations: 1}
+      - {id: JT-PCM-011,   iterations: 1}
       # Mileage, not accuracy: 250 loops exist to measure how often the
       # capture stall happens, and at the catalog's 4 s per rate that would be
       # over an hour. One second per rate puts the timing check below its
