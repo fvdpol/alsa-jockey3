@@ -95,15 +95,23 @@ def cmd_report(args):
     if not data["sources"]:
         print("no sources ingested yet -- run: ./restart_timing.py ingest")
         return 0
-    ps = tuple(int(x) for x in args.percentiles.split(","))
+    try:
+        ps = tuple(float(x) for x in args.percentiles.split(","))
+    except ValueError:
+        sys.exit("--percentiles wants a comma-separated list of numbers, "
+                 "e.g. 50,90,99 or 90,99,99.9")
+    if any(not 0 < p <= 100 for p in ps):
+        sys.exit("--percentiles must each be in (0, 100]")
+    labels = [rt.pct_label(p) for p in ps]
     dims = ["arch", "stream", "start_type"]
     if args.split:
         dims += [d for d in args.split.split(",") if d not in dims]
 
     agg = rt.aggregate(data, dims=tuple(dims))
     hdr = " | ".join(dims)
-    print(f"{hdr} :  n   " + "  ".join(f"p{p}" for p in ps) + "   min  max   (ms)")
-    print("-" * (len(hdr) + 40))
+    print(f"{hdr} :   n  " + "  ".join(f"{lbl:>5}" for lbl in labels) +
+          "    min  max   (ms)")
+    print("-" * (len(hdr) + 12 + 7 * len(labels)))
     for key in sorted(agg, key=lambda k: tuple(str(x) for x in k)):
         bins = agg[key]
         st = rt.stats(bins, ps)
@@ -111,9 +119,9 @@ def cmd_report(args):
         ceil = rt.grace_ceilings(data, start_type)
         flag = "  <-- tail censored at grace %s" % ceil \
             if rt.tail_is_censored(bins, ceil) else ""
-        cells = "  ".join(f"{st.get('p%d' % p, '-'):>3}" for p in ps)
+        cells = "  ".join(f"{st.get(lbl, '-'):>5}" for lbl in labels)
         print(f"{' | '.join(str(x) for x in key)} : {st['n']:>3}  {cells}   "
-              f"{st['min']:>3}  {st['max']:>3}{flag}")
+              f"{st['min']:>4}  {st['max']:>3}{flag}")
     print(f"\n{len(data['sources'])} source run(s); dyndbg=on only "
           f"(see lib/restart_timing.py). Percentiles are nearest-rank.")
     return 0
@@ -155,7 +163,8 @@ def main():
     p.set_defaults(fn=cmd_ingest)
 
     p = sub.add_parser("report")
-    p.add_argument("--percentiles", default="50,90,95,99")
+    p.add_argument("--percentiles", default="50,90,95,99",
+                   help="comma-separated, fractional allowed: 50,90,99 or 90,99,99.9")
     p.add_argument("--split", help="extra dims, comma-separated: dyndbg,kernel_release,target,driver_git")
     p.set_defaults(fn=cmd_report)
 

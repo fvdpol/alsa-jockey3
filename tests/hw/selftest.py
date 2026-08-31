@@ -1687,6 +1687,14 @@ def test_restart_timing():
     check(st["n"] == 100 and st["p50"] == 8 and st["p99"] == 64,
           "percentiles are nearest-rank on the binned counts", str(st))
 
+    st = restart_timing.stats({8: 990, 40: 8, 200: 2}, percentiles=(99, 99.9))
+    check(st["p99"] == 8 and st["p99.9"] == 200,
+          "a fractional percentile lands under its own 'p99.9' label", str(st))
+    check(restart_timing.pct_label(90) == "p90"
+          and restart_timing.pct_label(99.0) == "p99"
+          and restart_timing.pct_label(99.9) == "p99.9",
+          "pct_label drops a trailing .0 but keeps real decimals")
+
     check(restart_timing.tail_is_censored({8: 5, 190: 1}, [200]) is True,
           "a max that reaches the grace ceiling flags the tail as censored")
     check(restart_timing.tail_is_censored({8: 5, 40: 1}, [200]) is False,

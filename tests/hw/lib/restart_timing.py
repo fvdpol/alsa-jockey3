@@ -226,8 +226,15 @@ def grace_ceilings(data, start_type, where=None):
     return sorted(seen)
 
 
+def pct_label(p):
+    """Column label for a percentile: 'p90', 'p99.9' -- no trailing '.0'."""
+    p = float(p)
+    return "p%g" % p if p != int(p) else "p%d" % int(p)
+
+
 def stats(bins, percentiles=(50, 90, 95, 99)):
-    """Summary of one {ms: count} histogram."""
+    """Summary of one {ms: count} histogram. Percentiles may be fractional
+    (99.9); each lands under pct_label(p)."""
     if not bins:
         return {"n": 0}
     items = sorted((int(ms), n) for ms, n in bins.items())
@@ -235,12 +242,12 @@ def stats(bins, percentiles=(50, 90, 95, 99)):
     out = {"n": total, "min": items[0][0], "max": items[-1][0]}
     for p in percentiles:
         # nearest-rank on the cumulative count
-        target = p / 100 * total
+        target = float(p) / 100 * total
         seen = 0
         for ms, n in items:
             seen += n
             if seen >= target:
-                out["p%d" % p] = ms
+                out[pct_label(p)] = ms
                 break
     return out
 
