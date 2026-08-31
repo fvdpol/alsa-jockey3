@@ -2139,11 +2139,26 @@ static void jockey3_watchdog_work(struct work_struct *work)
  * whether the caller acts on the result, so stall frequency (Playback and
  * Capture alike) stays trackable in the field via dmesg.
  */
+/*
+ * @fresh_start: this wait follows a jockey3_start_urbs() the caller just did, so
+ *	the confirmation latency is reported as the time from that restart to the
+ *	first completion (@urbs_started_time -> @first_callback_time), not from
+ *	when this poll loop happened to begin. The two directions are checked one
+ *	after the other, so measuring from loop entry would credit the whole of
+ *	the first direction's confirmation to the second direction's start time
+ *	and under-report it -- Capture routinely printed "after 0 ms" only
+ *	because Playback had already burned the first several ms. Pass false for a
+ *	bare .prepare() liveness check on an already-running ring, where
+ *	@urbs_started_time is stale and the meaningful number is how long this
+ *	call spent polling.
+ */
 static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int direction,
-					    const unsigned int timeout_ms, bool require_healthy)
+					    const unsigned int timeout_ms, bool require_healthy,
+					    bool fresh_start)
 {
 	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
 	const char *type = direction == SNDRV_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
+	u64 since_ns = fresh_start ? atomic64_read(&urb_stream->urbs_started_time) : 0;
 	unsigned long start = jiffies;
 	unsigned long deadline = start + msecs_to_jiffies(timeout_ms);
 	u64 first, last;
@@ -2157,9 +2172,21 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
 
 		if (require_healthy ? jockey3_stream_streaming_healthy(chip, urb_stream)
 				    : jockey3_check_urb_stream_alive(urb_stream)) {
+			u64 mark;
+			unsigned int elapsed_ms;
+
+			first = atomic64_read(&urb_stream->first_callback_time);
+			if (since_ns && first >= since_ns)
+				mark = first;
+			else if (since_ns)
+				mark = ktime_get_mono_fast_ns();
+			else
+				mark = 0;
+			elapsed_ms = mark ? div_u64(mark - since_ns, NSEC_PER_MSEC)
+					  : jiffies_to_msecs(jiffies - start);
+
 			dev_dbg(&chip->intf0->dev, "%s confirmed %s after %u ms\n", type,
-				require_healthy ? "streaming" : "alive",
-				jiffies_to_msecs(jiffies - start));
+				require_healthy ? "streaming" : "alive", elapsed_ms);
 			return true;
 		}
 
@@ -2246,6 +2273,7 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 {
 	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
 	const char *type = direction == SNDRV_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
+	unsigned int grace;
 	int ret = 0;
 
 	if (jockey3_is_disconnected(chip))
@@ -2317,7 +2345,8 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	 * FIFO-drain completions must NOT count -- passing on those escalates a
 	 * merely jittery restart to the USB reset below.
 	 */
-	if (jockey3_wait_urb_stream_started(chip, direction, jockey3_start_grace_ms(true), true)) {
+	grace = jockey3_start_grace_ms(true);
+	if (jockey3_wait_urb_stream_started(chip, direction, grace, true, true)) {
 		dev_dbg(&chip->intf0->dev,
 			"%s stream recovered via light URB restart (%s)\n", type, context);
 		goto out;
@@ -2340,7 +2369,8 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	if (ret < 0)
 		goto out;
 
-	if (!jockey3_wait_urb_stream_started(chip, direction, jockey3_start_grace_ms(false), false))
+	grace = jockey3_start_grace_ms(false);
+	if (!jockey3_wait_urb_stream_started(chip, direction, grace, false, true))
 		dev_err(&chip->intf0->dev,
 			"%s stream still stalled after full USB reset; hardware may need power-cycling (%s)\n",
 			type, context);
@@ -2593,7 +2623,8 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	 */
 	if (stalled)
 		stalled = !jockey3_wait_urb_stream_started(chip, substream->stream,
-							  jockey3_start_grace_ms(false), false);
+							  jockey3_start_grace_ms(false), false,
+							  false);
 
 	if (stalled) {
 		const char *context = substream->stream == SNDRV_PCM_STREAM_CAPTURE ?
@@ -2750,6 +2781,7 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 	unsigned int rate = params_rate(hw_params);
 	bool playback_alive, capture_alive, capture_open;
+	unsigned int grace;
 	int ret = 0;
 
 	dev_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n",
@@ -2850,10 +2882,11 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	 * Cold grace and the plain alive check: a rate change reprograms the
 	 * endpoints over EP0, so this is a cold start, not a warm restart.
 	 */
+	grace = jockey3_start_grace_ms(false);
 	playback_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_PLAYBACK,
-							 jockey3_start_grace_ms(false), false);
+							 grace, false, true);
 	capture_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE,
-							jockey3_start_grace_ms(false), false);
+							grace, false, true);
 	capture_open = jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE);
 
 	if (!playback_alive || (!capture_alive && capture_open)) {
