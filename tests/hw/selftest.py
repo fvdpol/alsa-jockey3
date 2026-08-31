@@ -1719,6 +1719,8 @@ def test_kmsg_capture():
             "sleep 30"]
         cap = kmsg.KmsgCapture(dest)
         check(cap.start() is True, "capture starts when a helper is available")
+        check(os.getpgid(cap._proc.pid) != os.getpgrp(),
+              "the follower runs in its own session -- sudo cannot touch our tty")
         deadline = time.time() + 5
         while time.time() < deadline and not (
                 os.path.exists(dest) and os.path.getsize(dest) > 0):

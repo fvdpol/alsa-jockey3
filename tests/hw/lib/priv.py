@@ -39,8 +39,11 @@ def call(verb, *args, timeout=120):
     blocked, not failed.
     """
     try:
+        # stdin off the terminal: no verb reads it, and it stops `sudo`'s
+        # use_pty from relaying (and, on a timeout kill, failing to restore)
+        # the caller's terminal. See lib/kmsg.KmsgCapture for the same guard.
         p = subprocess.run(_argv(verb, args), capture_output=True, text=True,
-                           timeout=timeout)
+                           timeout=timeout, stdin=subprocess.DEVNULL)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, "", f"{verb} timed out after {timeout}s"

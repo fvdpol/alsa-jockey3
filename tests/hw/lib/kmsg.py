@@ -22,6 +22,7 @@ allowlist from growing every time a dev_dbg() is added to the driver.
 import atexit
 import os
 import re
+import signal
 import subprocess
 import uuid
 
@@ -184,8 +185,15 @@ class KmsgCapture:
             return False
         try:
             self._fh = open(self.dest, "w", encoding="utf-8")
-            self._proc = subprocess.Popen(argv, stdout=self._fh,
-                                          stderr=subprocess.DEVNULL)
+            # stdin off the terminal and a fresh session: the follower runs
+            # under `sudo`, whose use_pty (default in recent sudo) would
+            # otherwise put the runner's terminal into raw mode to relay a
+            # pty -- and if we then have to SIGKILL it, it never restores it,
+            # leaving every later line staircased. With no controlling tty
+            # there is nothing for sudo to grab.
+            self._proc = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=self._fh,
+                stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError:
             self._cleanup_fh()
             return False
@@ -206,12 +214,22 @@ class KmsgCapture:
         p, self._proc = self._proc, None
         if p is None or p.poll() is not None:
             return
-        p.terminate()
-        try:
-            p.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            p.wait()
+        # Signal the whole session (sudo -> helper -> dmesg), not just sudo,
+        # so nothing is orphaned; fall back to the bare process if the group
+        # is already gone.
+        for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 2)):
+            try:
+                os.killpg(os.getpgid(p.pid), sig)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    p.send_signal(sig)
+                except ProcessLookupError:
+                    return
+            try:
+                p.wait(timeout=grace)
+                return
+            except subprocess.TimeoutExpired:
+                continue
 
     def _cleanup_fh(self):
         if self._fh is not None:
