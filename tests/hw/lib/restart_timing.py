@@ -14,11 +14,12 @@ jockey3_stream_streaming_healthy(). The word in the message is the driver's own
 classification, so no pairing or inference is needed.
 
 This module turns those lines, across many runs, into per-run histograms keyed
-by (stream, start_type) and stores them in data/restart_timing.json alongside
-the run's identifying metadata. What is kept is deliberately small -- a count
-per whole-millisecond bin, not the raw samples -- but enough to compute a
-median or any percentile band later, and split by architecture, stream, start
-type, kernel or dynamic-debug state without re-reading the run folders.
+by (stream, start_type, rate) and stores them in data/restart_timing.json
+alongside the run's identifying metadata. What is kept is deliberately small --
+a count per whole-millisecond bin, not the raw samples -- but enough to compute
+a median or any percentile band later, and split by architecture, stream, start
+type, sample rate, kernel or dynamic-debug state without re-reading the run
+folders.
 
 Two constraints worth stating up front:
 
@@ -48,7 +49,9 @@ DATASET = os.path.join(HERE, os.pardir, "data", "restart_timing.json")
 #     prepare()/hw_params() liveness check that merely waited out a mid-stream
 #     stall on a *running* ring -- those now land under "<stream>|liveness"
 #     instead of polluting the cold-start distribution.
-EXTRACTOR_VERSION = 2
+# v3: the key gains a sample-rate field (stream|start_type|rate), tracked
+#     from the log's rate lines, so timings can be split by rate.
+EXTRACTOR_VERSION = 3
 
 _CONFIRM = re.compile(
     r"(Playback|Capture) confirmed (alive|streaming) after (\d+) ms")
@@ -62,6 +65,15 @@ _START = re.compile(r"Starting all URBs \((cold|warm) start")
 # disarm -- a "trigger cmd 1" often sits between a warm restart and its second
 # direction's confirmation.
 _PCM_LIVENESS = re.compile(r"PCM (?:prepare|hw_params) ")
+# The rate in effect, tracked as the log is walked so each sample can be tagged
+# with it. "Rate changed to N successfully" is the authoritative end of a rate
+# change; the others cover the first stream open, before any change.
+_RATE = re.compile(
+    r"Rate changed to (\d+) successfully"
+    r"|Rate verified as (\d+) Hz"
+    r"|Setting hardware rate: (\d+) Hz"
+    r"|Current hardware rate: (\d+) Hz"
+    r"|PCM hw_params rate (\d+)")
 
 _MODE_START = {"show liveness": "cold", "stream steadily": "warm"}
 
@@ -75,11 +87,12 @@ def extract(dmesg_text):
     """Pull restart timings out of one run's dmesg.txt.
 
     Returns (hist, grace_seen):
-      hist       {"playback|cold": {ms: count}, "capture|warm": {...},
-                  "playback|liveness": {...}, ...}
-                 cold/warm are restart latencies (a "Starting all URBs" line
-                 preceded the confirmation); liveness is a bare prepare()/
-                 hw_params() check that waited out a stall on a running ring.
+      hist       {"playback|cold|96000": {ms: count}, "capture|warm|48000": ...,
+                  "playback|liveness|0": {...}, ...}  -- key is
+                  stream|start_type|rate. cold/warm are restart latencies (a
+                  "Starting all URBs" line preceded the confirmation); liveness
+                  is a bare prepare()/hw_params() check that waited out a stall
+                  on a running ring. rate 0 means no rate line had been seen.
       grace_seen {"cold": [ms, ...], "warm": [ms, ...]}  -- the grace ceilings
                  that were in effect, so a censored tail (samples cannot exceed
                  the grace) is visible later.
@@ -88,14 +101,20 @@ def extract(dmesg_text):
     grace = {"cold": set(), "warm": set()}
     armed = None  # "cold" | "warm": a restart happened and its confirmations
                   # have not been overtaken by a new PCM ioctl yet.
+    rate = 0
 
     for line in dmesg_text.splitlines():
+        m = _RATE.search(line)
+        if m:
+            rate = int(next(g for g in m.groups() if g))
+            # fall through: a "PCM hw_params rate N" line is also a liveness
+            # disarm, so do not `continue` past that check.
+        if _PCM_LIVENESS.search(line):
+            armed = None
+            continue
         m = _START.search(line)
         if m:
             armed = m.group(1)
-            continue
-        if _PCM_LIVENESS.search(line):
-            armed = None
             continue
         m = _WAIT.search(line)
         if m:
@@ -106,7 +125,7 @@ def extract(dmesg_text):
             stream = m.group(1).lower()
             kind = armed or "liveness"
             ms = int(m.group(3))
-            key = f"{stream}|{kind}"
+            key = f"{stream}|{kind}|{rate}"
             hist.setdefault(key, {})
             hist[key][ms] = hist[key].get(ms, 0) + 1
 
@@ -203,7 +222,7 @@ def add_source(data, record):
 def aggregate(data, dims=("arch", "stream", "start_type"), where=None):
     """Sum per-source histograms into buckets keyed by the requested dims.
 
-    dims is any ordered subset of: arch, stream, start_type, dyndbg,
+    dims is any ordered subset of: arch, stream, start_type, rate, dyndbg,
     kernel_release, target, driver_git. `where` is an optional
     {dim: value-or-set} filter applied per source (arch/dyndbg/... ) before
     binning. Returns {tuple(dim values): {ms: count}}.
@@ -220,8 +239,13 @@ def aggregate(data, dims=("arch", "stream", "start_type"), where=None):
         if where and not _matches(base, where):
             continue
         for key, bins in s["hist"].items():
-            stream, start_type = key.split("|")
-            row = dict(base, stream=stream, start_type=start_type)
+            # v2 keys are stream|start_type; v3 adds |rate. Tolerate both so a
+            # mixed dataset reports rather than crashes -- rebuild --reparse
+            # migrates the old ones.
+            parts = key.split("|")
+            stream, start_type = parts[0], parts[1]
+            rate = int(parts[2]) if len(parts) > 2 else 0
+            row = dict(base, stream=stream, start_type=start_type, rate=rate)
             k = tuple(row.get(d) for d in dims)
             acc = out.setdefault(k, {})
             for ms, n in bins.items():

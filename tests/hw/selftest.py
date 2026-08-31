@@ -1755,8 +1755,8 @@ def test_restart_timing():
 
     D = "snd-reloop-jockey3 1-1:1.0: "
     dmesg = "\n".join("[%s] %s%s" % (t, D, msg) for t, msg in [
-        # A genuine cold restart: "Starting all URBs" arms, both directions
-        # confirm against it.
+        # A genuine cold restart at 48 kHz: "Starting all URBs" arms, both
+        # directions confirm against it; the rate line tags the samples.
         ("10.0", "PCM hw_params rate 48000, active_streams 1"),
         ("10.1", "Starting all URBs (cold start, grace 200 ms)"),
         ("10.2", "Waiting up to 200 ms for Playback to show liveness"),
@@ -1767,24 +1767,27 @@ def test_restart_timing():
         ("20.0", "PCM prepare stream 0"),
         ("20.1", "Waiting up to 200 ms for Playback to show liveness"),
         ("20.2", "Playback confirmed alive after 112 ms"),
-        # A warm restart. A "trigger cmd 1" between the two directions'
-        # confirmations must NOT disarm.
-        ("30.0", "PCM prepare stream 1"),
-        ("30.1", "Starting all URBs (warm start, grace 150 ms)"),
-        ("30.2", "Waiting up to 150 ms for Capture to stream steadily"),
-        ("30.3", "Playback confirmed alive after 56 ms"),
-        ("30.4", "PCM trigger stream 1, cmd 1"),
-        ("30.5", "Capture confirmed streaming after 60 ms"),
+        # A rate change to 96 kHz, then a warm restart. A "trigger cmd 1"
+        # between the two directions' confirmations must NOT disarm.
+        ("30.0", "Rate changed to 96000 successfully"),
+        ("30.1", "PCM prepare stream 1"),
+        ("30.2", "Starting all URBs (warm start, grace 150 ms)"),
+        ("30.3", "Waiting up to 150 ms for Capture to stream steadily"),
+        ("30.4", "Playback confirmed alive after 56 ms"),
+        ("30.5", "PCM trigger stream 1, cmd 1"),
+        ("30.6", "Capture confirmed streaming after 60 ms"),
     ])
     hist, grace = restart_timing.extract(dmesg)
-    check(hist["playback|cold"] == {8: 1} and hist["capture|cold"] == {0: 1},
-          "a confirmation after 'Starting all URBs' is a cold restart", str(hist))
-    check(hist["playback|liveness"] == {112: 1},
+    check(hist["playback|cold|48000"] == {8: 1}
+          and hist["capture|cold|48000"] == {0: 1},
+          "a confirmation after 'Starting all URBs' is a cold restart, tagged "
+          "with the rate then in effect", str(hist))
+    check(hist["playback|liveness|48000"] == {112: 1},
           "a confirmation with no preceding restart is a liveness wait, not cold",
           str(hist))
-    check(hist["playback|warm"] == {56: 1} and hist["capture|warm"] == {60: 1},
-          "both directions bin as warm across an intervening 'trigger cmd 1'",
-          str(hist))
+    check(hist["playback|warm|96000"] == {56: 1}
+          and hist["capture|warm|96000"] == {60: 1},
+          "the warm samples carry the rate the change moved to", str(hist))
     check(grace == {"cold": [200], "warm": [150]},
           "the grace ceilings in effect are recorded", str(grace))
 
@@ -1816,7 +1819,7 @@ def test_restart_timing():
 
     rj["env"]["kernel"]["debug_options"] = ["DEBUG_KERNEL"]
     rec, _ = restart_timing.source_from_run(rj, dmesg)
-    check(rec and rec["dyndbg"] == "on" and "playback|cold" in rec["hist"],
+    check(rec and rec["dyndbg"] == "on" and "playback|cold|48000" in rec["hist"],
           "a prod kernel with the lines present is ingested")
 
     # add_source is idempotent and replaces on change.
@@ -1831,7 +1834,12 @@ def test_restart_timing():
     agg = restart_timing.aggregate(data, dims=("arch", "stream", "start_type"))
     check(agg[("x86_64", "playback", "cold")] == {8: 1}
           and agg[("x86_64", "playback", "liveness")] == {112: 1},
-          "aggregation groups per-source histograms by the requested dims", str(agg))
+          "aggregation sums per-source histograms across the dims not asked for",
+          str(agg))
+    agg = restart_timing.aggregate(data, dims=("stream", "start_type", "rate"))
+    check(agg[("playback", "cold", 48000)] == {8: 1}
+          and agg[("capture", "warm", 96000)] == {60: 1},
+          "and can split the same data out by sample rate", str(agg))
 
 
 def test_pointer_rate():

@@ -165,7 +165,8 @@ def main():
     p = sub.add_parser("report")
     p.add_argument("--percentiles", default="50,90,95,99",
                    help="comma-separated, fractional allowed: 50,90,99 or 90,99,99.9")
-    p.add_argument("--split", help="extra dims, comma-separated: dyndbg,kernel_release,target,driver_git")
+    p.add_argument("--split", help="extra dims, comma-separated: "
+                   "rate,dyndbg,kernel_release,target,driver_git")
     p.set_defaults(fn=cmd_report)
 
     p = sub.add_parser("sources")

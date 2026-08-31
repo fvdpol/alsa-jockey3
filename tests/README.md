@@ -85,7 +85,8 @@ sudo priv/install.sh                      # once per machine; the only password
 ```
 
 `restart_timing.py` folds each prod-kernel run that had dynamic debug on into a
-growing histogram keyed by architecture, stream and start type:
+growing histogram keyed by architecture, stream, start type and sample rate
+(`report --split rate` breaks it out; the default aggregates over rates):
 
   - **cold** — a URB ring (re)start: first open, rate change, USB reset, resume.
     Latency to the first real completion; what `cold_start_grace_ms` is sized
