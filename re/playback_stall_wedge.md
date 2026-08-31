@@ -111,6 +111,8 @@ time relative to the case's own start.
 | 2026-08-23 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260823T222749Z-smoke`) | `e87418d` | 1.0.6 | 2812 B/s | 2249 B/s | 1800s | no | - | - |
 | 2026-08-23 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260823T233057Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 1s (cut short -- planned 36s) | **stall** | 0s | unknown |
 | 2026-08-23 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260823T234502Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 82s | no | - | - |
+| 2026-08-24 | arm64-prod | JT-MIDI-007 (`arm64-prod-20260824T204947Z-functional`) | `1d39010` | 1.0.3 | 2812 B/s | 2249 B/s | 1803s | no | - | - |
+| 2026-08-24 | arm64-prod | JT-PCM-008 (`arm64-prod-20260824T223420Z-functional`) | `1d39010` | 1.0.3 | no MIDI (0 B/s) | n/a | 1.0h | no | - | - |
 | 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T003600Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 82s | no | - | - |
 | 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T004116Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 72s | **stall** | 1s | unknown |
 | 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T004530Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 8s (cut short -- planned 72s) | **stall** | 7s | unknown |
@@ -120,6 +122,13 @@ time relative to the case's own start.
 | 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T005518Z-smoke`) | `unknown` | 1.0.6 | no MIDI (0 B/s) | n/a | 8s (cut short -- planned 72s) | **stall** | 7s | unknown |
 | 2026-08-24 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260824T010429Z-smoke`) | `c221f88` | 1.0.6 | 2812 B/s | 2249 B/s | 1800s | no | - | - |
 | 2026-08-24 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260824T030907Z-smoke`) | `c221f88` | 1.0.6 | no MIDI (0 B/s) | n/a | 8.0h | no | - | - |
+| 2026-08-25 | i386-prod | JT-MIDI-007 (`i386-prod-20260825T115813Z-functional`) | `86d605e` | 1.0.6 | 2812 B/s | 2249 B/s | 1800s | no | - | - |
+| 2026-08-30 | arm64-prod | JT-MIDI-007 (`arm64-prod-20260830T161103Z-functional`) | `0a4822c` | 1.0.3 | 2812 B/s | 2249 B/s | 1803s | no | - | - |
+| 2026-08-30 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260830T142328Z-functional`) | `0a4822c` | 1.0.6 | 2812 B/s | 2247 B/s | 1801s | no | - | - |
+| 2026-08-30 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260830T142400Z-functional`) | `0a4822c` | 1.0.6 | 2812 B/s | 2248 B/s | 3569s | no | - | - |
+| 2026-08-30 | x86_64-prod | JT-MIDI-007 (`x86_64-prod-20260830T161024Z-functional`) | `0a4822c` | 1.0.6 | 2812 B/s | 2247 B/s | 1801s | no | - | - |
+| 2026-08-31 | arm64-prod | JT-PCM-008 (`arm64-prod-20260831T005359Z-functional`) | `0a4822c` | 1.0.3 | no MIDI (0 B/s) | n/a | 8.0h | no | - | - |
+| 2026-08-31 | x86_64-prod | JT-PCM-008 (`x86_64-prod-20260831T005347Z-functional`) | `0a4822c` | 1.0.6 | no MIDI (0 B/s) | n/a | 4.1h (cut short -- planned 8.0h) | no | - | - |
 
 <!-- RUN-LOG:END -->
 
