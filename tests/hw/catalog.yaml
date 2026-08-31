@@ -657,13 +657,23 @@ cases:
       - rms_dbfs_timeline
       - capture_gaps
       - capture_gap_max_s
+      - restarts_playback
+      - restarts_capture
+      - capture_restart_outage_max_s
+      - restart_events
     pass: >
-      No xrun accumulation, no capture gap longer than 30s while the
-      substream reports RUNNING, no memory growth, no degradation over the
-      run.
+      No xrun accumulation, no capture gap longer than 30s while the substream
+      reports RUNNING (outside a deliberate re-open), no memory growth, no
+      degradation over the run. A stream that exits early is re-opened and the
+      run continues for its remaining time; a drop recovered within the restart
+      budget is a pass, counted in restarts_playback / restarts_capture the same
+      way a recovered stall is. Fails if a stream cannot be kept open -- the
+      restart budget or the consecutive-fast-failure guard trips -- which is
+      what a device that is off, unplugged or wedged looks like.
     expect_dmesg:
       - 'Playback URB has stalled\.'
       - 'Capture URB has stalled\.'
+      - '(?:Capture stream stalled \(opening a capture stream\)|Playback stream stalled \(preparing a playback stream\)); restarting URBs to recover'
     notes: >
       Supersedes the manual steps built from test_44100_long.sh and
       test_96000_long.sh, which timed a single playback stream and checked
@@ -691,6 +701,26 @@ cases:
       a dead transport that an xrun count alone would not show, since an
       xrun is the ALSA core noticing, and a stalled URB stream does not
       always produce one.
+
+      Restart on error: the earlier version aborted the whole run the first
+      time aplay or arecord exited -- an -EIO from a mid-run driver USB reset
+      ended an 8h run at 4.1h (x86_64-prod, 2026-08-31). A real client
+      re-opens on -EIO, and the soak is about how the driver and USB stack
+      hold up over hours, so the case now re-opens whichever stream exited and
+      keeps going for the remaining time. Any premature exit is restarted --
+      not an errno whitelist, since the client's response does not depend on
+      which errno it was. restarts_playback / restarts_capture count them;
+      restart_events records t, stream, rc and a reason string;
+      capture_restart_outage_max_s is the longest a re-open took to produce
+      data again -- how quickly an application could get audio back after a
+      drop. Guards stop it retrying forever: SOAK_MAX_RESTARTS (20) per stream
+      over the run, and a restart that fails again within SOAK_MIN_UPTIME_S
+      (15s) counts as failed -- SOAK_MAX_CONSEC_FAILED (3) of those in a row
+      is a hard fail. The wait before a restart backs off from 0.5s to a 5s
+      cap per consecutive failure, giving the hardware and USB stack time to
+      recover before the case concludes the device is gone. A device-wide
+      event usually drops both streams; each is restarted on its own, and if
+      the re-open cannot succeed the guards catch it either way.
 
       /dev/urandom rather than a file so the run is not bounded by file
       length, and so the codec sees varied data rather than a repeating

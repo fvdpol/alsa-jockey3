@@ -1662,6 +1662,43 @@ def test_run_log_trimming():
           "and is not misreported as the marker never being written")
 
 
+def test_soak_restart_policy():
+    """JT-PCM-008's restart guards -- the pure decision helpers."""
+    print("\nsoak restart policy")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "pcm_case", os.path.join(HERE, "cases", "pcm.py"))
+    pcm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pcm)
+
+    cls = pcm._classify_stream_exit
+    check(cls(1, "arecord: pcm_read:2272: read error: Input/output error") == "EIO",
+          "an -EIO exit is classified as EIO")
+    check(cls(1, "arecord: main:830: audio open error: No such device") == "device gone",
+          "a vanished device is classified device gone")
+    check(cls(0, "") == "clean exit", "rc 0 with no stderr is a clean exit")
+    check(cls(1, "arecord: some novel complaint").startswith("rc=1"),
+          "anything else keeps the rc and a snippet")
+
+    dec = pcm._soak_restart_decision
+    check(dec(0, 1, 3600) == "restart", "a first early exit with time left restarts")
+    check(dec(pcm.SOAK_MAX_RESTARTS, 1, 3600) == "give_up",
+          "the per-stream restart budget is a hard stop")
+    check(dec(0, pcm.SOAK_MAX_CONSEC_FAILED + 1, 3600) == "give_up",
+          "too many failed restarts in a row is a hard stop")
+    check(dec(0, 1, pcm.SOAK_MIN_RESTART_REMAINING_S - 1) == "run_ending",
+          "close to the deadline it just lets the run end")
+
+    bo = pcm._soak_backoff_s
+    check(bo(0) == pcm.SOAK_RESTART_BACKOFF_S
+          and bo(1) == pcm.SOAK_RESTART_BACKOFF_S,
+          "a healthy stint that broke, or the first failure, backs off the minimum")
+    check(bo(2) == 2 * pcm.SOAK_RESTART_BACKOFF_S,
+          "each consecutive failure doubles the wait")
+    check(bo(99) == pcm.SOAK_RESTART_BACKOFF_MAX_S,
+          "the backoff is capped so a wedged device is retried on a fixed cadence")
+
+
 def test_kmsg_capture():
     """The whole-run kernel-log capture (KmsgCapture)."""
     print("\nwhole-run kmsg capture")
@@ -2002,6 +2039,7 @@ def main():
     test_marker_labels()
     test_run_log_trimming()
     test_kmsg_capture()
+    test_soak_restart_policy()
     test_restart_timing()
     test_log_buf_len()
     test_pointer_rate()

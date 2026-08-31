@@ -417,22 +417,102 @@ def _sample_window(stdout, leftover, channels, frames_wanted, timeout_s=15.0):
     return _dbfs_from_sumsq(sumsq, count), buf
 
 
+# --- JT-PCM-008 restart-on-error -----------------------------------------
+#
+# The soak measures how the driver and USB stack hold up over hours, so a
+# stream that exits early for ANY reason is re-opened and the run carries on
+# for its remaining time: a drop recovered within the budget is a pass,
+# counted in restarts_playback / restarts_capture, the same way a recovered
+# stall is a pass in JT-RATE. The guards below are what stop it retrying for
+# hours against a device that is powered off, unplugged or wedged.
+SOAK_MAX_RESTARTS = 20                # per stream, over the whole run
+SOAK_MIN_UPTIME_S = 15.0              # a restart that dies faster than this is
+                                     # a failed restart, not a fresh fault
+SOAK_MAX_CONSEC_FAILED = 3            # this many failed restarts in a row -> stop
+SOAK_RESTART_BACKOFF_S = 0.5         # wait before the first restart...
+SOAK_RESTART_BACKOFF_MAX_S = 5.0     # ...doubling per consecutive failure,
+                                     # capped -- gives the hardware and USB
+                                     # stack time to come back before we
+                                     # conclude the device is gone
+SOAK_MIN_RESTART_REMAINING_S = 5.0    # not worth restarting this close to the end
+
+
+def _classify_stream_exit(rc, stderr_tail):
+    """A short reason string for a restart_events entry. For the record only:
+    any premature exit is restarted regardless of what this returns."""
+    t = (stderr_tail or "").lower()
+    if "input/output error" in t:
+        return "EIO"
+    if ("no such device" in t or "no such file or directory" in t
+            or "cannot find card" in t or "no soundcards" in t):
+        return "device gone"
+    if "broken pipe" in t:
+        return "broken pipe"
+    if rc == 0:
+        return "clean exit"
+    last = next((ln.strip() for ln in reversed((stderr_tail or "").splitlines())
+                 if ln.strip()), "")
+    return f"rc={rc}: {last[:80]}" if last else f"rc={rc}"
+
+
+def _soak_restart_decision(restarts_done, next_consec_failed, seconds_left):
+    """restart | give_up | run_ending, from the guard state at an early exit."""
+    if seconds_left < SOAK_MIN_RESTART_REMAINING_S:
+        return "run_ending"
+    if restarts_done + 1 > SOAK_MAX_RESTARTS:
+        return "give_up"
+    if next_consec_failed > SOAK_MAX_CONSEC_FAILED:
+        return "give_up"
+    return "restart"
+
+
+def _soak_backoff_s(next_consec_failed):
+    return min(SOAK_RESTART_BACKOFF_MAX_S,
+              SOAK_RESTART_BACKOFF_S * 2 ** max(0, next_consec_failed - 1))
+
+
+def _spawn_soak_playback(device, rate, stdin, stderr):
+    return subprocess.Popen(
+        ["aplay", "-D", device, "-r", str(rate), "-c", str(PLAYBACK_CHANNELS),
+         "--format", FORMAT, "-t", "raw"],
+        stdin=stdin, stdout=subprocess.DEVNULL, stderr=stderr)
+
+
+def _spawn_soak_capture(device, rate, seconds_left, stderr):
+    # -d is a ceiling, not the intent -- teardown kills it at the real
+    # deadline. Generous slack so arecord does not self-terminate first and
+    # trip a needless restart. bufsize=0: a buffered stdout blocks read()
+    # until it has the whole request or EOF, which defeats the select() drain
+    # loop.
+    return subprocess.Popen(
+        ["arecord", "-D", device, "-r", str(rate), "-c", str(CAPTURE_CHANNELS),
+         "--format", FORMAT, "-t", "raw",
+         "-d", str(int(seconds_left) + 60), "-"],
+        stdout=subprocess.PIPE, stderr=stderr, bufsize=0)
+
+
 def run_soak(c, device):
-    """JT-PCM-008: sustained duplex, watched rather than merely timed out.
+    """JT-PCM-008: sustained duplex, watched -- and re-opened when it drops.
 
-    One continuous playback stream (/dev/urandom, as the manual steps used --
-    not bounded by a fixed synth length, and the codec sees varied data for
-    the whole run) and one continuous capture stream, both open for the whole
-    duration. Capture goes straight to a pipe and is never written to disk: an
-    eight-hour raw S24_3LE capture at 96 kHz is upward of 5 GB, and nothing
-    here needs it kept. Most of it is read and discarded in large, cheap
-    chunks; only a short RMS snapshot is retained at each report interval.
+    One continuous playback stream (/dev/urandom) and one continuous capture
+    stream, both meant to stay open for the whole duration. Capture goes
+    straight to a pipe, read and discarded in large chunks with only a short
+    RMS snapshot kept per report interval; an 8 h raw S24_3LE capture is
+    upward of 5 GB and nothing here needs it.
 
-    xruns and avail_max come from watch_pcm, as everywhere else in this
-    suite. What is new here is the capture pipe itself as a liveness signal:
-    a gap longer than CAPTURE_GAP_S while the substream still reports RUNNING
-    is recorded and failed, because that is a dead transport an xrun count
-    alone would not show.
+    The soak is about stability over hours, so a stream that exits early for
+    any reason is re-opened and the run continues for its remaining time. A
+    drop recovered within SOAK_MAX_RESTARTS -- and not failing again inside
+    SOAK_MIN_UPTIME_S more than SOAK_MAX_CONSEC_FAILED times running -- is a
+    pass, counted in restarts_playback / restarts_capture, the same way a
+    recovered stall is a pass in JT-RATE. Those guards stop it retrying for
+    hours against a device that is off, unplugged or wedged.
+
+    xruns and avail_max come from watch_pcm. The capture pipe going quiet for
+    CAPTURE_GAP_S while the substream still reports RUNNING is a dead
+    transport an xrun count would miss, and is failed -- except across a
+    deliberate re-open, whose outage is recorded as
+    capture_restart_outage_max_s instead.
     """
     c.require_tools("aplay", "arecord")
     hours = float(c.params.get("hours", 8))
@@ -449,25 +529,23 @@ def run_soak(c, device):
     watch_c.start()
 
     urandom = open("/dev/urandom", "rb")
-    err_log = open(os.path.join(c.workdir, "soak_stderr.log"), "w",
-                   encoding="utf-8")
-    aplay = subprocess.Popen(
-        ["aplay", "-D", device, "-r", str(rate), "-c", str(PLAYBACK_CHANNELS),
-         "--format", FORMAT, "-t", "raw"],
-        stdin=urandom, stdout=subprocess.DEVNULL, stderr=err_log)
-    # bufsize=0: an ordinary buffered stdout blocks read() until it has
-    # collected the requested size or EOF, which defeats select() entirely --
-    # a select()-ready pipe with 4 bytes waiting would still hang a
-    # read(frame * 65536) until 65536 more frames arrived. Unbuffered gives
-    # the raw "return whatever is available now" semantics this loop depends
-    # on for both the drain path and the gap timeout.
-    arec = subprocess.Popen(
-        ["arecord", "-D", device, "-r", str(rate), "-c", str(CAPTURE_CHANNELS),
-         "--format", FORMAT, "-t", "raw", "-d", str(int(duration_s) + 60), "-"],
-        stdout=subprocess.PIPE, stderr=err_log, bufsize=0)
+    err_p = open(os.path.join(c.workdir, "soak_playback_stderr.log"),
+                 "w+", encoding="utf-8", errors="replace")
+    err_c = open(os.path.join(c.workdir, "soak_capture_stderr.log"),
+                 "w+", encoding="utf-8", errors="replace")
 
     t0 = time.monotonic()
     deadline = t0 + duration_s
+    aplay = _spawn_soak_playback(device, rate, urandom, err_p)
+    arec = _spawn_soak_capture(device, rate, duration_s, err_c)
+
+    st = {"playback": {"restarts": 0, "consec": 0, "since": t0, "dead": False},
+          "capture":  {"restarts": 0, "consec": 0, "since": t0, "dead": False}}
+    restart_events = []
+    restart_outages = []
+    cap_reopening_at = None           # monotonic of the capture exit we are
+                                     # re-opening across; None while data flows
+
     next_report = t0 + min(report_s, duration_s)
     leftover = b""
     last_data_at = t0
@@ -475,28 +553,94 @@ def run_soak(c, device):
     gap_start = t0
     gaps = []
     timeline = []
-    playback_dead = False
+
+    def _stderr_tail(fh, n=1500):
+        try:
+            fh.flush()
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - n))
+            return fh.read()
+        except OSError:
+            return ""
 
     def teardown():
         for p in (aplay, arec):
-            p.terminate()
+            try:
+                p.terminate()
+            except ProcessLookupError:
+                pass
         for p in (aplay, arec):
             try:
                 p.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 p.kill()
         urandom.close()
-        err_log.close()
+        err_p.close()
+        err_c.close()
+
+    def restart(kind, proc, err_fh):
+        """React to `kind` (playback|capture) having exited before the
+        deadline. Returns True if it was re-opened, False if it is being given
+        up on -- a c.fail is recorded for give_up, not for run_ending.
+        cap_reopening_at (the outage clock) is owned by the loop below."""
+        nonlocal aplay, arec, leftover
+        s = st[kind]
+        now = time.monotonic()
+        rc = proc.returncode
+        uptime = now - s["since"]
+        reason = _classify_stream_exit(rc, _stderr_tail(err_fh))
+        next_consec = 0 if uptime >= SOAK_MIN_UPTIME_S else s["consec"] + 1
+        seconds_left = deadline - now
+        decision = _soak_restart_decision(s["restarts"], next_consec, seconds_left)
+
+        restart_events.append({
+            "t_s": round(now - t0, 1), "stream": kind, "rc": rc,
+            "reason": reason, "uptime_s": round(uptime, 1),
+            "decision": decision})
+
+        if decision == "run_ending":
+            c.progress(f"  {kind} exited ({reason}); {round(seconds_left)}s "
+                       f"left, not restarting")
+            s["dead"] = True
+            return False
+        if decision == "give_up":
+            c.fail(f"{kind} could not be kept open: {s['restarts']} restart(s), "
+                   f"last stint {round(uptime)}s ({reason})")
+            s["dead"] = True
+            return False
+
+        backoff = _soak_backoff_s(next_consec)
+        s["restarts"] += 1
+        s["consec"] = next_consec
+        c.progress(f"  {kind} exited after {round(uptime)}s ({reason}); "
+                   f"restart {s['restarts']}/{SOAK_MAX_RESTARTS} after {backoff:g}s")
+        kmsg.Marker(f"{c.id}#restart-{kind[:3]}-{s['restarts']}").write()
+        c.add(f"restarts_{kind}")
+        time.sleep(backoff)
+        if time.monotonic() >= deadline:
+            s["dead"] = True
+            return False
+        s["since"] = time.monotonic()
+        if kind == "playback":
+            aplay = _spawn_soak_playback(device, rate, urandom, err_p)
+        else:
+            if proc.stdout:
+                proc.stdout.close()
+            leftover = b""
+            arec = _spawn_soak_capture(device, rate,
+                                       deadline - time.monotonic(), err_c)
+        return True
 
     try:
         while True:
             now = time.monotonic()
             if now >= deadline:
                 break
-            if not playback_dead and aplay.poll() is not None:
-                playback_dead = True
-                c.fail(f"playback exited after {round(now - t0)}s "
-                       f"(rc={aplay.returncode})")
+
+            if not st["playback"]["dead"] and aplay.poll() is not None:
+                restart("playback", aplay, err_p)
+                continue
 
             if now >= next_report:
                 levels, leftover = _sample_window(
@@ -516,24 +660,43 @@ def run_soak(c, device):
             ready, _w, _x = select.select([arec.stdout], [], [],
                                           min(poll_s, 5.0))
             if not ready:
-                since = now - last_data_at
-                if since > CAPTURE_GAP_S and not gap_open:
-                    gap_open = True
-                    gap_start = last_data_at
-                    c.fail(f"no capture data for over {CAPTURE_GAP_S:g}s "
-                           f"(substream state: {watch_c.state})")
+                if cap_reopening_at is None and not st["capture"]["dead"]:
+                    since = now - last_data_at
+                    if since > CAPTURE_GAP_S and not gap_open:
+                        gap_open = True
+                        gap_start = last_data_at
+                        c.fail(f"no capture data for over {CAPTURE_GAP_S:g}s "
+                               f"(substream state: {watch_c.state})")
                 c.status(f"  t+{round((now - t0) / 60)}m / {hours:g}h  "
                          f"next report in {round(next_report - now)}s")
                 continue
 
             chunk = leftover + arec.stdout.read(frame * DRAIN_CHUNK_FRAMES)
             if not chunk:
-                c.fail(f"capture pipe closed after {round(now - t0)}s, "
-                       f"before the {hours:g}h run finished")
-                break
-            last_data_at = now
+                # Pipe EOF: arecord is on its way out (any reason, including a
+                # clean -d expiry). Confirm it has exited, then let restart()
+                # apply the guards. This is the only path that restarts
+                # capture -- a dead pipe reads ready-with-EOF, so select never
+                # hangs on it.
+                if not st["capture"]["dead"]:
+                    try:
+                        arec.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    if cap_reopening_at is None:
+                        cap_reopening_at = time.monotonic()   # first drop
+                    if not restart("capture", arec, err_c):
+                        break
+                continue
+
+            if cap_reopening_at is not None:
+                outage = time.monotonic() - cap_reopening_at
+                restart_outages.append(round(outage, 1))
+                c.progress(f"  capture data back {outage:.1f}s after re-open")
+                cap_reopening_at = None
+            last_data_at = time.monotonic()
             if gap_open:
-                gaps.append(round(now - gap_start, 1))
+                gaps.append(round(last_data_at - gap_start, 1))
                 gap_open = False
             n_frames = len(chunk) // frame
             leftover = chunk[n_frames * frame:]
@@ -542,10 +705,6 @@ def run_soak(c, device):
         watch_p.stop()
         watch_c.stop()
 
-    # A gap still open when the run hit its deadline was already failed above
-    # at the moment it crossed CAPTURE_GAP_S -- close it out here so it is not
-    # missing from capture_gap_max_s just because the run ended before the
-    # stream recovered.
     if gap_open:
         gaps.append(round(time.monotonic() - gap_start, 1))
 
@@ -565,6 +724,12 @@ def run_soak(c, device):
     c.metric("rms_dbfs_timeline", timeline)
     c.metric("capture_gaps", len(gaps))
     c.metric("capture_gap_max_s", max(gaps) if gaps else 0)
+    c.metric("restarts_playback", st["playback"]["restarts"])
+    c.metric("restarts_capture", st["capture"]["restarts"])
+    c.metric("capture_restart_outage_max_s",
+             max(restart_outages) if restart_outages else 0)
+    if restart_events:
+        c.metric("restart_events", restart_events)
 
     if watch_p.xruns:
         c.fail(f"{watch_p.xruns} playback xrun(s) over the run")
