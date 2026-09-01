@@ -1,0 +1,32 @@
+# ov-snapshot capture-host config.
+# Copy to ~/.config/ov-snapshot/capture.toml and edit.
+#
+# This file belongs to ov-snapshot, not to the jockey3 test suite -- it lives
+# in its own ~/.config/ov-snapshot/ directory on purpose, so the tool stays
+# decoupled and can move to its own repo unchanged.
+
+[capture]
+
+# Path to a checkout of ov_ftdi -- specifically the directory that holds
+# LibOV.py, usb_interp.py and ov3.fwpkg. Use Frank's fork
+# (~/jockey3_linux/ov_ftdi), which carries the capture-throughput work; see
+# ov_ftdi_capture_performance.md.
+ov_ftdi_host_dir = "~/jockey3_linux/ov_ftdi/software/host"
+
+# Firmware package. Defaults to <ov_ftdi_host_dir>/ov3.fwpkg.
+# fwpkg = "~/ov_ftdi/software/host/ov3.fwpkg"
+
+# HTTP control endpoint the DUT-side trigger talks to.
+listen_host = "0.0.0.0"
+listen_port = 8464
+
+# Rolling buffer: seconds of traffic kept before a trigger, and seconds
+# recorded after one. RAM cost is roughly 15-20 MB per pre-second at 96 kHz
+# duplex; a stalled stream simply yields a short post section.
+pre_seconds = 5.0
+post_seconds = 5.0
+
+# Where snapshot .txt + .md pairs are written. On the current rig this is the
+# Seafile folder, same as manual captures.
+output_dir = "~/seafile/usb capture 2026"
+filename_prefix = "snapshot"

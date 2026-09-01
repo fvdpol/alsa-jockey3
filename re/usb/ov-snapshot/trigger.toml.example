@@ -1,0 +1,39 @@
+# ov-snapshot-trigger config, for the device under test.
+# Copy to ~/.config/ov-snapshot/trigger.toml and edit.
+
+[trigger]
+
+# Where ov-snapshot is listening (the capture host, ideally a second machine).
+url = "http://alsa-test:8464"
+
+# Kernel-log lines to trigger on. Python regex, matched with re.search against
+# each dmesg line. Keep these specific -- every match writes a trace.
+patterns = [
+    "Playback URB stream stalled",
+    "capture .*stall",
+    "queuing full USB reset",
+    "JT-MARK",
+]
+
+# Kernel module whose GNU build-id identifies the running driver binary.
+# Left blank -> build-id is reported as null in the sidecar.
+module = "snd_reloop_jockey3"
+
+# Minimum seconds between triggers, so one fault storm yields one snapshot.
+cooldown_seconds = 30.0
+
+# Recorded in the sidecar; ov-snapshot-trigger cannot know what is driving the
+# device, so name it here if you know, else leave the default.
+application = "unknown / concurrent"
+
+# Optional: pin the sidecar's trigger tag / objective instead of deriving the
+# tag from the matched line.
+# tag = "rate-change-48-96"
+# objective = "48000->96000 mid-stream capture stall, wire evidence"
+
+# How to follow the kernel log. --decode gives readable facility/level; may
+# need root depending on kernel.dmesg_restrict.
+dmesg_command = ["dmesg", "--follow", "--decode"]
+
+# Send /arm on startup and /disarm on exit.
+post_arm = true
