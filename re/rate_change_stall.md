@@ -1410,6 +1410,165 @@ says anything close to how often this fires -- always read
 `watchdog_onset_total`/`watchdog_restarted_total`/`watchdog_recovered_total`
 alongside it.
 
+## 2026-08-31: a mid-stream capture stall on `48000->96000`, and a serial-console confound
+
+A different-looking failure surfaced on `x86_64-prod` running JT-RATE-001 at
+4 s dwell, on build `55d94ed` (which carries the cold/warm start-grace split
+and the `jockey3_stream_streaming_healthy()` evidence gate). Run
+`20260831T210749Z-functional` failed: 13 watchdog stalls, **every one on the
+`48000->96000` transition**, 2 of them escalating to a full USB reset, which
+took `arecord` down with `-EIO` and failed the rate step. The same build had
+run clean three hours earlier (`20260831T183059Z`, 0 capture stalls), so it is
+intermittent.
+
+### How this differs from the fault documented above
+
+- **Detection point.** The documented stall is caught at `jockey3_pcm_hw_params()`
+  -- capture never comes up after the change. These are caught by the URB
+  liveness watchdog, *mid-stream, steady-state*, several seconds into the 4 s
+  dwell. Cold come-up is fine here: `Capture confirmed alive after 8 ms`.
+- **Divider direction.** The documented stall follows the **downward**
+  `/256 -> /512` step (toward the lower rate), in both families. This one is on
+  the **upward** `/512 -> /256` step, and only in the 48 k family:
+  `44100 -> 88200` -- the identical transition on the other oscillator -- was
+  25/25 clean in the same run.
+- **Direction of every stall confirmed by transition.** Parsing the log, all 13
+  `stream stalled (watchdog)` events are preceded by `Rate changed to 96000`
+  with `48000` before that. Zero on `96000->44100` (also involves 96 k, also
+  cross-divider), zero on `44100->88200`, zero on `88200->48000`. Sweep order
+  is `96 -> 44.1 -> 88.2 -> 48 -> loop`, so 96 k is only ever entered from
+  48 k -- this run cannot say whether `88200->96000` or `44100->96000` would
+  also stall.
+
+The `restart_timing` dataset, split by rate (a dimension added the same day),
+makes the shape explicit: cold-start latency is **flat across all four rates**
+(p50 8 ms everywhere -- a URB restart is rate-independent), while every warm
+restart and every liveness wait in the run is at 96000.
+
+### Ruled out
+
+- **ADC re-lock.** Frank checked the PCM1804 datasheet: the ADC settles within
+  31.25-41.67 us of a clock change. Two-plus orders of magnitude below the
+  multi-second fragility window. The converters are not the problem.
+- **PLL jitter on the 48 k clock.** Both master clocks are crystal oscillators:
+  `X2` 22.5792 MHz on the Ploytec schematic (44.1/88.2), `X702` 24.576 MHz on
+  the DSP schematic, a 74HCU04 oscillator (48/96). Neither is a PLL output.
+- **Distributed-net loading on `X702`.** `X702` feeds the DSP56374 and the
+  converters and is distributed across to the Ploytec section, but the copy the
+  Ploytec section receives comes through **its own dedicated buffer** -- no
+  shared-sink loading, no interference from the DSP or converters on the
+  Ploytec-side clock.
+- **A general signal-integrity problem on `X702`.** Frank's argument: 48 k and
+  96 k run off the *same* buffered `X702` clock; the `/2` that distinguishes
+  them happens at the 74HC74 in the Ploytec sample-clock-select circuit. A
+  general SI fault on that clock would make 48 k unreliable too. It is not.
+  So if the stall is a hardware effect at all, it is **specific to the
+  `/256` (96 kHz) branch** of the select circuit -- the tri-state buffer and
+  enable that route the un-halved clock, and/or the 74HC74-bypass state.
+
+### Leading hardware hypothesis (if it survives the confound below)
+
+A single corrupted edge -- runt, double, or dropped -- on the Ploytec sample
+clock at the instant the tri-state buffers switch **into** the `/256` config on
+a `48->96` change. The ISP1583 capture-DMA counter latches one edge too many or
+too few; its FIFO write pointer is off by one sample slot; the accumulating
+phase error walks the read and write pointers together until they collide and
+the capture endpoint stalls, seconds later. This fits every observation:
+`48->96` only (the glitch is on the switch *into* `/256`); intermittent (the
+glitch only sometimes lands on an edge the ISP1583 is sampling); delayed and
+mid-stream (FIFO drift takes seconds to reach collision); ADC settling time
+irrelevant (the converters are fine -- it is the *count* that is wrong).
+`44100<->88200` clean because the `X2`-side `/256` branch is a separate
+instance / has more margin.
+
+The runner-up is the driver/firmware version of the same thing: the capture URB
+DMA is (re)started before the switched clock has settled, and 96 k has less
+margin than 88.2 k. Same fix direction.
+
+### The confound: `x86_64-prod` has a serial console
+
+`x86_64-prod` (`alsa-test`) routes all kernel messages to a serial console.
+With dynamic debug on -- which it has been for the last several runs, to feed
+`restart_timing` -- every `dev_dbg` the driver emits is shifted out the UART
+**synchronously** before the calling context continues. At 115200 baud an
+80-120 character line is roughly 8 ms; the rate-change and recovery paths emit
+15-20 lines each, so **100+ ms of non-deterministic latency lands right where
+the driver is programming a rate and (re)starting streaming**, on x86_64 only.
+
+This is not a side issue. It plausibly explains the whole thing:
+
+- **The recovery poll loop instruments itself into escalation.**
+  `jockey3_wait_urb_stream_started()` polls `jockey3_stream_streaming_healthy()`
+  every ~1 ms, and both that helper's `dev_dbg_ratelimited` lines and the
+  loop's own `dev_dbg` go out the serial port *between* checks. A stream that
+  is genuinely recovering can have its `warm_start_grace_ms` (150 ms) window
+  expire while the CPU is busy writing "cadence plausible but last completion
+  is stale" to the UART -- and then it escalates to a USB reset. The "x9"
+  repetition of that line in the failing run is the loop doing serial I/O, not
+  the capture endpoint being nine-times-dead.
+- **It inverts the platform reference.** `x86_64-prod` was historically the
+  rock-solid reference and `arm64-prod` the one that needed occasional
+  restarts. That flipped the moment dyn_dbg plus the serial console came on:
+  the arm64 host has no serial console, so its debug output only reaches the
+  ring buffer.
+- **It contaminates `restart_timing`.** The measurement mechanism is
+  `dev_dbg` lines; on this host each one is ~8 ms instead of ~us. Any x86_64
+  number taken with `console_loglevel >= 7` and dyn_dbg on is suspect. Treat a
+  lowered console loglevel as a precondition for the dataset, not just
+  "dyndbg on".
+
+### Angles to test, in order
+
+1. **Re-run the 96 kHz sweep on x86_64 with the console quiet.** Set
+   `console_loglevel` below 7 first (`tests/hw/priv/jockey3-testctl
+   printk-console 4`). Debug still fills the ring buffer and the `kmsg.log`
+   whole-run capture (`dmesg --follow`), it just stops being shifted out the
+   UART in the driver's critical path. If the stalls vanish, this was a
+   measurement artifact and the driver behaviour is fine. If they persist, the
+   fault is real and the serial console merely amplified it into visibility.
+2. **If real: scope the Ploytec sample clock across a `48->96` change.** Probe
+   the 74HC74 output / the tri-state select outputs, with a `bpftrace` or
+   `/dev/kmsg` marker for when the driver issues `SET_RATE` and when it
+   restarts the URBs. Look for a glitch on the switch edge and whether it falls
+   inside the URB-restart window. That single trace separates hardware from
+   driver and sizes any extra settle delay that would cover it.
+3. **Re-run `sweep_order=as-given rates=[96000,48000,96000,44100]` at >=4 s
+   dwell, console-quiet, on the current build.** Apples-to-apples against the
+   2026-08-16 table -- which was short-dwell ("smoke", ~1 s) and only ever
+   measured the *come-up* stall, never a sustained 96 kHz dwell, and predates
+   the watchdog acting on mid-stream stalls. This says whether `48->96` is
+   genuinely a new failure mode or one that was always there and unwatched.
+4. **OpenVizsla: compare the `48->96` timing, vendor vs our driver.** The macOS
+   corpus already holds ~9 `48000->96000` transitions (see the 08-17 section).
+   Pull the `SET_RATE` burst timing and the post-change quiet window from those
+   and from a fresh Linux trace through `re/usb/extract_events.py` ->
+   `rate_change_stream_timing.py` / `rate_burst_profile.py`, and see whether
+   the vendor leaves a longer or differently-placed window on the upward
+   in-family step specifically. Caveat: the driver's sequence has moved since
+   the 08-17 comparison, so a fresh Linux capture is needed, not the old one.
+5. **Try divergence 1 (send `SET_STATUS` / `0x49` on a rate change) and
+   re-test at 4 s dwell, console-quiet.** Re-arming the ISP1583 capture DMA
+   against a settled clock is exactly the remedy an off-by-one count would
+   need; it is already the most-actionable item from the vendor comparison.
+6. **Driver settle delay.** `ploytec_set_rate()`'s delays are fixed and
+   rate-independent (50 ms pre-write, 10.5 ms, 50 ms post-verify), inferred
+   from vendor traces that may not have covered this transition under sustained
+   load. A longer settle before `jockey3_start_urbs()`, conditional on the
+   `X702` family and the upward step, is a cheap thing to try if 5 does not
+   land it.
+
+### Interaction with the evidence gate
+
+Whatever the root cause, the *response* changed with `b20b77b`. The old
+`jockey3_check_urb_stream_alive()` accepted the first trickle completion after
+a light restart as "recovered" and never escalated; the evidence gate correctly
+refuses a trickle-then-silence and escalates to a USB reset. So a marginal
+96 kHz capture recovery that `0a4822c` would have limped through now becomes a
+reset -- and, in JT-RATE-001, a failed rate step. That is the gate working as
+designed; it also means "was `48->96` clean before?" cannot be answered by
+comparing pass/fail across builds, only by comparing the underlying
+`watchdog_onset` / stall counts.
+
 ## Open questions, in the order worth attacking
 
 1. ~~Measure per-change incidence on each branch, one variable at a time.~~
@@ -1438,6 +1597,9 @@ alongside it.
 6. **Does sending `SET_STATUS` unconditionally fix the capture stall?** New
    2026-08-17. The single most actionable item to come out of the vendor
    comparison -- see divergence 1 in that section.
+7. **Is the `48000->96000` mid-stream stall real, or a serial-console
+   artifact?** New 2026-08-31. Re-run console-quiet first (angle 1 in that
+   section); everything else is downstream of that answer.
 
 ## Next steps: characterize vendor up/down behavior before touching the driver
 
