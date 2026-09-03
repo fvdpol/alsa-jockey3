@@ -103,9 +103,29 @@ confirm audio still flows afterwards.
 
 The rate list is deliberately not sorted: the failure is worst on a downward
 switch, so a sorted sweep would systematically test the easy direction.
+
+SWEEP ORDER
+-----------
+`sweep_order` picks how the rate list is walked each loop:
+
+    interleave  (default)  alternate from the ends of the sorted list, so every
+                step is large and alternating -- the shape that provokes the
+                fault. Fixed: the same order every loop.
+    as-given    walk `rates` verbatim, for a sweep hand-built to separate a
+                hypothesis the default order cannot (see interleave()).
+    random      a fresh random permutation of the distinct rate set each loop.
+                Every step within a loop is a real change, and the loop
+                boundary is too -- the first rate of a loop is resampled until
+                it differs from the last rate of the previous loop, so no
+                transition is silently skipped. Over a long endurance run this
+                exercises every ordered pair of rates in both directions and
+                averages out the direction/family correlation the fixed orders
+                carry. `sweep_seed` (recorded on every run) makes it
+                reproducible; leave it unset for a fresh seed per run.
 """
 
 import os
+import random
 import re
 import subprocess
 import sys
@@ -644,6 +664,34 @@ def interleave(rates):
     return out
 
 
+def random_orders(rates, rng):
+    """Yield an unbounded stream of loop orderings for sweep_order=random.
+
+    Each ordering is a fresh permutation of the distinct rate set, so every
+    step within a loop is a real change. The first rate of each loop is
+    resampled until it differs from the last rate of the previous loop, so the
+    loop boundary is a real change too -- otherwise every `iterations_per_run`th
+    transition would be a no-op that the sweep never actually tests.
+
+    Unlike interleave(), consecutive loops draw independent permutations, so
+    over a long run every ordered pair of rates is exercised in both directions
+    and the direction/family confound the fixed orders carry (see interleave())
+    averages out rather than being structural.
+    """
+    pool = sorted(set(rates))
+    last = None
+    while True:
+        if len(pool) < 2:
+            order = pool[:]
+        else:
+            order = pool[:]
+            rng.shuffle(order)
+            while last is not None and order[0] == last:
+                rng.shuffle(order)
+        last = order[-1] if order else last
+        yield order
+
+
 def rate_pretty(rate):
     return f"{rate // 1000}k" if rate % 1000 == 0 else f"{rate / 1000:.1f}k"
 
@@ -677,8 +725,24 @@ def main():
     # shape that provokes the fault -- but it also fixes the order, and the
     # order is what decides which hypotheses the sweep can separate. as-given
     # hands that back, so a sweep can be built to break the direction/family
-    # confound that the default four rates cannot. See interleave().
-    if str(c.params.get("sweep_order", "interleave")) != "as-given":
+    # confound that the default four rates cannot. random draws a fresh
+    # permutation each loop (see random_orders()): no fixed correlation to
+    # break, at the cost of a per-run seed to stay reproducible. See the
+    # module docstring's SWEEP ORDER section.
+    sweep_order = str(c.params.get("sweep_order", "interleave"))
+    if sweep_order not in ("interleave", "as-given", "random"):
+        c.blocked(f"sweep_order must be interleave, as-given or random, "
+                  f"not {sweep_order!r}")
+    sweep_seed = None
+    order_stream = None
+    if sweep_order == "random":
+        sweep_seed = (int(c.params["sweep_seed"])
+                      if c.params.get("sweep_seed") is not None
+                      else random.randrange(2 ** 32))
+        order_stream = random_orders(rates, random.Random(sweep_seed))
+        rates = sorted(set(rates))       # the base pool; per-loop order comes
+                                         # from order_stream
+    elif sweep_order != "as-given":
         rates = interleave(rates)
     seconds = float(c.params.get("seconds_per_rate", 1))
     loops = int(c.params.get("iterations_per_run", 10))
@@ -764,7 +828,15 @@ def main():
     # 44.1/48 step was unresolvable and the case said so on every run; at 5%
     # it is 8.1% and plainly visible, so the whole default sweep is now
     # measurable and there is nothing to warn about.
-    blind = sweep_blind_spots(rates, steady_tol)
+    if sweep_order == "random":
+        # random walks every ordered pair over a long run, so the blind set is
+        # every pair closer than the tolerance, not just the fixed order's
+        # cyclic neighbors.
+        blind = [(a, b, round(abs(a / b - 1.0), 3))
+                 for a in rates for b in rates
+                 if a != b and abs(a / b - 1.0) <= steady_tol]
+    else:
+        blind = sweep_blind_spots(rates, steady_tol)
     steady = []
     play_ratios = []
     capture_fracs = []
@@ -787,10 +859,21 @@ def main():
     t0 = time.time()
     aborted = False
 
-    c.progress(f"    sweep {' -> '.join(rate_pretty(r) for r in rates)}"
-               f", {seconds:g}s per rate, gap {gap_s:g}s"
-               f", rate change performed by {changer}"
-               + ("" if with_capture else ", NO capture stream"))
+    if sweep_order == "random":
+        c.progress(f"    sweep random order per loop (seed {sweep_seed}), pool "
+                   f"{' '.join(rate_pretty(r) for r in rates)}"
+                   f", {seconds:g}s per rate, gap {gap_s:g}s"
+                   f", rate change performed by {changer}"
+                   + ("" if with_capture else ", NO capture stream"))
+        c.note(f"sweep_order=random: a fresh permutation of "
+               f"{', '.join(str(r) for r in rates)} each loop, seed "
+               f"{sweep_seed}. Reproduce this exact run with "
+               f"--param sweep_order=random --param sweep_seed={sweep_seed}")
+    else:
+        c.progress(f"    sweep {' -> '.join(rate_pretty(r) for r in rates)}"
+                   f", {seconds:g}s per rate, gap {gap_s:g}s"
+                   f", rate change performed by {changer}"
+                   + ("" if with_capture else ", NO capture stream"))
 
     # One line per loop, per tests/README.md "Live feedback while a case runs".
     # A transient line names the rate being exercised and is replaced by the
@@ -799,7 +882,8 @@ def main():
     total = loops * len(rates)
     for loop in range(1, loops + 1):
         bad = []
-        for rate in rates:
+        loop_rates = next(order_stream) if order_stream is not None else rates
+        for rate in loop_rates:
             changes += 1
             c.status(f"    loop {loop}/{loops}  ....  {rate} Hz "
                      f"({changes}/{total} changes)")
@@ -1010,8 +1094,10 @@ def main():
                 time.sleep(gap_s)
                 gaps.append(time.time() - g0)
 
-        rates_ok = len(rates) - len(bad)
-        line = f"{rates_ok}/{len(rates)} rates played"
+        rates_ok = len(loop_rates) - len(bad)
+        line = f"{rates_ok}/{len(loop_rates)} rates played"
+        if order_stream is not None:
+            line += " [" + " ".join(rate_pretty(r) for r in loop_rates) + "]"
         if with_capture:
             line += (", capture " + ", ".join(
                 f"{v} at {r} Hz" for r, v, _ in bad_capture)
@@ -1054,6 +1140,9 @@ def main():
     c.metric("rate_check_blind_steps", len(blind))
     c.metric("timing_check_enforced", timing_enforced)
     c.metric("rate_change_stream", changer)
+    c.metric("sweep_order", sweep_order)
+    if sweep_seed is not None:
+        c.metric("sweep_seed", sweep_seed)
     c.metric("gap_seconds", gap_s)
     if gaps:
         c.metric("gap_measured_s_min", round(min(gaps), 3))
@@ -1521,8 +1610,10 @@ def main():
             f"measurement is unaffected by duration, needing only "
             f"{settle_s + steady_min_s:g}s of stream to work.")
     if blind:
+        what = ("transitions this random sweep can draw" if sweep_order == "random"
+                else "of this sweep's steps")
         c.note(
-            f"{len(blind)} of this sweep's steps are smaller than the "
+            f"{len(blind)} {what} are smaller than the "
             f"{steady_tol:.0%} tolerance -- "
             + "; ".join(f"{a}->{b} is {d:.1%}" for a, b, d in blind)
             + ". A device that ignored those changes would not be detected "

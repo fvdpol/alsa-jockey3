@@ -19,6 +19,7 @@ import json
 import ast
 import importlib.util
 import os
+import random
 import re
 import subprocess
 import sys
@@ -1421,6 +1422,53 @@ def test_rate_change_case_runs():
     check(any("re-detected" in n for n in noc.notes),
           "and warns that its stall count is not per-change incidence",
           str(noc.notes))
+
+    # sweep_order=random: a fresh permutation of the rate set each loop, so
+    # every step is a real change; the first rate of a loop is resampled until
+    # it differs from the last of the loop before, so no transition is skipped
+    # at the boundary. Reproducible from the seed the run records.
+    pool = [44100, 48000, 88200, 96000]
+    g = m.random_orders(pool, random.Random(99))
+    orders = [next(g) for _ in range(20)]
+    check(all(sorted(o) == sorted(pool) for o in orders),
+          "each random loop is a permutation of the whole rate set")
+    check(all(o[i] != o[i + 1] for o in orders for i in range(len(o) - 1)),
+          "so no step within a loop is a no-op")
+    check(all(orders[k][0] != orders[k - 1][-1]
+              for k in range(1, len(orders))),
+          "and the first rate of a loop is never the last of the one before")
+    g_again = m.random_orders(pool, random.Random(99))
+    check([next(g_again) for _ in range(20)] == orders,
+          "a fixed seed reproduces the sequence exactly")
+
+    r1 = run({"sweep_order": "random", "sweep_seed": "42",
+              "iterations_per_run": 3, "seconds_per_rate": 1}, "live")
+    r2 = run({"sweep_order": "random", "sweep_seed": "42",
+              "iterations_per_run": 3, "seconds_per_rate": 1}, "live")
+    check(not r1.fails, "a random-order sweep runs clean", str(r1.fails[:1]))
+    check(r1.metrics.get("sweep_order") == "random"
+          and r1.metrics.get("sweep_seed") == 42,
+          "the order and seed are recorded for replay",
+          str((r1.metrics.get("sweep_order"), r1.metrics.get("sweep_seed"))))
+    check(r1.metrics.get("rate_changes") == 12, "3 loops x 4 rates",
+          str(r1.metrics.get("rate_changes")))
+    seq1 = {k: v for k, v in r1.metrics.items()
+            if k.startswith("transition_change_")}
+    seq2 = {k: v for k, v in r2.metrics.items()
+            if k.startswith("transition_change_")}
+    check(seq1 == seq2 and len(seq1) == 12,
+          "the same seed replays the same 12 transitions", str(seq1))
+    rand_default = run({"sweep_order": "random", "iterations_per_run": 1,
+                        "seconds_per_rate": 1}, "live")
+    check(isinstance(rand_default.metrics.get("sweep_seed"), int),
+          "an unset seed is chosen and recorded, not left blank",
+          str(rand_default.metrics.get("sweep_seed")))
+    try:
+        run({"sweep_order": "wibble", "iterations_per_run": 1}, "live")
+        raise RuntimeError("an unknown sweep_order was not rejected")
+    except AssertionError as e:
+        check("sweep_order must be" in str(e),
+              "an unknown sweep_order is rejected, not silently interleaved")
 
 
 def test_rate_change_log_attribution():

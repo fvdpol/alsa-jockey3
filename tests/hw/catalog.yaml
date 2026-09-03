@@ -999,7 +999,16 @@ cases:
       # separate hypotheses the default order cannot: with these four rates
       # both downward steps cross clock families and both upward steps stay
       # within one, so direction and family are perfectly correlated.
+      # random draws a fresh permutation of the rate set each loop, with the
+      # loop boundary also forced to be a real change; over a long endurance
+      # run it walks every ordered pair in both directions and breaks that
+      # correlation without a hand-built rate list. Pair it with sweep_seed
+      # (recorded on every run) to reproduce a specific sweep. Best suited to
+      # JT-RATE-003.
       sweep_order: interleave
+      # Only read when sweep_order is random. Unset -> a fresh seed per run,
+      # emitted as the sweep_seed metric so the run can still be replayed.
+      # sweep_seed: 0
       rate_change_stream: capture
       # Idle time between changes, with nothing open. Kept separate from
       # seconds_per_rate so that "the device needs recovery time between
@@ -1042,7 +1051,8 @@ cases:
        # re/rate_change_stall.md asks for.
        stalls_direction_up, stalls_direction_down, stalls_direction_first,
        stalls_family_cross, stalls_family_within,
-       rate_change_stream, gap_seconds, lead_stream_configure_timeouts,
+       rate_change_stream, sweep_order, sweep_seed, gap_seconds,
+       lead_stream_configure_timeouts,
        # The steady-state clock measurement, and the start-up cost it excludes.
        steady_ratio_playback_min, steady_ratio_playback_max,
        steady_ratio_capture_min, steady_ratio_capture_max,
@@ -1137,6 +1147,11 @@ cases:
 
         ./runner.py --case JT-RATE-001 --unattended \
             --param rate_change_stream=playback --param gap_seconds=3
+
+      For an endurance run that should not walk the same order every loop, add
+      --param sweep_order=random (see the note on sweep_order above). The
+      chosen seed is recorded as the sweep_seed metric; pass it back with
+      --param sweep_seed=N to replay a run exactly.
 
       run.json records the resolved parameters, so every arm identifies itself.
 
@@ -1263,7 +1278,8 @@ cases:
        branch_reset, branch_recovered_on_open, branch_deferred, branch_clean,
        stalls_direction_up, stalls_direction_down, stalls_direction_first,
        stalls_family_cross, stalls_family_within,
-       rate_change_stream, gap_seconds, lead_stream_configure_timeouts,
+       rate_change_stream, sweep_order, sweep_seed, gap_seconds,
+       lead_stream_configure_timeouts,
        steady_ratio_playback_min, steady_ratio_playback_max,
        steady_ratio_capture_min, steady_ratio_capture_max,
        steady_error_playback_pct, steady_error_capture_pct,
