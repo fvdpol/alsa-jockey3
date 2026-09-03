@@ -1,9 +1,14 @@
 # OpenVizsla capture throughput on a busy High-Speed bus
 
-Status: **open investigation.** This is a separate document on purpose --
-`../triggered_capture.md` is about the triggered-capture tool; this is about
-whether `ov_ftdi` / `LibOV` can keep up with the data rate at all, which is a
-prerequisite the tool cannot fix from above. Expect this to be a deep dive.
+Status: **resolved for `ov-snapshot`** (2026-09-02) -- the gateware NAK filter
+gives a lossless, correctly-framed capture as long as nothing does register I/O
+while the stream runs, and `ov-snapshot` does none. See
+"[2026-09-02: fix A works](#2026-09-02-fix-a-works----the-nak-filter-is-viable)"
+below; everything above it is the investigation that led there and is kept for
+context. This is a separate document on purpose -- `../triggered_capture.md` is
+about the triggered-capture tool; this is about whether `ov_ftdi` / `LibOV` can
+keep up with the data rate at all, which is a prerequisite the tool cannot fix
+from above.
 
 ## The problem
 
@@ -34,14 +39,16 @@ Jockey 3, nothing else. The packet volume is 96 kHz duplex plus High-Speed
 SOF/handshake/NAK overhead -- ~250k packets/s at 44.1 kHz, roughly double at
 96 kHz -- not other devices.
 
-### The designed relief valve is broken
+### The designed relief valve looked broken -- it is not (see 2026-09-02 below)
 
 `--filter-sof` / `--filter-nak` drop those packets in gateware before they
-reach the host. On the bundled bitstream (`ov3.fwpkg`, 2024/02/11) they
-instead corrupt the byte stream: the output degenerates into
-`Unmatched byte NN - discarding` from the `LibOV` framing layer (~777 usable
-lines in 30 s vs ~3.6 M unfiltered). So today every wire packet reaches
-Python.
+reach the host. Enabling them *appeared* to corrupt the byte stream: the output
+degenerates into `Unmatched byte NN - discarding` from the `LibOV` framing
+layer (~777 usable lines in 30 s vs ~3.6 M unfiltered). This was later traced
+(N7-N12, 2026-09-02) to **concurrent register I/O**, not the filter -- see the
+resolution section at the end of this document. `ov-snapshot` does no register
+I/O while streaming, so the filter is safe for it and the rest of this
+investigation section is superseded.
 
 ## Profiling results (2026-09-01, `py-spy` on `alsa-test`, single-host)
 
@@ -220,6 +227,90 @@ Remaining routes to lossless, in order of promise:
 if neither A nor C happens soon it can ship at ~99.99 % with that as the
 honesty signal.
 
+## 2026-09-02: fix A works -- the NAK filter is viable
+
+**The gateware NAK filter is not broken.** The `Unmatched byte NN` corruption
+seen whenever `--filter-nak` / `--filter-sof` was set is caused by **register
+I/O running concurrently with the capture**, not by the filter itself.
+
+### Root cause of the "filter corruption"
+
+`ovctl.py sniff`'s status loop reads FPGA registers about once a second. A
+register read is a synchronous `libusb_bulk_transfer` issued from the **main
+thread**, on the **same libusb context** the `__comms` thread is pumping with
+`libusb_handle_events` for the IN stream. With two threads driving one context,
+IN-stream URB completions can be reaped out of submission order; a ~4 KB block
+of the stream lands in `__buf` in the wrong place, `LibOV`'s framer loses sync,
+and there is no resync marker in the wire format, so it never recovers. A
+stray `0x55` byte from the misframed data then trips
+`assert r_addr == io_ext` (`LibOV.py:363`) -- a downstream symptom, not the
+cause.
+
+`--filter-nak` makes this easy to hit because the filtered stream is bursty
+with long idle gaps: the `__comms` thread stops reaping between bursts, so a
+register read issued in a gap is much more likely to reap the next burst's
+completions itself. An unfiltered (dense) stream keeps `__comms` continuously
+in `libusb_handle_events`, so the races are rare and captures stay clean --
+which is exactly why the filter looked like the guilty party.
+
+Evidence: 12 MB of raw filtered stream teed to disk and framed offline was
+100 % clean (no `Unmatched`); all `sim/test_whacker*` pass; neutering
+`do_sniff`'s status loop made 4/5 `--filter-nak` runs clean. Full trail in
+`re/usb/ov-snapshot/` working notes (N1-N12).
+
+### `ov-snapshot` sidesteps it entirely
+
+`ov_snapshot.py` does **all** its register I/O once, in `start_sniff()` /
+`stop_sniff()`, and **none between them** -- overflow is read from the in-band
+`perr_total` counter (B2), never a register. So the filter is safe to enable.
+Two changes make it usable:
+
+- `capture.toml` `filter_nak = true` -> `start_sniff()` sets `CSTREAM_CFG`
+  bit 2 (the whacker's `_cfg.storage[2]`, `FilterNAK` enable) alongside the
+  bit-0 stream enable. Default off.
+- `SIGTERM` now runs the same teardown as Ctrl-C (raises `KeyboardInterrupt`,
+  so `stop_sniff()` + `dev.close()` run). A hard kill used to leave the SDRAM
+  capture engine running and the next run started against a dirty ring.
+
+### A/B result (rig: `alsa-test` OV + `pi4test` DUT, duplex, 3 s + 3 s window)
+
+| | 48 kHz off | 48 kHz **on** | 96 kHz off | 96 kHz **on** |
+|---|---|---|---|---|
+| packets in 6 s slice | 5,093,733 | **300,363** | 4,556,528 | **552,587** |
+| host packet rate (ring) | ~1.25 M/s | **~50 k/s** | ~1.13 M/s | **~92 k/s** |
+| `overflow_delta` | 849 | **0** | 1161 | **0** |
+| render failures | 0 | 0 | 0 | 0 |
+| verdict | dropped packets | **timing-sound** | dropped packets | **timing-sound** |
+
+The filter-**on** rows are trustworthy (`overflow_delta` 0). The filter-off
+"host packet rate" is inflated by overflow-marker packets -- once the ring is
+behind, `LibOV` delivers a marker per dropped packet (the `packets_seen` caveat
+above) -- so read it as "far more than the host can frame", not as a true wire
+rate. The real wire rate is ~200 k packets/s (measured separately from raw
+traces); the filter removes the ~80 % of it that is handshake noise.
+
+Baseline token mix at 48 kHz: **2,442,097 NAK + 1,567,055 PING** out of 5.1 M
+-- ~80 % of all traffic is the NAK/PING storm, and that is what overflows the
+ring. Filter on: **zero NAK** in the trace, every `IN` pairs with a real
+`DATA0/DATA1 + ACK`, `PING`/`NYET` flow control preserved, and
+`grep -icE 'unmatched|malformed|desync|error'` over the whole trace returns
+**0**. Payloads are intact 515-byte Ploytec frames with valid trailing
+checksums.
+
+So the packet count drops 8-17x and the capture is **loss-free and correctly
+framed** at both rates. 44.1 / 88.2 kHz not swept -- 48 and 96 bracket them and
+the rate is known to be sample-rate-independent.
+
+### What this means
+
+- `ov-snapshot`'s capture path is **viable now**, independent of any change
+  landing in `ov_ftdi` upstream.
+- The host-side single-threaded-libusb fix and the selectable/adaptive NAK
+  strategies (below) become upstream-goodwill / nice-to-have items, not
+  blockers. The single-thread fix is still the right general answer for
+  interactive `ovctl.py sniff`, where the status loop is wanted.
+- Route C (C framing) is no longer on the critical path.
+
 ## The 2026-09-01 `alsa-test` freeze -- device contention, not the data rate
 
 `alsa-test` hard-froze during the 44.1 kHz run and had to be reset. Its
@@ -298,18 +389,20 @@ which is a separate decision.
 
 ## Next actions
 
-1. B1 + B2 kept; B3 tried, net-neutral, reverted (both fork clones back to
-   B1 + B2). Python side is done -- ~99.99 % capture, ~50 pkt/s dropped at
-   every rate.
-2. **A -- gateware NAK filtering.** Now the only path to lossless. Frank is
-   bringing up ancient Xilinx ISE (likely containerized). Once it builds: fix
-   whatever corrupts the byte stream when the filter bits are set, rebuild,
-   re-sweep. Expect the packet rate to drop ~10x. (C framing is the fallback
-   if ISE stalls -- see "Where this stands".)
-3. Rig deployment (`ov_snapshot_trigger.py` -> `pi4test` dmesg,
-   `~/.config/ov-snapshot/`) -- once capture is lossless, or accept ~99.99 %
-   and ship with the overflow (`perr`) delta in every sidecar as the honesty
-   signal (already recorded).
+1. B1 + B2 kept; B3 tried, net-neutral, reverted. Python side is done.
+2. **A -- gateware NAK filtering: DONE (2026-09-02).** No gateware change was
+   needed -- the filter works; the corruption was concurrent register I/O.
+   `ov_snapshot.py` gained a `filter_nak` toggle + a `SIGTERM` handler; A/B on
+   the rig at 48 and 96 kHz shows loss-free, correctly-framed capture with the
+   filter on (8-17x fewer packets, `overflow_delta` 0). See the 2026-09-02
+   section.
+3. Optional: sweep 44.1 / 88.2 kHz for completeness (48 + 96 already bracket
+   them). Plumb `filter_nak` through `ov_snapshot_trigger.py` so a triggered
+   run can request it. Rig deployment (`ov_snapshot_trigger.py` -> `pi4test`
+   dmesg, `~/.config/ov-snapshot/`).
+4. Upstream (goodwill, not blocking): the single-threaded-libusb fix for
+   interactive `ovctl.py sniff`, and selectable/adaptive NAK-filter strategies
+   -- RFC with the `ov_ftdi` maintainers.
 
 ## B1 / B2 implemented (2026-09-01)
 
@@ -396,3 +489,11 @@ build); the rest read plumbing.
 - 2026-09-01: Frank asked whether multi-core could help -- written up in "Can
   it be spread over cores?". Short version: not plain threads (GIL); C framing
   or free-threaded 3.13 could, but A still wins.
+- 2026-09-02: root-caused the `--filter-nak` "corruption" to concurrent
+  register I/O over a shared libusb context (not the gateware filter). Added a
+  `filter_nak` toggle and a `SIGTERM` teardown handler to `ov_snapshot.py`.
+  A/B on the rig (`alsa-test` OV, `pi4test` DUT) at 48 and 96 kHz duplex:
+  filter on -> 8-17x fewer packets, `overflow_delta` 0, 0 render failures,
+  zero NAK and zero framing errors in the trace. Capture path is now viable
+  without any upstream `ov_ftdi` change. Investigation resolved for
+  `ov-snapshot`; see the "2026-09-02: fix A works" section.

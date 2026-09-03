@@ -22,6 +22,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -51,6 +52,7 @@ def load_config(path):
     cap.setdefault("listen_port", 8464)
     cap.setdefault("pre_seconds", 5.0)
     cap.setdefault("post_seconds", 5.0)
+    cap.setdefault("filter_nak", False)
     out = cap.get("output_dir", ".")
     cap["output_dir"] = os.path.abspath(os.path.expanduser(out))
     cap.setdefault("filename_prefix", "snapshot")
@@ -167,6 +169,7 @@ class Device:
     """Thin wrapper around a LibOV OVDevice: open, arm sniff, read counters."""
 
     def __init__(self, cfg):
+        self.cfg = cfg
         sys.path.insert(0, cfg["ov_ftdi_host_dir"])
         import LibOV
         import usb_interp
@@ -229,9 +232,17 @@ class Device:
             if not (d.regs.ucfg_stat.rd() & 0x1):
                 raise SystemExit("OpenVizsla: ULPI clock has not started (osc?)")
             d.ulpiregs.func_ctl.wr(0x48)    # HS, non-drive
-            # cfg bit 0 = stream enable; gateware SOF/NAK filters are left OFF
-            # (they corrupt the byte stream on the bundled bitstream).
-            d.regs.CSTREAM_CFG.wr(1)
+            # CSTREAM_CFG bit 0 = stream enable, bit 2 = gateware NAK filter.
+            # The NAK filter drops the PING/NAK + IN/NAK handshake storm before
+            # it reaches the host, cutting the packet rate by ~10x. It corrupts
+            # the byte stream only when register I/O runs concurrently with the
+            # capture (the sync libusb_bulk_transfer for an EP0 read races the
+            # comms thread's stream reaping); this tool does zero register I/O
+            # while streaming -- see perr_total() -- so the filter is safe here.
+            cfg_bits = 1
+            if self.cfg.get("filter_nak"):
+                cfg_bits |= (1 << 2)
+            d.regs.CSTREAM_CFG.wr(cfg_bits)
 
     def stop_sniff(self):
         d = self.dev
@@ -448,6 +459,13 @@ def main():
                     help="start already armed (default: wait for POST /arm)")
     args = ap.parse_args()
 
+    # SIGTERM must run the same teardown as Ctrl-C: stop the SDRAM capture
+    # engine and close the device. A hard kill skips that and leaves the FPGA
+    # streaming into its ring, so the next run starts against a dirty buffer.
+    def _on_sigterm(_signo, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     cfg = load_config(args.config)
     print(f"[ov-snapshot] ov_ftdi: {cfg['ov_ftdi_host_dir']}")
     print(f"[ov-snapshot] output:  {cfg['output_dir']}")
@@ -475,7 +493,7 @@ def main():
         print(f"[ov-snapshot] listening on {cfg['listen_host']}:"
               f"{cfg['listen_port']} ({'armed' if args.arm else 'not armed'})")
         srv.serve_forever()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:          # SIGINT (Ctrl-C) or SIGTERM
         print("\n[ov-snapshot] shutting down")
     finally:
         srv.shutdown()

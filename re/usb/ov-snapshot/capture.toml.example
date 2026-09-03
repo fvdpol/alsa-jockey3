@@ -30,3 +30,11 @@ post_seconds = 5.0
 # Seafile folder, same as manual captures.
 output_dir = "~/seafile/usb capture 2026"
 filename_prefix = "snapshot"
+
+# Enable the gateware NAK filter (CSTREAM_CFG bit 2). Drops the PING/NAK and
+# IN/NAK handshake storm in the FPGA, cutting the host packet rate by ~10x --
+# useful when the DUT's handshake traffic (e.g. a Ploytec audio device polling
+# its IN endpoints) saturates the single-threaded receive path and overflows
+# the SDRAM ring. Safe for ov-snapshot because it does no register I/O while
+# streaming; do NOT enable it for a workflow that polls registers mid-capture.
+filter_nak = false

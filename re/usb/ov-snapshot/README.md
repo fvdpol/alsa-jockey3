@@ -62,10 +62,15 @@ cannot support a timing conclusion.
 
 ## Known limits / escape routes
 
-- **Sustained capture at 96 kHz does not work yet.** The bottleneck is
-  `ov_ftdi` / `LibOV`'s Python receive path, and the gateware SOF/NAK filters
-  that would relieve it are broken on the bundled bitstream. Full analysis and
-  fix tracking: `ov_ftdi_capture_performance.md`. Frank maintains a fork of
+- **Sustained capture of a busy DUT can outrun `ov_ftdi` / `LibOV`'s
+  single-threaded Python receive path**, overflowing the OpenVizsla SDRAM ring
+  (a Ploytec audio device polling its IN endpoints puts ~200k packets/s on the
+  wire, most of it PING/NAK). Set `filter_nak = true` in `capture.toml` to have
+  the FPGA drop the handshake storm (`CSTREAM_CFG` bit 2), which cuts the host
+  packet rate by ~10x. The filter is widely believed to corrupt the byte
+  stream, but that only happens when register I/O runs concurrently with the
+  capture; ov-snapshot does none while streaming, so it is safe here. Full
+  analysis: `ov_ftdi_capture_performance.md`. Frank maintains a fork of
   `ov_ftdi` for this (clone at `~/jockey3_linux/ov_ftdi`); point
   `capture.toml`'s `ov_ftdi_host_dir` there.
 - `render_verbose` replays raw packets through `usb_interp.USBInterpreter`; the
