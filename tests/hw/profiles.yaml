@@ -33,7 +33,6 @@ profiles:
       - {id: JT-CODEC-002, iterations: 1}
       - {id: JT-CODEC-003, iterations: 1}
       - {id: JT-CODEC-004, iterations: 1}
-      - {id: JT-MIDI-006,  iterations: 1}
 
   smoke:
     description: >
@@ -84,7 +83,6 @@ profiles:
       - {id: JT-BUILD-006, iterations: 1}
       - {id: JT-CODEC-001, iterations: 1}
       - {id: JT-CODEC-002, iterations: 1}
-      - {id: JT-MIDI-006,  iterations: 1}
       - {id: JT-PROBE-001, iterations: 5}
       - {id: JT-PROBE-002, iterations: 1}
       - {id: JT-PROBE-003, iterations: 1}
@@ -188,7 +186,6 @@ profiles:
       - {id: JT-CODEC-002, iterations: 1}
       - {id: JT-CODEC-003, iterations: 1}
       - {id: JT-CODEC-004, iterations: 1}
-      - {id: JT-MIDI-006,  iterations: 1}
       - {id: JT-PROBE-001, iterations: 10, params: {iterations_per_run: 20}}
       - {id: JT-PROBE-002, iterations: 1, params: {iterations_per_run: 200}}
       - {id: JT-PROBE-003, iterations: 1}

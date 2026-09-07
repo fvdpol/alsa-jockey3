@@ -58,31 +58,3 @@ config SND_USB_JOCKEY3_CODEC_KUNIT_TEST
 	  to the KUnit documentation in Documentation/dev-tools/kunit/.
 
 	  If unsure, say N.
-
-config SND_USB_JOCKEY3_MIDI_KUNIT_TEST
-	bool "KUnit tests for the MIDI Running Status expander" if !KUNIT_ALL_TESTS
-	depends on SND_USB_JOCKEY3
-	depends on KUNIT
-	depends on KUNIT=y || SND_USB_JOCKEY3=m
-	default KUNIT_ALL_TESTS
-	help
-	  Enable KUnit tests for the generic MIDI 1.0 Running Status
-	  expander used ahead of MIDI OUT. The tests prove the expander
-	  correct against a randomized round-trip property -- messages are
-	  compressed into Running Status form and expanded back out, then
-	  parsed by a model with no concept of Running Status at all -- plus
-	  a handful of directed cases pinning documented boundary behavior.
-
-	  Because the expander functions are internal to the driver, the
-	  tests are linked into the snd-reloop-jockey3 module itself rather
-	  than built separately.
-
-	  KUnit tests run during boot and output the results to the debug
-	  log in TAP format (https://testanything.org/). Only useful for
-	  kernel devs running KUnit test harness and are not for inclusion
-	  into a production build.
-
-	  For more information on KUnit and unit tests in general, refer
-	  to the KUnit documentation in Documentation/dev-tools/kunit/.
-
-	  If unsure, say N.

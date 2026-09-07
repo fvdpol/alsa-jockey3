@@ -140,8 +140,7 @@ setup_tree() {
 		 ploytec_proto.c ploytec_proto.h \
 		 ploytec_codec.c ploytec_codec.h \
 		 ploytec_midi.c  ploytec_midi.h \
-		 ploytec_codec_kunit.c ploytec_codec_test_vectors.h \
-		 ploytec_midi_kunit.c; do
+		 ploytec_codec_kunit.c ploytec_codec_test_vectors.h ; do
 		cp "$SRC_DIR/$f" "$dst/$f"
 	done
 }

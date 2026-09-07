@@ -41,7 +41,6 @@ FILES=(
 	"ploytec_midi.h:sound/usb/jockey3/ploytec_midi.h"
 	"ploytec_codec_kunit.c:sound/usb/jockey3/ploytec_codec_kunit.c"
 	"ploytec_codec_test_vectors.h:sound/usb/jockey3/ploytec_codec_test_vectors.h"
-	"ploytec_midi_kunit.c:sound/usb/jockey3/ploytec_midi_kunit.c"
 	"Documentation/sound/cards/jockey3.rst:Documentation/sound/cards/jockey3.rst"
 )
 

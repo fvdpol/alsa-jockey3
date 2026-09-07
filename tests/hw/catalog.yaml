@@ -1848,13 +1848,16 @@ cases:
     area: MIDI
     level: L2
     mode: automated
-    status: implemented
+    status: idea
     requires: [kernel-tree]
     exec: cases/midi_kunit.py
     args: [um]
     metrics: [tests_run, tests_passed]
     pass: All tests pass.
     notes: >
+      RETIRED 2026-09-07 (status idea, is actually implemente but the kernel 
+      package/patch will not include the midi_kunit tests)
+
       Proves ploytec_midi_running_status_expand() correct in isolation, no
       device needed: a random Channel Voice / System Common / Real-Time
       message stream is compressed to Running Status, expanded back out
