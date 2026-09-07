@@ -47,39 +47,6 @@ MODULE_PARM_DESC(id, "ID string for " CARD_NAME " soundcard.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 
-/*
- * Grace periods for a PCM direction to reach steady streaming after its URB
- * ring is (re)started, in milliseconds. Two values, because the two kinds of
- * start are physically different:
- *
- *   cold -- first stream open, a sample-rate change, a USB reset, or a resume
- *	     from suspend. The device may have to spin its whole audio pipeline
- *	     up from idle; first-completion latency was measured from under
- *	     1 ms to several tens of ms across platforms and packets-per-URB.
- *   warm -- the stall watchdog's own lightweight URB stop/start of a ring that
- *	     was streaming a moment earlier. Only the first URB's wire time plus
- *	     firmware turnaround is needed, so this can be tighter -- but only a
- *	     little. A warm grace close to JOCKEY3_WATCHDOG_STALL_MS turns
- *	     ordinary scheduling jitter on the restart into a needless
- *	     escalation to a full USB reset (observed: a warm restart finishing
- *	     ~1 ms past a 50 ms budget escalated for no reason). The error cost
- *	     is asymmetric -- too long only delays an escalation that was coming
- *	     anyway, too short kills a stream that was merely late -- so keep
- *	     warm not far below cold.
- *
- * Both are writable at runtime (0644) so a hardware sweep can find good values
- * per target without a rebuild. The compiled defaults are placeholders, not
- * measured figures. Read through jockey3_start_grace_ms(), which clamps to
- * [JOCKEY3_GRACE_MS_MIN, JOCKEY3_GRACE_MS_MAX] so a bad write cannot drive the
- * grace down to or below the stall threshold.
- */
-static int cold_start_grace_ms = 200;
-static int warm_start_grace_ms = 150;
-module_param(cold_start_grace_ms, int, 0644);
-MODULE_PARM_DESC(cold_start_grace_ms, "Grace (ms) to reach steady streaming after a cold URB start (first open, rate change, USB reset, resume). Placeholder default; tune per target.");
-module_param(warm_start_grace_ms, int, 0644);
-MODULE_PARM_DESC(warm_start_grace_ms, "Grace (ms) to resume streaming after the stall watchdog's warm URB-ring restart. Placeholder default; keep close to cold_start_grace_ms.");
-
 /**
  * DOC: Device model
  *
@@ -299,9 +266,39 @@ MODULE_PARM_DESC(warm_start_grace_ms, "Grace (ms) to resume streaming after the 
 #define JOCKEY3_RECOVERY_MAX_ATTEMPTS	3
 #define JOCKEY3_RECOVERY_WINDOW_MS	60000
 
-/* Chip flags */
-#define JOCKEY3_FLAG_DISCONNECTED	0
-#define JOCKEY3_FLAG_RESETTING		1
+/*
+ * Grace periods for a PCM direction to reach steady streaming after its URB
+ * ring is (re)started, in milliseconds. Two values, because the two kinds of
+ * start are physically different:
+ *
+ *   cold -- first stream open, a sample-rate change, a USB reset, or a resume
+ *	     from suspend. The device may have to spin its whole audio pipeline
+ *	     up from idle; first-completion latency was measured from under
+ *	     1 ms to several tens of ms across platforms and packets-per-URB.
+ *   warm -- the stall watchdog's own lightweight URB stop/start of a ring that
+ *	     was streaming a moment earlier. Only the first URB's wire time plus
+ *	     firmware turnaround is needed, so this can be tighter -- but only a
+ *	     little. A warm grace close to JOCKEY3_WATCHDOG_STALL_MS turns
+ *	     ordinary scheduling jitter on the restart into a needless
+ *	     escalation to a full USB reset (observed: a warm restart finishing
+ *	     ~1 ms past a 50 ms budget escalated for no reason). The error cost
+ *	     is asymmetric -- too long only delays an escalation that was coming
+ *	     anyway, too short kills a stream that was merely late -- so keep
+ *	     warm not far below cold.
+ *
+ * Both are writable at runtime (0644) so a hardware sweep can find good values
+ * per target without a rebuild. The compiled defaults are placeholders, not
+ * measured figures. Read through jockey3_start_grace_ms(), which clamps to
+ * [JOCKEY3_GRACE_MS_MIN, JOCKEY3_GRACE_MS_MAX] so a bad write cannot drive the
+ * grace down to or below the stall threshold.
+ */
+static int cold_start_grace_ms = 200;
+static int warm_start_grace_ms = 150;
+module_param(cold_start_grace_ms, int, 0644);
+MODULE_PARM_DESC(cold_start_grace_ms, "Grace (ms) to reach steady streaming after a cold URB start (first open, rate change, USB reset, resume). Placeholder default; tune per target.");
+module_param(warm_start_grace_ms, int, 0644);
+MODULE_PARM_DESC(warm_start_grace_ms, "Grace (ms) to resume streaming after the stall watchdog's warm URB-ring restart. Placeholder default; keep close to cold_start_grace_ms.");
+
 
 /*
  * Current start-grace budget in ms: warm_start_grace_ms for the stall
@@ -519,6 +516,12 @@ static struct usb_driver jockey3_driver;
  */
 static DEFINE_MUTEX(jockey3_devices_mutex);
 static DECLARE_BITMAP(jockey3_devices_used, SNDRV_CARDS);
+
+
+/* Chip flags */
+#define JOCKEY3_FLAG_DISCONNECTED	0
+#define JOCKEY3_FLAG_RESETTING		1
+
 
 static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
 {
