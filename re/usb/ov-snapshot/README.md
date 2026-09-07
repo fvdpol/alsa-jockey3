@@ -73,6 +73,22 @@ cannot support a timing conclusion.
   analysis: `ov_ftdi_capture_performance.md`. Frank maintains a fork of
   `ov_ftdi` for this (clone at `~/jockey3_linux/ov_ftdi`); point
   `capture.toml`'s `ov_ftdi_host_dir` there.
+- **The OpenVizsla SDRAM ring is not cleared between capture sessions**
+  (`ov_ftdi` #25). A warm start can begin reading on top of the previous
+  session's bytes, and LibOV's framer desyncs where the stale data meets the
+  live stream. `ov_snapshot` handles it in three layers, all stopgaps for the
+  missing gateware ring-reset (drop them if LibOV gains a proper
+  start-of-stream drain):
+  1. clean shutdown waits for the gateware `HF0_LAST` end-marker so its *own*
+     next run starts with an empty ring (`teardown_drain_timeout`);
+  2. a warm start first turns the capture stream off (watchdog'd). If a
+     hard-killed predecessor's stream is still running that write blocks --
+     LibOV has no in-process recovery (#25 measured ~130 s stalls) -- so
+     ov-snapshot exits non-zero after 6 s with a one-line fix (reload the
+     FPGA, `reload_bitstream = true`, or let a supervisor restart it). A clean
+     shutdown never triggers this;
+  3. it then discards the first `drain_seconds` of stream (default 4 s, from a
+     rig measurement) before the ring starts collecting.
 - `render_verbose` replays raw packets through `usb_interp.USBInterpreter`; the
   first few lines of a slice, before the first SOF, carry no frame number and
   are dropped by `parse_openvizsla.py`. Bounded and expected.

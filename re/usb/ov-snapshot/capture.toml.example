@@ -26,6 +26,40 @@ listen_port = 8464
 pre_seconds = 5.0
 post_seconds = 5.0
 
+# Discard this many seconds of stream at startup, before the ring starts
+# collecting. The OpenVizsla SDRAM capture ring is not cleared between
+# sessions (OpenVizslaTNG/ov_ftdi #25); without this drain a warm start can
+# read the previous session's leftover bytes and LibOV's framer desyncs where
+# the stale data meets the live stream. Measured on this rig: after a clean
+# stop the elevated "drain" rate lasts ~2 s -- 4 s is margin. The
+# "[ov-snapshot] startup drain: ..." log line reports what was actually
+# discarded. 0 disables the drain. (Skipped automatically after an FPGA
+# reload, which already leaves the ring clean.)
+drain_seconds = 4.0
+
+# On shutdown, disable the capture stream and then wait up to this long for
+# the gateware's HF0_LAST end-marker to drain out before cutting the SDRAM
+# path, so the ring is left clean for this tool's *own* next run (#25). This
+# does not help after a hard kill or another tool -- that is what
+# drain_seconds covers. 0 = don't wait (previous behavior).
+teardown_drain_timeout = 2.0
+
+# (No knob for it, but note: on a warm start ov-snapshot first tries to turn
+# the capture stream off, watchdog'd. If a hard-killed predecessor's stream is
+# still running that write blocks -- LibOV cannot recover from it in-process,
+# #25 measured ~130 s stalls -- and ov-snapshot exits non-zero with a one-line
+# fix (reload the FPGA, or set reload_bitstream below, or let a supervisor
+# restart it). A clean shutdown leaves the stream off, so this never fires on
+# a normal restart.)
+
+# Reconfigure the FPGA from the bitstream on every start. Default false: a
+# PROG_B reload re-inits the OV3's ULPI PHY on the sniffed bus and has been
+# seen to knock a DUT off the bus at sniff start (#25), so we leave a warm
+# FPGA alone and rely on the startup drain instead. A cold FPGA is always
+# loaded regardless. Set true if you want the old always-reload behavior, or
+# as the recovery for a wedged stream (see the note above).
+reload_bitstream = false
+
 # Where snapshot .txt + .md pairs are written. On the current rig this is the
 # Seafile folder, same as manual captures.
 output_dir = "~/seafile/usb capture 2026"

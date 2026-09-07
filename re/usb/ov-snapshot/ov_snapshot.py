@@ -52,6 +52,9 @@ def load_config(path):
     cap.setdefault("listen_port", 8464)
     cap.setdefault("pre_seconds", 5.0)
     cap.setdefault("post_seconds", 5.0)
+    cap.setdefault("drain_seconds", 4.0)
+    cap.setdefault("teardown_drain_timeout", 2.0)
+    cap.setdefault("reload_bitstream", False)
     cap.setdefault("filter_nak", False)
     out = cap.get("output_dir", ".")
     cap["output_dir"] = os.path.abspath(os.path.expanduser(out))
@@ -179,14 +182,77 @@ class Device:
 
         pkg = zipfile.ZipFile(cfg["fwpkg"], "r")
         self.dev = LibOV.OVDevice(mapfile=pkg.open("map.txt", "r"), verbose=False)
-        err = self.dev.open(bitstream=pkg.open("ov3.bit", "r"))
+
+        # By default do NOT reconfigure the FPGA if it is already loaded: a
+        # PROG_B reload re-inits the OV3's own ULPI PHY on the sniffed bus and
+        # has been observed to knock a DUT off the bus at sniff start (#25).
+        # The startup drain (drain_startup) is what keeps a warm start clean.
+        # Passing a file-like bitstream to open() always reconfigures; passing
+        # None only loads if the FPGA is cold. reload_bitstream = true forces
+        # the old always-reload behavior.
+        force = bool(cfg.get("reload_bitstream", False))
+        err = self.dev.open(bitstream=pkg.open("ov3.bit", "r") if force else None)
         if err:
             raise SystemExit(f"OpenVizsla: error opening device ({err})")
-        if not self.dev.isLoaded():
+        cold = not self.dev.isLoaded()
+        if cold:
             self.dev.close()
-            self.dev.open(bitstream=pkg.open("ov3.bit", "r"))
+            err = self.dev.open(bitstream=pkg.open("ov3.bit", "r"))
+            if err:
+                raise SystemExit(f"OpenVizsla: error opening device ({err})")
+        self._fpga_reloaded = cold or force
+
+        # A hard-killed predecessor leaves CSTREAM_CFG and the SDRAM GO bits
+        # set; its stream keeps flowing, LibOV's comms thread floods on the
+        # stale ring and desyncs, and *any* register write then contends with
+        # that flood and blocks -- measured stalls of ~130 s. There is no
+        # in-process recovery: OVDevice.close() does an unbounded
+        # commthread.join(), and a libusb transfer already in flight cannot be
+        # cancelled or time-bounded through LibOV's API. But a *fresh* process
+        # doing an FPGA reload does clear it (ov_ftdi #25: reload -> 0/24). So
+        # detect the wedge in a watchdog'd thread and refuse, with the fix:
+        if not self._fpga_reloaded and not self._stream_is_off(6.0):
+            raise SystemExit(
+                "[ov-snapshot] a previous capture stream is still running and "
+                "will not stop.\n"
+                "  A hard-killed predecessor leaves CSTREAM_CFG + the SDRAM GO "
+                "bits set; LibOV\n"
+                "  cannot recover from this in-process (ov_ftdi #25). Reload "
+                "the FPGA and retry:\n"
+                "    %s/ovctl.py --pkg %s -l -C\n"
+                "  (or set reload_bitstream = true in capture.toml, or let a "
+                "supervisor restart it.)"
+                % (cfg["ov_ftdi_host_dir"], cfg["fwpkg"]))
+
+        if self._fpga_reloaded:
+            print("[ov-snapshot] FPGA reconfigured from bitstream", flush=True)
+        else:
+            print("[ov-snapshot] FPGA left as-is (warm); ring drained at startup",
+                  flush=True)
         # ovctl.py does this before any subcommand; harmless, keeps parity.
         self.dev.dev.write(LibOV.FTDI_INTERFACE_A, b"\x00" * 512, async_=False)
+
+    def _stream_is_off(self, deadline_s):
+        """Try to turn CSTREAM + the SDRAM engine off, in a watchdog'd daemon
+        thread. True if the writes completed within deadline_s (the normal
+        case -- near-instant no-ops after a clean stop or a reload), False if
+        they are still blocked on an FTDI channel saturated by a hard-killed
+        predecessor's stream (#25). The stuck thread is left as a daemon; the
+        caller exits.
+        """
+        done = threading.Event()
+
+        def _off():
+            for reg in ("CSTREAM_CFG", "SDRAM_SINK_GO", "SDRAM_HOST_READ_GO"):
+                try:
+                    with self.reg_lock:
+                        getattr(self.dev.regs, reg).wr(0)
+                except Exception:
+                    pass
+            done.set()
+
+        threading.Thread(target=_off, daemon=True).start()
+        return done.wait(deadline_s)
 
     # -- register helpers ---------------------------------------------------
 
@@ -215,12 +281,15 @@ class Device:
     def start_sniff(self):
         d = self.dev
         with self.reg_lock:
+            # nothing should be streaming here (Device.__init__ quiesced or
+            # reloaded), but be defensive -- turn it all off before reconfig.
+            d.regs.CSTREAM_CFG.wr(0)
+            d.regs.SDRAM_SINK_GO.wr(0)
+            d.regs.SDRAM_HOST_READ_GO.wr(0)
             d.regs.LEDS_MUX_2.wr(0)
             d.regs.LEDS_OUT.wr(0)
             d.regs.LEDS_MUX_0.wr(2)
             d.regs.LEDS_MUX_1.wr(2)
-            d.regs.SDRAM_SINK_GO.wr(0)
-            d.regs.SDRAM_HOST_READ_GO.wr(0)
             d.regs.SDRAM_SINK_RING_BASE.wr(0)
             d.regs.SDRAM_SINK_RING_END.wr(SDRAM_RING_SIZE)
             d.regs.SDRAM_HOST_READ_RING_BASE.wr(0)
@@ -244,12 +313,92 @@ class Device:
                 cfg_bits |= (1 << 2)
             d.regs.CSTREAM_CFG.wr(cfg_bits)
 
+    def drain_startup(self, seconds):
+        """Discard the stale head of the SDRAM ring before real capture starts.
+
+        The OpenVizsla SDRAM capture ring is never zeroed between sniff
+        sessions, and a fresh session's read pointer can come up on top of the
+        *previous* session's leftover bytes; LibOV's framer then slides from
+        that stale block straight into the live stream and trips at the seam
+        (OpenVizslaTNG/ov_ftdi #25). There is no ring-reset register, and
+        draining at teardown (stop_sniff) only helps when *this* process shut
+        the previous session down cleanly -- not after a hard kill, nor when
+        some other tool left the mess.
+
+        So, once the stream is enabled: read and throw everything away for
+        `seconds`. The stale block is at most the 16 MiB ring and drains far
+        faster than the live wire rate, so a few seconds puts the reader
+        provably onto live data, past the one-time seam desync (which LibOV
+        re-locks on its own). The caller installs the real handler afterwards.
+
+        `seconds` default (4.0) was picked from a rig measurement: after a
+        clean stop the elevated post-start rate lasts ~2 s. The packet count
+        in the log line is NOT a stale-block size -- most of it is live
+        NAK-storm traffic from an idle DUT (~450k/s unfiltered here); it is
+        logged only so a genuinely empty stream (0 pkts) is visible.
+
+        Workaround only -- if LibOV grows a start-of-stream drain / boundary
+        hunt, delete this and its call site.
+        """
+        if seconds <= 0:
+            return
+        LibOV = self._LibOV
+        seen = {"pkts": 0, "first": 0, "last": 0, "ovf": 0}
+
+        def _count(ts, buf, flags, orig_len):
+            seen["pkts"] += 1
+            if flags & LibOV.HF0_FIRST:
+                seen["first"] += 1
+            if flags & LibOV.HF0_LAST:
+                seen["last"] += 1
+            if flags & LibOV.HF0_OVF:
+                seen["ovf"] += 1
+
+        self.install_handler(_count)
+        t0 = time.monotonic()
+        time.sleep(seconds)
+        dt = time.monotonic() - t0
+        print("[ov-snapshot] startup drain: discarded %d pkts in %.2fs "
+              "(HF0_FIRST x%d, HF0_LAST x%d, HF0_OVF x%d)"
+              % (seen["pkts"], dt, seen["first"], seen["last"], seen["ovf"]),
+              flush=True)
+        if seen["pkts"] == 0:
+            print("[ov-snapshot] startup drain saw no packets -- is the stream "
+                  "flowing? (ULPI clock / DUT present?)", flush=True)
+
     def stop_sniff(self):
         d = self.dev
+        # #25: CSTREAM_CFG's 1->0 edge is what stuffs the HF0_LAST end-marker.
+        # Disable CSTREAM first, wait for that marker to actually drain out of
+        # the SDRAM path, and only then cut SINK / HOST_READ -- so the ring is
+        # left empty for the next session. The reverse order (used previously)
+        # shuts the carrying path off before the marker exists; mincapture.py's
+        # DRAIN_WAIT measured 48/48 clean next-starts with this order, ~50%
+        # without. teardown_drain_timeout = 0 restores the no-wait behavior.
+        timeout = float(self.cfg.get("teardown_drain_timeout", 2.0))
+        if timeout <= 0:
+            with self.reg_lock:
+                d.regs.CSTREAM_CFG.wr(0)
+                d.regs.SDRAM_SINK_GO.wr(0)
+                d.regs.SDRAM_HOST_READ_GO.wr(0)
+            return
+        LibOV = self._LibOV
+        seen_last = threading.Event()
+
+        def _watch(ts, buf, flags, orig_len):
+            if flags & LibOV.HF0_LAST:
+                seen_last.set()
+
+        with contextlib.suppress(Exception):
+            self.install_handler(_watch)
+        with self.reg_lock:
+            d.regs.CSTREAM_CFG.wr(0)
+        got = seen_last.wait(timeout=timeout)
         with self.reg_lock:
             d.regs.SDRAM_SINK_GO.wr(0)
             d.regs.SDRAM_HOST_READ_GO.wr(0)
-            d.regs.CSTREAM_CFG.wr(0)
+        print("[ov-snapshot] teardown drain: %s HF0_LAST within %.1fs"
+              % ("saw" if got else "TIMED OUT waiting for", timeout), flush=True)
 
     def install_handler(self, fn):
         # Replace the default verbose printer outright -- we do not want its
@@ -482,21 +631,40 @@ def main():
                  f"{cfg['listen_port']} ({e}) -- another instance running?")
 
     device = None
+    serving = False
     try:
         device = Device(cfg)
         ring = Ring(cfg["pre_seconds"], cfg["post_seconds"])
-        device.install_handler(ring.on_packet)
+        # #25 workaround: the SDRAM ring is not cleared between sessions, so a
+        # fresh start can read the previous session's leftover bytes and LibOV
+        # desyncs at the stale->live seam. Put a discard handler in place
+        # *before* enabling the stream (so LibOV's default verbose printer is
+        # never what runs over the flood), enable it, drain the stale head, and
+        # only then let the ring start collecting.
+        device.install_handler(lambda *a: None)
         device.start_sniff()
+        # a fresh reload already left the ring clean; only a warm start needs it
+        device.drain_startup(0.0 if device._fpga_reloaded else cfg["drain_seconds"])
+        device.install_handler(ring.on_packet)
         snap = Snapshotter(cfg, ring, device)
         srv.state = {"ring": ring, "snap": snap, "device": device,
                      "armed": {"v": bool(args.arm)}}
         print(f"[ov-snapshot] listening on {cfg['listen_host']}:"
               f"{cfg['listen_port']} ({'armed' if args.arm else 'not armed'})")
+        serving = True
         srv.serve_forever()
     except KeyboardInterrupt:          # SIGINT (Ctrl-C) or SIGTERM
+        # Make teardown idempotent: a second signal (repeat Ctrl-C, or a
+        # supervisor escalating SIGTERM -> SIGKILL) must not raise
+        # KeyboardInterrupt back out of srv.shutdown() / device.close().
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         print("\n[ov-snapshot] shutting down")
     finally:
-        srv.shutdown()
+        # shutdown() only unblocks serve_forever() from another thread -- it
+        # hangs forever if serve_forever() never started (e.g. Device() bailed).
+        if serving:
+            srv.shutdown()
         srv.server_close()
         if device is not None:
             device.close()

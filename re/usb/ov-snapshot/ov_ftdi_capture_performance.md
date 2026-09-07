@@ -272,6 +272,30 @@ Two changes make it usable:
   so `stop_sniff()` + `dev.close()` run). A hard kill used to leave the SDRAM
   capture engine running and the next run started against a dirty ring.
 
+`ov_ftdi` #25 later pinned down *why* a dirty ring desyncs LibOV: the SDRAM
+ring is never zeroed, and a new session's read pointer can come up on the
+previous session's leftover bytes, which LibOV frames straight through until it
+hits the stale->live seam and trips. A graceful `stop_sniff()` alone was not
+enough -- the old teardown cut the SDRAM path before the gateware's `HF0_LAST`
+marker could drain, leaving ~50 % of next-starts dirty.
+
+Measuring the fix on the rig turned up a sharper failure: a **hard-killed**
+predecessor leaves `CSTREAM_CFG` and the SDRAM `GO` bits set, so its stream
+keeps flowing. The next process's LibOV comms thread then floods on the stale
+ring and desyncs, and that saturates the FTDI channel so badly that
+`start_sniff()`'s own register writes take **~130 s** to get through (measured;
+a subsequent register *read* hung outright). There is no in-process recovery:
+`OVDevice.close()` does an unbounded `commthread.join()`, and a libusb transfer
+already in flight cannot be cancelled or time-bounded through LibOV's API. A
+*fresh* process doing an FPGA reload does clear it (#25: reload -> 0/24). So
+`ov_snapshot` watchdogs its first "stream off" write on a warm start and, if it
+blocks, **exits non-zero** with the one-command fix rather than trying to
+recover -- under a supervisor it self-heals on the retry. On the normal path it
+discards `drain_seconds` (4 s -- the elevated post-start rate lasts ~2 s here)
+before the ring collects, and a clean shutdown waits for `HF0_LAST` so the
+tool's own restarts never hit any of this. Workarounds for the absent gateware
+ring-reset; see OpenVizslaTNG/ov_ftdi #25.
+
 ### A/B result (rig: `alsa-test` OV + `pi4test` DUT, duplex, 3 s + 3 s window)
 
 | | 48 kHz off | 48 kHz **on** | 96 kHz off | 96 kHz **on** |
