@@ -36,6 +36,19 @@
 enum { JOCKEY3_ME, JOCKEY3_REMIX };
 #define CARD_NAME "Reloop Jockey 3"
 
+/* Human-readable edition name for a usb_device_id.driver_info value. */
+static const char *jockey3_model_name(int model)
+{
+	switch (model) {
+	case JOCKEY3_ME:
+		return "Master Edition";
+	case JOCKEY3_REMIX:
+		return "Remix";
+	default:
+		return "Unknown";
+	}
+}
+
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
 static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
@@ -3006,7 +3019,7 @@ static const struct snd_rawmidi_ops jockey3_midi_out_ops = {
 	.trigger = jockey3_midi_out_trigger
 };
 
-static int jockey3_initialize(struct jockey3_chip *chip)
+static int jockey3_initialize(struct jockey3_chip *chip, int model)
 {
 	int ret;
 	int rate;
@@ -3056,7 +3069,8 @@ static int jockey3_initialize(struct jockey3_chip *chip)
 	}
 
 	// see ploytec_get_firmware() for the packing of buf[0..2] into fw_version
-	dev_info(&chip->intf0->dev, "Firmware 0x%02x v%d.%d.%d\n",
+	dev_info(&chip->intf0->dev, CARD_NAME " %s Firmware 0x%02x v%d.%d.%d\n",
+		 jockey3_model_name(model),
 		 (fw_version >> 16) & 0xFF, (fw_version >> 8) & 0xFF,
 		 (fw_version >> 4) & 0x0F, fw_version & 0x0F);
 
@@ -3345,8 +3359,6 @@ static int jockey3_init_midi(struct jockey3_chip *chip)
 
 static void jockey3_setup_card_names(struct jockey3_chip *chip, int driver_info)
 {
-	char *jockey3_type;
-
 	/*
 	 * card->driver is only char[16] and is what shows up as the card ID in
 	 * /proc/asound, so it holds a short model identifier rather than the
@@ -3356,18 +3368,9 @@ static void jockey3_setup_card_names(struct jockey3_chip *chip, int driver_info)
 	strscpy(chip->card->shortname, CARD_NAME, sizeof(chip->card->shortname));
 	strscpy(chip->card->mixername, CARD_NAME, sizeof(chip->card->mixername));
 
-	switch (driver_info) {
-	case JOCKEY3_ME:
-		jockey3_type = "Master Edition";
-		break;
-	case JOCKEY3_REMIX:
-		jockey3_type = "Remix";
-		break;
-	default:
-		jockey3_type = "Unknown";
-	}
 	snprintf(chip->card->longname, sizeof(chip->card->longname),
-		 "%s %s at USB %s", CARD_NAME, jockey3_type, dev_name(&chip->dev->dev));
+		 "%s %s at USB %s", CARD_NAME, jockey3_model_name(driver_info),
+		 dev_name(&chip->dev->dev));
 }
 
 static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id *usb_id)
@@ -3513,7 +3516,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 		snd_card_set_id(card, "RJ3");
 
 	usb_set_intfdata(intf, chip);
-	ret = jockey3_initialize(chip);
+	ret = jockey3_initialize(chip, usb_id->driver_info);
 	if (ret < 0)
 		return ret;
 
