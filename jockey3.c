@@ -440,7 +440,9 @@ struct jockey3_pcm_urb_stream {
  * @current_rate: sample rate the hardware is programmed to; @rate_mutex
  * @dev_idx: card slot held in jockey3_devices_used
  * @reset_done: completed by jockey3_post_reset(), and by jockey3_disconnect()
- *	so a waiter is released when the USB core skips post_reset() entirely
+ *	so a waiter is released when the USB core skips post_reset() entirely.
+ *	Re-armed by jockey3_queue_reset() for a reset this driver starts, and by
+ *	jockey3_pre_reset() for one started anywhere else.
  * @watchdog_work: periodic URB liveness check; see jockey3_watchdog_work().
  *	Armed by jockey3_start_urbs() and disarmed by jockey3_stop_urbs(), so it
  *	runs exactly when the URBs are supposed to be flowing -- which, for this
@@ -3676,6 +3678,20 @@ static int jockey3_pre_reset(struct usb_interface *intf)
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
 
 	if (chip && intf == chip->intf0) {
+		/*
+		 * A reset started outside this driver -- usbfs USBDEVFS_RESET,
+		 * say -- does not pass through jockey3_queue_reset(), so
+		 * chip->reset_done still carries the complete_all() from the
+		 * previous reset and jockey3_wait_for_reset_completion() would
+		 * return immediately, letting an ALSA ioctl talk to a device
+		 * that is mid-reset. Re-arm it for that path. Testing the flag
+		 * unlocked is safe because the USB core serializes resets per
+		 * device, and re-arming before setting the flag leaves no
+		 * window in which a waiter sees "resetting" but a stale
+		 * completion.
+		 */
+		if (!jockey3_is_resetting(chip))
+			reinit_completion(&chip->reset_done);
 		set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 		scoped_guard(mutex, &chip->rate_mutex)
 			jockey3_stop_urbs(chip);
