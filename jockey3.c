@@ -94,6 +94,41 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  */
 
 /**
+ * DOC: Resource lifetime
+ *
+ * The card is created with snd_card_new(), not snd_devm_card_new(), and
+ * released by jockey3_disconnect() with snd_card_free_when_closed(). A managed
+ * card would instead be freed from the devres unwind inside
+ * usb_unbind_interface(), where snd_card_free() blocks until userspace has
+ * closed every file descriptor on the card -- on an unplug that unwind runs on
+ * the USB hub work queue, so a single process sitting on a PCM fd would stall
+ * hotplug for the whole hub. Every other USB sound driver in the tree avoids
+ * that the same way.
+ *
+ * That splits teardown in two, and the split is the thing to keep straight:
+ *
+ * - jockey3_disconnect() does everything that must happen while the device is
+ *   still there: latch JOCKEY3_FLAG_DISCONNECTED (for either interface, since
+ *   the core takes them down one at a time), release anyone waiting on a
+ *   reset, stop the watchdog, kill the URBs, release interface 1, and hand the
+ *   card to snd_card_free_when_closed().
+ *
+ * - jockey3_card_free(), reached through card->private_free once the last file
+ *   descriptor is closed, frees the buffers and URBs, destroys rate_mutex and
+ *   gives the card slot back. It runs arbitrarily long after the disconnect
+ *   and must touch no USB object; see jockey3_free_resources().
+ *
+ * struct jockey3_chip lives in card->private_data, so it is freed with the
+ * card and outlives the USB binding -- which is what makes it safe for an ALSA
+ * callback that is still in flight during an unplug to keep dereferencing it.
+ * Such a callback finds JOCKEY3_FLAG_DISCONNECTED set and returns -ENODEV.
+ *
+ * probe's error path performs the disconnect half by hand and then calls
+ * snd_card_free(); the card is never registered on any path that reaches
+ * there, so the synchronous free cannot block.
+ */
+
+/**
  * DOC: Locking
  *
  * The lock hierarchy is::
@@ -123,8 +158,8 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * from inside rate_mutex at four sites, so it disarms with the non-sync
  * cancel_delayed_work(), which is safe under any lock; a tick that is already
  * running when the cancel lands re-reads 'stopping' and does nothing. The sync
- * form appears only in jockey3_disconnect() and in the devres teardown action,
- * neither of which holds a mutex.
+ * form appears only in jockey3_disconnect() and in probe's error path, neither
+ * of which holds a mutex.
  *
  * jockey3_watchdog_work() itself may call jockey3_recover_urb_stream(),
  * which takes rate_mutex and calls jockey3_stop_urbs() -- i.e. the watchdog's
@@ -590,14 +625,20 @@ static void jockey3_set_current_rate(struct jockey3_chip *chip, unsigned int rat
  * released when the USB core skips post_reset() entirely (a failed reset marks
  * the interface for rebinding and unbinds it instead).
  *
- * Deliberately does NOT call usb_reset_device() itself: doing so from an
- * ALSA ioctl context risks a self-deadlock, since a failed/aborted reset
- * can lead to jockey3_disconnect() and the resulting synchronous
- * snd_card_free() (via the card's devm cleanup) running in the same calling
- * thread — which then blocks forever waiting for the very file descriptor
- * this ioctl is still executing under to be closed. Queuing the reset instead
- * lets it (and any resulting disconnect/card-free) run on the USB core's own
- * workqueue thread.
+ * Deliberately does NOT call usb_reset_device() itself. A failed or aborted
+ * reset marks the interface for rebinding and unbinds it, so the call would
+ * run jockey3_disconnect() -- and the card teardown behind it -- in the very
+ * thread that is still executing an ioctl on one of that card's file
+ * descriptors. Queuing the reset instead lets the disconnect run on the USB
+ * core's own workqueue, where the ALSA core's own refcounting keeps the
+ * substream alive until this ioctl returns and userspace closes it.
+ *
+ * Until the card was switched from snd_devm_card_new() to
+ * snd_card_free_when_closed() this was worse still: the teardown blocked in
+ * snd_card_free() waiting for that same file descriptor to be closed, which
+ * could never happen. That specific self-deadlock is gone, but reaching a
+ * disconnect from inside an ioctl on the disconnecting card remains something
+ * to keep out of this driver's calling threads.
  */
 static int jockey3_wait_for_reset_completion(struct jockey3_chip *chip)
 {
@@ -1530,7 +1571,7 @@ static void jockey3_watchdog_clear_stall(struct jockey3_chip *chip,
  * running tick here would be a deadlock waiting to happen. Not waiting is safe
  * because a tick that is already running re-reads 'stopping' under the stream
  * lock and does nothing. The sync cancel that teardown does need lives in
- * jockey3_disconnect() and the devres action, where no mutex is held.
+ * jockey3_disconnect() and in probe's error path, where no mutex is held.
  */
 static void jockey3_watchdog_disarm(struct jockey3_chip *chip)
 {
@@ -3170,54 +3211,51 @@ static int jockey3_initialize(struct jockey3_chip *chip, int model)
 	return 0;
 }
 
-static void jockey3_release_dev_idx(void *data)
+/*
+ * Free everything jockey3_probe() allocated into @chip, and give the card slot
+ * back. NULL-safe throughout, so it is correct at any point of a half-built
+ * probe as well as at the end of the device's life.
+ *
+ * Two rules govern what may go in here, both stemming from where it runs:
+ * card->private_free, i.e. after the last file descriptor on the card is
+ * closed, which on an unplug is arbitrarily long after jockey3_disconnect().
+ *
+ *  - No USB object may be touched. The driver holds no reference on the
+ *    interfaces, so by this point usb_disconnect() may already have freed
+ *    them. That includes @chip->intf0, @chip->intf1 and @chip->dev, and
+ *    therefore also the dev_dbg(&chip->intf0->dev, ...) idiom used everywhere
+ *    else in this file -- this function deliberately logs nothing.
+ *  - The URBs must already be dead. jockey3_disconnect() kills them, and so
+ *    does probe's error path, both before the card is released.
+ */
+static void jockey3_free_resources(struct jockey3_chip *chip)
 {
-	struct jockey3_chip *chip = data;
+	int i;
 
-	guard(mutex)(&jockey3_devices_mutex);
-	__clear_bit(chip->dev_idx, jockey3_devices_used);
+	for (i = 0; i < JOCKEY3_N_URBS; i++) {
+		usb_free_urb(chip->playback.urbs[i]);
+		kfree(chip->playback.bufs[i]);
+		usb_free_urb(chip->capture.urbs[i]);
+		kfree(chip->capture.bufs[i]);
+	}
+	usb_free_urb(chip->midi_in_urb);
+	kfree(chip->midi_in_buf);
+	kfree(chip->xfer_buf);
+
+	mutex_destroy(&chip->rate_mutex);
+
+	scoped_guard(mutex, &jockey3_devices_mutex)
+		__clear_bit(chip->dev_idx, jockey3_devices_used);
 }
 
-static void jockey3_release_intf1(void *data)
+static void jockey3_card_free(struct snd_card *card)
 {
-	struct usb_interface *intf1 = data;
-
-	usb_driver_release_interface(&jockey3_driver, intf1);
-}
-
-static void jockey3_free_urb_action(void *data)
-{
-	usb_free_urb(data);
-}
-
-static void jockey3_kfree_action(void *data)
-{
-	kfree(data);
-}
-
-static void jockey3_stop_urbs_action(void *data)
-{
-	jockey3_stop_urbs(data);
-}
-
-static void jockey3_cancel_watchdog_action(void *data)
-{
-	struct jockey3_chip *chip = data;
-
-	/*
-	 * The sync cancel belongs here rather than in jockey3_stop_urbs(): no
-	 * mutex is held on the devres unwind path, so waiting for a running tick
-	 * is safe, and it has to complete before the URBs and the chip itself
-	 * are freed further down the unwind.
-	 */
-	cancel_delayed_work_sync(&chip->watchdog_work);
+	jockey3_free_resources(card->private_data);
 }
 
 static int jockey3_init_midi_urb(struct jockey3_chip *chip)
 {
 	struct usb_device *dev = chip->dev;
-	struct usb_interface *intf = chip->intf0;
-	int ret;
 
 	memset(&chip->midi_state, 0, sizeof(chip->midi_state));
 	chip->midi_out_acc = 0;
@@ -3226,17 +3264,9 @@ static int jockey3_init_midi_urb(struct jockey3_chip *chip)
 	if (!chip->midi_in_buf)
 		return -ENOMEM;
 
-	ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action, chip->midi_in_buf);
-	if (ret)
-		return ret;
-
 	chip->midi_in_urb = usb_alloc_urb(0, GFP_KERNEL);
 	if (!chip->midi_in_urb)
 		return -ENOMEM;
-
-	ret = devm_add_action_or_reset(&intf->dev, jockey3_free_urb_action, chip->midi_in_urb);
-	if (ret)
-		return ret;
 
 	usb_fill_bulk_urb(chip->midi_in_urb, dev,
 			  usb_rcvbulkpipe(dev, PLOYTEC_EP_NUM_MIDI_IN),
@@ -3249,25 +3279,16 @@ static int jockey3_init_midi_urb(struct jockey3_chip *chip)
 static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
 {
 	struct usb_device *dev = chip->dev;
-	struct usb_interface *intf = chip->intf0;
-	int i, ret;
+	int i;
 
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		chip->playback.bufs[i] = kzalloc(JOCKEY3_PLAYBACK_XFER_SIZE, GFP_KERNEL);
 		if (!chip->playback.bufs[i])
 			return -ENOMEM;
-		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
-					       chip->playback.bufs[i]);
-		if (ret)
-			return ret;
 
 		chip->playback.urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
 		if (!chip->playback.urbs[i])
 			return -ENOMEM;
-		ret = devm_add_action_or_reset(&intf->dev, jockey3_free_urb_action,
-					       chip->playback.urbs[i]);
-		if (ret)
-			return ret;
 
 		jockey3_init_out_packet(chip->playback.bufs[i]);
 
@@ -3283,25 +3304,16 @@ static int jockey3_init_playback_urbs(struct jockey3_chip *chip)
 static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
 {
 	struct usb_device *dev = chip->dev;
-	struct usb_interface *intf = chip->intf0;
-	int i, ret;
+	int i;
 
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		chip->capture.bufs[i] = kzalloc(JOCKEY3_CAPTURE_XFER_SIZE, GFP_KERNEL);
 		if (!chip->capture.bufs[i])
 			return -ENOMEM;
-		ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action,
-					       chip->capture.bufs[i]);
-		if (ret)
-			return ret;
 
 		chip->capture.urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
 		if (!chip->capture.urbs[i])
 			return -ENOMEM;
-		ret = devm_add_action_or_reset(&intf->dev, jockey3_free_urb_action,
-					       chip->capture.urbs[i]);
-		if (ret)
-			return ret;
 
 		usb_fill_bulk_urb(chip->capture.urbs[i], dev,
 				  usb_rcvbulkpipe(dev, PLOYTEC_EP_NUM_PCM_IN),
@@ -3476,16 +3488,23 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 		__set_bit(dev_idx, jockey3_devices_used);
 	}
 
-	ret = snd_devm_card_new(&intf->dev, index[dev_idx], id[dev_idx], THIS_MODULE,
-				sizeof(struct jockey3_chip), &card);
+	/*
+	 * Deliberately not snd_devm_card_new(): a managed card is freed from the
+	 * devres unwind inside usb_unbind_interface(), where snd_card_free()
+	 * blocks until userspace closes every file descriptor on the card. On an
+	 * unplug that unwind runs on the USB hub work queue, so one process
+	 * sitting on a PCM fd would stall hotplug for the whole hub. The card is
+	 * released from jockey3_disconnect() with snd_card_free_when_closed()
+	 * instead, which is what every other USB sound driver does; the
+	 * resources that outlive it go in card->private_free below.
+	 */
+	ret = snd_card_new(&intf->dev, index[dev_idx], id[dev_idx], THIS_MODULE,
+			   sizeof(struct jockey3_chip), &card);
 	if (ret < 0)
 		goto err_free_idx;
 
 	chip = card->private_data;
 	chip->dev_idx = dev_idx;
-	ret = devm_add_action_or_reset(&intf->dev, jockey3_release_dev_idx, chip);
-	if (ret)
-		return ret;
 
 	chip->card = card;
 	chip->dev = dev;
@@ -3496,17 +3515,26 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback.lock);
 	spin_lock_init(&chip->capture.lock);
-	ret = devm_mutex_init(&intf->dev, &chip->rate_mutex);
-	if (ret)
-		return ret;
+	mutex_init(&chip->rate_mutex);
 	init_completion(&chip->reset_done);
 
 	init_usb_anchor(&chip->playback.anchor);
 	init_usb_anchor(&chip->capture.anchor);
 	init_waitqueue_head(&chip->playback.drain_wait);
 	init_waitqueue_head(&chip->capture.drain_wait);
+
 	/*
-	 * card->private_data is zeroed by snd_devm_card_new(), but be explicit:
+	 * Arm the release path only now that everything it touches exists --
+	 * jockey3_free_resources() calls mutex_destroy() on rate_mutex, so it
+	 * must not become reachable before mutex_init() above. From here on
+	 * every failure goes to err_free_card, and the card slot is given back
+	 * by jockey3_free_resources() rather than by err_free_idx. Keep this
+	 * assignment below the initialization block: nothing fallible may be
+	 * inserted between them.
+	 */
+	card->private_free = jockey3_card_free;
+	/*
+	 * card->private_data is zeroed by snd_card_new(), but be explicit:
 	 * these two are load-bearing for the stop/stall bookkeeping.
 	 */
 	atomic_set(&chip->playback.urbs_in_flight, 0);
@@ -3527,59 +3555,35 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	INIT_DELAYED_WORK(&chip->watchdog_work, jockey3_watchdog_work);
 
 	chip->xfer_buf = kmalloc(USB_XFER_BUF_SIZE, GFP_KERNEL);
-	if (!chip->xfer_buf)
-		return -ENOMEM;
-	ret = devm_add_action_or_reset(&intf->dev, jockey3_kfree_action, chip->xfer_buf);
-	if (ret)
-		return ret;
+	if (!chip->xfer_buf) {
+		ret = -ENOMEM;
+		goto err_free_card;
+	}
 
 	ret = jockey3_init_midi_urb(chip);
 	if (ret < 0)
-		return ret;
+		goto err_free_card;
 
 	ret = jockey3_init_playback_urbs(chip);
 	if (ret < 0)
-		return ret;
+		goto err_free_card;
 
 	ret = jockey3_init_capture_urbs(chip);
 	if (ret < 0)
-		return ret;
+		goto err_free_card;
 
-	/*
-	 * Claim interface 1 before registering the URB-stop action. devres
-	 * unwinds LIFO, so registering in this order means the URBs are killed
-	 * *before* the interface owning the capture endpoint (0x86) is released.
-	 */
+	/* Interface 1 owns the capture endpoint (0x86) */
 	ret = usb_driver_claim_interface(&jockey3_driver, intf1, chip);
 	if (ret < 0)
-		return ret;
-	ret = devm_add_action_or_reset(&intf->dev, jockey3_release_intf1, intf1);
-	if (ret)
-		return ret;
-
-	/* Stop all URBs on disconnect */
-	ret = devm_add_action_or_reset(&intf->dev, jockey3_stop_urbs_action, chip);
-	if (ret)
-		return ret;
-
-	/*
-	 * Registered after the URB stop, so that LIFO unwinding runs it *before*
-	 * it: the watchdog must be gone before the URBs it reads are stopped and
-	 * freed. It must equally be registered before jockey3_initialize() below,
-	 * which is where the work is first queued -- otherwise a probe failure
-	 * would leave a queued tick pointing at a freed chip.
-	 */
-	ret = devm_add_action_or_reset(&intf->dev, jockey3_cancel_watchdog_action, chip);
-	if (ret)
-		return ret;
+		goto err_free_card;
 
 	ret = jockey3_init_pcm(chip);
 	if (ret < 0)
-		return ret;
+		goto err_free_card;
 
 	ret = jockey3_init_midi(chip);
 	if (ret < 0)
-		return ret;
+		goto err_free_card;
 
 	jockey3_setup_card_names(chip, usb_id->driver_info);
 
@@ -3589,19 +3593,38 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	usb_set_intfdata(intf, chip);
 	ret = jockey3_initialize(chip, usb_id->driver_info);
 	if (ret < 0)
-		return ret;
+		goto err_free_card;
 
 	ret = snd_card_register(card);
 	if (ret < 0)
-		return ret;
+		goto err_free_card;
 
 	return 0;
 
-err_free_idx:
+err_free_card:
 	/*
-	 * Only reached before the card exists; past that point the slot is
-	 * released by the jockey3_release_dev_idx() devres action.
+	 * Same order as jockey3_disconnect(): latch DISCONNECTED so a watchdog
+	 * tick cannot re-arm itself, wait for any tick already running, kill the
+	 * URBs, and only then let go of interface 1 and the card. All of it is
+	 * safe on a half-built chip -- the locks, anchors and work item are
+	 * initialized above with no failure point between, and everything
+	 * jockey3_free_resources() touches is NULL until it is allocated.
+	 *
+	 * snd_card_free() rather than the disconnect path's
+	 * snd_card_free_when_closed(): the card is not registered yet on any
+	 * path that reaches here, so nothing can have it open and the
+	 * synchronous free cannot block.
 	 */
+	usb_set_intfdata(intf, NULL);
+	set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+	cancel_delayed_work_sync(&chip->watchdog_work);
+	jockey3_stop_urbs(chip);
+	usb_driver_release_interface(&jockey3_driver, intf1);
+	snd_card_free(card);
+	return ret;
+
+err_free_idx:
+	/* Only reached before the card exists */
 	scoped_guard(mutex, &jockey3_devices_mutex)
 		__clear_bit(dev_idx, jockey3_devices_used);
 	return ret;
@@ -3650,15 +3673,29 @@ static void jockey3_disconnect(struct usb_interface *intf)
 		cancel_delayed_work_sync(&chip->watchdog_work);
 
 		jockey3_stop_urbs(chip);
+
 		/*
-		 * snd_card_disconnect() runs snd_pcm_stop(DISCONNECTED) under the
-		 * stream lock, which drives our .trigger and clears 'running' with
-		 * the proper locking -- so there is nothing to clear here by hand.
-		 *
-		 * Card cleanup, URB freeing, and interface release are all handled
-		 * automatically by devres.
+		 * Release interface 1 here, not from card->private_free: that
+		 * runs when the last file descriptor is closed, by which time
+		 * usb_disconnect() may already have freed the interface. This
+		 * recurses into jockey3_disconnect() for interface 1, which only
+		 * latches DISCONNECTED and clears its intfdata; if the core got
+		 * there first, usb_driver_release_interface() sees a condition
+		 * other than USB_INTERFACE_BOUND and returns.
 		 */
-		snd_card_disconnect(chip->card);
+		usb_driver_release_interface(&jockey3_driver, chip->intf1);
+
+		/*
+		 * snd_card_free_when_closed() disconnects the card now and frees
+		 * it once userspace has closed it -- it never blocks, which is
+		 * the whole point of not using a managed card (see the comment in
+		 * jockey3_probe()). It runs snd_pcm_stop(DISCONNECTED) under the
+		 * stream lock on the way, which drives our .trigger and clears
+		 * 'running' with the proper locking, so there is nothing to clear
+		 * here by hand. @chip lives in card->private_data and may be gone
+		 * the moment this returns, so nothing below may touch it.
+		 */
+		snd_card_free_when_closed(chip->card);
 	}
 	usb_set_intfdata(intf, NULL);
 }
