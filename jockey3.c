@@ -362,6 +362,10 @@ static unsigned int jockey3_start_grace_ms(bool warm)
  * @dma_off: byte offset into runtime->dma_area, i.e. the hardware pointer; @lock
  * @period_off: bytes accumulated towards the current period; @lock
  * @running: stream is triggered and its payload should be filled; @lock
+ * @rate_committed: this direction has had a rate accepted by
+ *	jockey3_pcm_hw_params() and not yet released by jockey3_pcm_hw_free();
+ *	@lock. See jockey3_rate_committed_streams() for why the rate interlock
+ *	keys off this rather than off @running or off @substream.
  * @callbacks_active: number of URB completions currently inside the "safe zone"
  *	where they may still touch @substream or runtime->dma_area; @lock. The
  *	last one out wakes @drain_wait. A count rather than a flag because there
@@ -409,6 +413,7 @@ struct jockey3_pcm_urb_stream {
 	unsigned int dma_off;
 	unsigned int period_off;
 	bool running;
+	bool rate_committed;
 	unsigned int callbacks_active;
 	wait_queue_head_t drain_wait;
 	bool stopping;
@@ -655,21 +660,53 @@ static inline struct jockey3_pcm_urb_stream *jockey3_get_pcm_urb_stream(struct j
 		return &chip->capture;
 }
 
-static int jockey3_active_streams(struct jockey3_chip *chip)
+static void jockey3_set_rate_committed(struct jockey3_chip *chip, const int direction,
+				       bool committed)
 {
-	int active_streams = 0;
+	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
+
+	guard(spinlock_irqsave)(&urb_stream->lock);
+	urb_stream->rate_committed = committed;
+}
+
+/*
+ * How many directions currently hold the hardware rate, i.e. have had a rate
+ * accepted by jockey3_pcm_hw_params() and not yet released by
+ * jockey3_pcm_hw_free(). The device has a single rate for both directions, so
+ * this is what the open-time constraint and the hw_params interlock key off.
+ *
+ * Deliberately not a count of *running* streams: .trigger is what sets
+ * @running, so a stream that is open, has its rate fixed and is merely waiting
+ * to be started would not be counted, and the other direction could reprogram
+ * the hardware underneath it -- it would then play or record at the wrong
+ * speed.
+ *
+ * Equally deliberately not a count of *open* streams: a full-duplex
+ * application opens both directions before calling hw_params on either, and
+ * counting opens would pin the second one to whatever rate the device happens
+ * to be sitting at, refusing an otherwise legal rate change.
+ *
+ * One consequence is worth knowing: the constraint jockey3_pcm_open() applies
+ * is permanent for that substream's runtime, while a commitment is not, so a
+ * stream that opened while the other direction held a rate stays pinned to it
+ * even after that direction closes. That is inherent to a device with a single
+ * rate for both directions, and is the safe side of the trade.
+ */
+static int jockey3_rate_committed_streams(struct jockey3_chip *chip)
+{
+	int committed = 0;
 
 	scoped_guard(spinlock_irqsave, &chip->capture.lock) {
-		if (chip->capture.running)
-			active_streams++;
+		if (chip->capture.rate_committed)
+			committed++;
 	}
 
 	scoped_guard(spinlock_irqsave, &chip->playback.lock) {
-		if (chip->playback.running)
-			active_streams++;
+		if (chip->playback.rate_committed)
+			committed++;
 	}
 
-	return active_streams;
+	return committed;
 }
 
 static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
@@ -2494,7 +2531,7 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 		if (jockey3_is_disconnected(chip))
 			return -ENODEV;
 
-		if (jockey3_active_streams(chip) > 0) {
+		if (jockey3_rate_committed_streams(chip) > 0) {
 			/* Force the new stream to match the existing hardware rate */
 			ret = snd_pcm_hw_constraint_single(runtime,
 							   SNDRV_PCM_HW_PARAM_RATE,
@@ -2530,6 +2567,7 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		urb_stream->substream = NULL;
 		urb_stream->running = false;
+		urb_stream->rate_committed = false;
 
 		/*
 		 * A closed direction is not covered by jockey3_pcm_hw_params()
@@ -2800,8 +2838,8 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	unsigned int grace;
 	int ret = 0;
 
-	dev_dbg(&chip->intf0->dev, "PCM hw_params rate %u, active_streams %d\n",
-		rate, jockey3_active_streams(chip));
+	dev_dbg(&chip->intf0->dev, "PCM hw_params rate %u, rate_committed_streams %d\n",
+		rate, jockey3_rate_committed_streams(chip));
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
@@ -2830,19 +2868,33 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 		if (jockey3_is_disconnected(chip))
 			return -ENODEV;
 
+		/*
+		 * Drop this direction's own claim on the rate before counting:
+		 * an application is free to hw_free and run hw_params again at
+		 * a different rate, and its previous commitment must not be
+		 * what blocks it. Cleared inside rate_mutex, so the other
+		 * direction cannot observe the gap and reprogram the hardware.
+		 */
+		jockey3_set_rate_committed(chip, substream->stream, false);
+
 		if (chip->current_rate == rate) {
 			dev_dbg(&chip->intf0->dev, "Rate already set to %u, skipping change\n",
 				rate);
+			jockey3_set_rate_committed(chip, substream->stream, true);
 			return 0;
 		}
 
 		/*
-		 * If multiple streams are active, the ALSA core should have
-		 * enforced the constraint from jockey3_pcm_open. We still
-		 * sanity check here to be safe.
+		 * The other direction already holds the rate. The ALSA core
+		 * should have enforced the constraint from jockey3_pcm_open(),
+		 * so this is a backstop -- but it is also the only check that
+		 * covers a stream which opened while the device was idle and
+		 * only now asks for a rate the other direction has since fixed.
 		 */
-		if (jockey3_active_streams(chip) > 1) {
-			dev_err(&chip->intf0->dev, "Cannot change rate while other stream is active\n");
+		if (jockey3_rate_committed_streams(chip) > 0) {
+			dev_err(&chip->intf0->dev,
+				"Cannot change rate to %u while the other stream holds %u\n",
+				rate, chip->current_rate);
 			return -EBUSY;
 		}
 
@@ -2863,6 +2915,7 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 		}
 
 		jockey3_set_current_rate(chip, rate);
+		jockey3_set_rate_committed(chip, substream->stream, true);
 
 		jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip, false), "a rate change");
 	}
@@ -2934,10 +2987,25 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+/*
+ * Release this direction's claim on the hardware rate. The URB ring is
+ * deliberately left running (see the top-of-file DOC); all this hands back is
+ * the right of the other direction -- or of this one, on a re-run of
+ * hw_params -- to program a different rate.
+ */
+static int jockey3_pcm_hw_free(struct snd_pcm_substream *substream)
+{
+	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+
+	jockey3_set_rate_committed(chip, substream->stream, false);
+	return 0;
+}
+
 static const struct snd_pcm_ops jockey3_pcm_ops = {
 	.open = jockey3_pcm_open,
 	.close = jockey3_pcm_close,
 	.hw_params = jockey3_pcm_hw_params,
+	.hw_free = jockey3_pcm_hw_free,
 	.prepare = jockey3_pcm_prepare,
 	.trigger = jockey3_pcm_trigger,
 	.sync_stop = jockey3_pcm_sync_stop,
