@@ -537,6 +537,12 @@ static struct usb_driver jockey3_driver;
 static DEFINE_MUTEX(jockey3_devices_mutex);
 static DECLARE_BITMAP(jockey3_devices_used, SNDRV_CARDS);
 
+/*
+ * Which codec variant this build selected; set once by jockey3_module_init()
+ * along with the lookup tables it reports on, and read-only afterwards.
+ */
+static enum ploytec_codec_variant jockey3_codec_variant;
+
 
 /* Chip flags */
 #define JOCKEY3_FLAG_DISCONNECTED	0
@@ -2754,14 +2760,12 @@ static snd_pcm_uframes_t jockey3_pcm_pointer(struct snd_pcm_substream *substream
 
 static int jockey3_initialize_ploytec(struct jockey3_chip *chip, u32 *fw_version)
 {
-	enum ploytec_codec_variant codec_variant;
 	int ret;
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	codec_variant = ploytec_initialize_codec();
-	switch (codec_variant) {
+	switch (jockey3_codec_variant) {
 	case PLOYTEC_CODEC_PORTABLE:
 		dev_dbg(&chip->intf0->dev, "Using portable codec\n");
 		break;
@@ -3845,7 +3849,26 @@ static struct usb_driver jockey3_driver = {
 	.id_table = jockey3_ids
 };
 
-module_usb_driver(jockey3_driver);
+/*
+ * The codec's bit-spread lookup tables are module-global and written without
+ * any locking, so they are built exactly once here rather than from
+ * jockey3_initialize_ploytec(). That runs at probe and again after every
+ * device reset, and rate_mutex is per chip: with two Jockey 3s attached, one
+ * resetting would rewrite the tables while the other's URB completion handlers
+ * were reading them in softirq context.
+ */
+static int __init jockey3_module_init(void)
+{
+	jockey3_codec_variant = ploytec_initialize_codec();
+	return usb_register(&jockey3_driver);
+}
+module_init(jockey3_module_init);
+
+static void __exit jockey3_module_exit(void)
+{
+	usb_deregister(&jockey3_driver);
+}
+module_exit(jockey3_module_exit);
 
 MODULE_AUTHOR("Frank van de Pol <fvdpol@gmail.com>");
 MODULE_DESCRIPTION(CARD_NAME " ALSA Driver");
