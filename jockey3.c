@@ -312,7 +312,6 @@ MODULE_PARM_DESC(cold_start_grace_ms, "Grace (ms) to reach steady streaming afte
 module_param(warm_start_grace_ms, int, 0644);
 MODULE_PARM_DESC(warm_start_grace_ms, "Grace (ms) to resume streaming after the stall watchdog's warm URB-ring restart. Placeholder default; keep close to cold_start_grace_ms.");
 
-
 /*
  * Current start-grace budget in ms: warm_start_grace_ms for the stall
  * watchdog's own lightweight URB restart, cold_start_grace_ms for every other
@@ -543,11 +542,9 @@ static DECLARE_BITMAP(jockey3_devices_used, SNDRV_CARDS);
  */
 static enum ploytec_codec_variant jockey3_codec_variant;
 
-
 /* Chip flags */
 #define JOCKEY3_FLAG_DISCONNECTED	0
 #define JOCKEY3_FLAG_RESETTING		1
-
 
 static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
 {
