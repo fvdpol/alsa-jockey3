@@ -2279,6 +2279,87 @@ cases:
       external sysfs reset bypasses entirely. Worth its own case if that
       narrower guarantee is ever wanted; not a replacement for this one.
 
+  - id: JT-HOTPLUG-005
+    title: Unplug while a stopped process holds a PCM fd
+    area: HOTPLUG
+    level: L3
+    mode: automated
+    status: implemented
+    requires: [device, usb-power]
+    exec: cases/hotplug_fd_held.py
+    params:
+      settle_seconds: 15
+      off_seconds: 2
+      wedge_timeout_seconds: 60
+      free_settle_seconds: 3
+    metrics: [card_index_first, card_index_while_held, card_index_last,
+              card_gone_while_held, reenumerate_while_held_ms]
+    pass: >
+      The device re-enumerates after the port is powered back on even though a
+      stopped process still holds a PCM file descriptor on the old card, and
+      the original card slot is reused once that process is released.
+    expect_dmesg:
+      - 'Failed to resubmit (?:playback|capture|MIDI IN) URB: -19$'
+    steps:
+      - >
+        Note the card index, then hold a file descriptor open on it without
+        closing it, e.g.
+        `python3 -c 'import os,time; os.open("/dev/snd/pcmC0D0p", os.O_RDWR|os.O_NONBLOCK); time.sleep(9999)' &`
+      - Stop that process with `kill -STOP <pid>` so it cannot close the fd.
+      - Unplug the USB cable (or power the hub port down).
+      - >
+        Plug it back in. THIS is the check: the device must re-enumerate. If
+        nothing happens, the unbind is wedged -- confirm with a hung-task
+        splat naming snd_card_free() in dmesg after about two minutes.
+      - >
+        `kill -CONT <pid>; kill <pid>`, then unplug and replug once more and
+        confirm the card comes back at its ORIGINAL index.
+      - >
+        If the machine's USB is dead, recover with
+        `rmmod xhci_pci; modprobe xhci_pci` or reboot.
+    notes: >
+      The regression test for issue #37, where the card was created with
+      snd_devm_card_new(). A managed card is freed from the devres unwind
+      inside usb_unbind_interface(), and snd_card_free() there does not return
+      until userspace has closed every fd on the card -- on an unplug that
+      unwind runs on the USB hub work queue holding the parent hub's device
+      lock, so one process that will not close stalls hotplug for the whole
+      hub subtree.
+
+      A PREDICATE, NOT A RATE. There is no race here: with the bug the first
+      cycle wedges, with the fix none ever does. Three to five runs is the
+      whole test. The volume belongs to the KASAN campaign that covers the
+      use-after-free class this conversion also touches, which is a different
+      question and wants a -debug kernel; this one wants -prod, because what
+      it measures is whether a thread blocks, and KASAN only slows that down.
+
+      SIGSTOP rather than a sleeping process on purpose: a process that merely
+      has not got round to closing yet can close during the unplug and hand
+      back a false pass on a timing accident.
+
+      The card vanishing from /proc/asound is NOT a discriminator -- with the
+      bug, snd_card_free() runs snd_card_disconnect() before it starts
+      waiting, so the card goes away on time either way. Only the replug
+      separates the two.
+
+      THIS CASE CAN LEAVE THE MACHINE NEEDING MANUAL RECOVERY, and on a kernel
+      that still has the bug that is the expected outcome rather than a risk:
+      USB on that controller stays dead until the wedged work item is
+      released, which nothing the case can do will achieve. Powering the port
+      may hang as well, since uhubctl needs the hub device lock the wedged
+      work item holds -- so every privileged call carries a timeout and a
+      timeout is reported as the wedge, not as a tool error. Deliberately not
+      in the smoke profile.
+
+      The second half covers what the fix MOVED. The card slot used to be
+      released in the devres unwind, before usb_unbind_interface() returned;
+      it is now released from card->private_free, at last close. So a replug
+      taken while the holder is still stopped legitimately lands on a
+      different index -- recorded as a metric, never a failure. The defect
+      would be the slot never coming back, which the final cycle checks.
+      JT-PROBE-003 covers slot reuse in the ordinary case; this covers it
+      across the deferred free.
+
   # ------------------------------------------------------------- INTEGRATION
 
   - id: JT-INTEROP-001
