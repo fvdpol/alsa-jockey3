@@ -8,6 +8,13 @@
 # Everything that makes a debug kernel a debug kernel: CONFIG_*-debug.config
 # carries these as =y, CONFIG_*-prod.config has them off.
 #
+# DEBUG_OBJECTS_FREE is listed by name even though it depends on
+# DEBUG_OBJECTS and so disappears from -prod with it. It cascades OFF but
+# never cascades ON: a -debug config can carry DEBUG_OBJECTS=y and still
+# leave DEBUG_OBJECTS_FREE unset, which is precisely how x86_64-debug came
+# to be the only target checking freed memory for live debug objects.
+# Naming it here is what lets check-debug-config.sh catch that drift.
+#
 # The lock-debugging entries are not redundant with PROVE_LOCKING: LOCKDEP is
 # `select`ed by several symbols, so disabling PROVE_LOCKING alone leaves it on
 # via DEBUG_LOCK_ALLOC, DEBUG_RT_MUTEXES and DEBUG_WW_MUTEX_SLOWPATH -- which
@@ -18,7 +25,7 @@ DEBUG_ONLY=(
 	PROVE_LOCKING PROVE_RCU LOCKDEP DEBUG_LOCKDEP LOCK_STAT
 	DEBUG_LOCK_ALLOC DEBUG_RT_MUTEXES DEBUG_WW_MUTEX_SLOWPATH
 	DEBUG_ATOMIC_SLEEP DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_PREEMPT
-	DEBUG_LIST DEBUG_OBJECTS DEBUG_KMEMLEAK
+	DEBUG_LIST DEBUG_OBJECTS DEBUG_OBJECTS_FREE DEBUG_KMEMLEAK
 	# The codec KUnit suite runs at every module load. Useful on a debug
 	# kernel, explicitly not for production -- see its Kconfig help.
 	KUNIT SND_USB_JOCKEY3_CODEC_KUNIT_TEST
@@ -35,7 +42,7 @@ DEBUG_REQUIRED=(
 	PROVE_LOCKING PROVE_RCU LOCKDEP
 	DEBUG_LOCK_ALLOC DEBUG_RT_MUTEXES DEBUG_WW_MUTEX_SLOWPATH
 	DEBUG_ATOMIC_SLEEP DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_PREEMPT
-	DEBUG_LIST DEBUG_OBJECTS DEBUG_KMEMLEAK
+	DEBUG_LIST DEBUG_OBJECTS DEBUG_OBJECTS_FREE DEBUG_KMEMLEAK
 	KUNIT SND_USB_JOCKEY3_CODEC_KUNIT_TEST
 )
 
