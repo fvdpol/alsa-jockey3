@@ -88,15 +88,27 @@ def _index_entry(data):
 
     Full run.json carries metrics, dmesg and per-case params that build_index
     never touches; keeping only this is what makes the cache below small
-    enough to stay cheap as the results directory grows without bound.
+    enough to stay cheap as the results directory grows without bound. The
+    shape of what's kept -- env.driver.build, not a flattened "git" key --
+    must match what build_index() reads out of a real run.json exactly:
+    build_index() doesn't know it's looking at a cached entry, so a
+    lookalike-but-different shape reads back as an empty dict everywhere,
+    which is silent (no KeyError) and wrong in two ways at once -- every
+    driver hash comes back missing, which commits_since() then reports as
+    "unknown distance" and the matrix renders as stale (🟡) even for a
+    same-commit pass, and is_dirty() on an empty dict defaults to "clean",
+    which would let a dirty run's pass count under --matrix's "committed
+    code only" claim.
     """
     git = ((data.get("env") or {}).get("driver") or {}).get("build") or {}
     return {
         "target": data.get("target", "?"),
         "started": data.get("started"),
-        "git": {k: git[k] for k in
-                ("git_hash", "git_describe", "kernel_driver_dirty", "dirty")
-                if k in git},
+        "env": {"driver": {"build": {
+            k: git[k] for k in
+            ("git_hash", "git_describe", "kernel_driver_dirty", "dirty")
+            if k in git
+        }}},
         "results": [{"id": r["id"], "status": r["status"]}
                     for r in data.get("results", [])],
     }
