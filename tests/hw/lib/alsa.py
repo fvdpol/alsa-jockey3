@@ -445,20 +445,24 @@ def missing_tools(tools):
 def active_sound_servers():
     """Names of sound-server processes currently running, if any.
 
-    A report, not an action. PipeWire, JACK (jackd/jackdbus) and anything
-    built on either -- WirePlumber, or Mixxx routed through JACK instead of
-    ALSA -- can hold the card open and turn an exclusive-access test failure
-    into something that looks like a driver bug. Stopping pipewire.service
-    used to be automatic here, but pipewire.socket respawns it the moment
-    anything -- including PipeWire's own ALSA monitor reacting to a card
-    appearing mid cold-boot test -- touches the socket, so a stop is not
-    reliable without also masking, and masking JACK correctly is not this
-    script's call to make: it may be serving something else on this machine
-    entirely. See tests/hw/actions/sound_server.sh for the operator-driven
-    disable/enable.
+    A report, not an action. PipeWire, JACK (jackd/jackdbus), PulseAudio and
+    anything built on any of them -- WirePlumber, or Mixxx routed through JACK
+    instead of ALSA -- can hold the card open and turn an exclusive-access
+    test failure into something that looks like a driver bug. PulseAudio's
+    own module-udev-detect reacts to a card appearing exactly the way
+    PipeWire's ALSA monitor does (JT-PERF-001's unbind/rebind point on
+    2026-09-12/pi4test raced an unannounced PulseAudio instance this way, with
+    no console attached and no pipewire/wireplumber/jackd process running to
+    explain it). Stopping pipewire.service used to be automatic here, but
+    pipewire.socket respawns it the moment anything -- including PipeWire's
+    own ALSA monitor reacting to a card appearing mid cold-boot test --
+    touches the socket, so a stop is not reliable without also masking, and
+    masking JACK or PulseAudio correctly is not this script's call to make:
+    either may be serving something else on this machine entirely. See
+    tests/hw/actions/sound_server.sh for the operator-driven disable/enable.
     """
     found = []
-    for name in ("pipewire", "wireplumber", "jackd", "jackdbus"):
+    for name in ("pipewire", "wireplumber", "jackd", "jackdbus", "pulseaudio"):
         r = subprocess.run(["pgrep", "-x", name], capture_output=True)
         if r.returncode == 0:
             found.append(name)

@@ -486,8 +486,9 @@ and cross-checked against `/proc/config.gz` or `/boot/config-*` — never
 declared by the operator, because the operator is the least reliable part of
 the system at 2am.
 
-**Preparation.** PipeWire/wireplumber is stopped so the device is not claimed,
-and the card is resolved by driver match. Both are restored afterwards.
+**Preparation.** PipeWire/WirePlumber/PulseAudio is stopped so the device is
+not claimed, and the card is resolved by driver match. Both are restored
+afterwards.
 
 Raising `kernel.printk` is *not* yet part of preparation. The verb exists in
 the privileged helper — adding one later would mean reinstalling on every test
