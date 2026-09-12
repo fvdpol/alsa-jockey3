@@ -135,7 +135,7 @@ cases:
     level: L3
     mode: automated
     status: implemented
-    requires: []
+    requires: [device]
     per_target: true
     exec: cases/config_check.py
     pass: >
@@ -164,6 +164,16 @@ cases:
       which identifies its target from the tree being built and would
       misattribute this case's verdict to whatever the build host's own
       unrelated kernel happens to be running.
+
+      requires: [device], even though the check itself never touches the
+      driver: this case's pass is only recorded in env.driver.build when the
+      module is loaded, which on this hardware only happens once the card is
+      present. A pass captured with no card attached carries no driver git
+      hash, so ledger.py --matrix cannot judge it fresh or stale and shows it
+      permanently stale (2026-09-12) regardless of how recently the driver
+      commit under test actually landed. Requiring the device turns that into
+      a skip on a card-less machine instead of a pass nobody can trust the
+      freshness column on.
 
   # ------------------------------------------------------------------ CODEC
 
@@ -908,7 +918,7 @@ cases:
     area: PCM
     level: L3
     mode: automated
-    status: planned
+    status: idea
     requires: [device, root]
     metrics:
       - deactivations_observed
@@ -1930,7 +1940,7 @@ cases:
     area: MIDI
     level: L3
     mode: semi-automated
-    status: planned
+    status: idea
     requires: [device, root]
     metrics:
       - bytes_received_while_stopped
@@ -1964,7 +1974,7 @@ cases:
     area: MIDI
     level: L3
     mode: semi-automated
-    status: planned
+    status: idea
     requires: [device, root]
     metrics:
       - activation_latency_ms
@@ -2051,7 +2061,7 @@ cases:
     area: PM
     level: L3
     mode: automated
-    status: planned
+    status: idea
     requires: [device, root, rtc-wake]
     metrics:
       - resumed_streaming

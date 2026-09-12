@@ -53,6 +53,7 @@ def parse_flag_lists(path):
 
 def main():
     c = Case()
+    c.require_card()
 
     flags_path = os.path.join(c.repo, "tests", "configs", "config-flags.sh")
     if not os.path.exists(flags_path):
