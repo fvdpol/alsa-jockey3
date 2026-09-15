@@ -1264,6 +1264,23 @@ cases:
       # the script default (capture), so a JT-RATE-003 run is directly
       # comparable to a default JT-RATE-001 run on resets_per_change_pct.
       iterations_per_run: 5000
+      # Declared at the script's own defaults -- same as JT-RATE-001 uses --
+      # so both are visible here rather than only in cases/rate_change.py,
+      # and so an override (profile or --param) has something to start from.
+      # Behavior-neutral as declared: interleave is what JT-RATE-003 already
+      # ran with implicitly. See JT-RATE-001's sweep_order comment for why
+      # random is called out there as "best suited to JT-RATE-003" -- that is
+      # a recommendation for a deliberate override on an endurance run, not
+      # this default, because flipping it here would move
+      # resets_per_change_pct (interleave is all-large-alternating steps,
+      # random mixes in small within-family ones) and break the
+      # apples-to-apples comparison with JT-RATE-001 that this case exists
+      # to provide. Use `--param sweep_order=random` (and optionally
+      # sweep_seed, for a reproducible endurance sweep) when that
+      # blind-spot coverage is what a specific run wants.
+      rates: [44100, 48000, 88200, 96000]
+      sweep_order: interleave
+      # sweep_seed: 0
     metrics:
       # Identical to JT-RATE-001's list, on purpose: the whole point of this
       # case is that resets_per_change_pct and its companions are the SAME
