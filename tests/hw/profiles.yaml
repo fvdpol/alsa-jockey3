@@ -308,3 +308,15 @@ profiles:
         JT-RATE-003: {params: {iterations_per_run: 1000}}
         JT-MIDI-007: {params: {duration_seconds: 3600}}
         JT-INTEROP-004: {iterations: 0}
+        # A 5000-cycle run hit BUG: MAX_LOCKDEP_CHAINS too low! around
+        # iteration 2200 (2026-09-15, docs/test_strategy.md "Bind/unbind
+        # endurance exhausts lockdep's own chain table"). Not a driver
+        # defect -- the trace's locks are core kernfs/hrtimer, none of
+        # ours -- but it silently disables lockdep for the rest of the
+        # boot, so stay well clear of the ceiling rather than skirt it.
+        JT-PROBE-005: {params: {iterations_per_run: 1000}}
+      arm64-debug:
+        # Same lockdep chain exhaustion as x86_64-debug above, and dwc2 on
+        # a Pi 4B is slower to begin with, so there is no mileage reason to
+        # push this one higher.
+        JT-PROBE-005: {params: {iterations_per_run: 1000}}

@@ -155,6 +155,38 @@ The consequence for the suite is narrow but firm:
 A latency or throughput figure from a debug kernel is likewise a fact about
 KASAN, which is why §4 already puts those on `x86_64-prod`.
 
+### Bind/unbind endurance exhausts lockdep's own chain table
+
+`JT-PROBE-005` (bind/unbind endurance, thousands of cycles) hit `BUG:
+MAX_LOCKDEP_CHAINS too low!` partway through a 5000-iteration run on
+`x86_64-debug` (2026-09-15, run
+`tests/hw/results/x86_64-debug/20260915T165830Z-functional/`), around
+iteration 2200. The trace's own locks are core kernfs and per-CPU hrtimer
+primitives — `kernfs_add_one`'s `down_write()` (taken while `device_create()`
+registers a fresh sysfs node for the OSS rawmidi minor on every bind) preempted
+mid-syscall by an APIC timer interrupt into `__hrtimer_rearm_deferred`. No
+jockey3-owned lock (`rate_mutex`, `playback.lock`, `capture.lock`,
+`midi_lock`) appears anywhere in it, and lockdep never reported a possible
+deadlock — it reported that its own global chain hash table (a
+kernel-wide, compile-time-sized cache of every distinct lock-nesting sequence
+ever observed, `CONFIG_LOCKDEP_CHAINS_BITS`) filled up.
+
+The exhaustion is a function of iteration count, not of anything the driver
+does wrong: every bind/unbind cycle creates new sysfs kobjects, and sampling
+thousands of them against essentially random interrupt-arrival points
+generates a correspondingly large number of distinct chains. Any driver put
+through the same cycle count on a `LOCKDEP` kernel would eventually hit the
+same ceiling. Once it fires, lockdep prints once and disables the validator
+for the rest of the boot — so the practical cost is not a false failure
+against the driver, but silently losing lock-correctness coverage for
+whatever runs afterward on that boot.
+
+Treat "lockdep disabled" partway through a bind/unbind endurance run as an
+environment ceiling, not a driver finding, and keep `JT-PROBE-005`'s
+`iterations_per_run` on `LOCKDEP`-enabled targets (`x86_64-debug`,
+`arm64-debug`) comfortably below where this run hit it — see the `soak`
+profile's per-target override in `tests/hw/profiles.yaml`.
+
 | Target | Typical machine | Role |
 |---|---|---|
 | `x86_64-debug` | HP EliteDesk 800 G2 (i5, 64 GB, NVMe) | Primary. Memory errors and lock inversions surface here or nowhere. |
