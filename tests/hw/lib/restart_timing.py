@@ -35,6 +35,7 @@ Two constraints worth stating up front:
 import json
 import os
 import re
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATASET = os.path.join(HERE, os.pardir, "data", "restart_timing.json")
@@ -193,11 +194,33 @@ def load(path=DATASET):
 
 
 def save(data, path=DATASET):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Write-then-rename, not open(path, "w") directly: that call truncates the
+    # file before a single byte of the new content lands, so a process killed
+    # or interrupted mid-write (crash, OOM, a lost NFS write -- results/ is
+    # shared across the rig's hosts) leaves the dataset empty rather than
+    # merely stale. os.replace() is atomic on the same filesystem, so a reader
+    # only ever sees the old file or the fully-written new one.
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
     data["extractor_version"] = EXTRACTOR_VERSION
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-        f.write("\n")
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".restart_timing.",
+                                     suffix=".tmp")
+    try:
+        # mkstemp() ignores umask and always creates 0600, unlike the
+        # open(path, "w") this replaces -- match the existing file's mode
+        # (group-writable: multiple rig hosts share this path over NFS) so
+        # os.replace() doesn't quietly lock other hosts out.
+        mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o664
+        os.chmod(tmp_path, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        os.unlink(tmp_path)
+        raise
 
 
 def has_run(data, run_id):
