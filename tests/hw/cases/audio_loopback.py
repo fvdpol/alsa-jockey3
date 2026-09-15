@@ -434,13 +434,16 @@ def run(c, device):
                    f"{(play_err or '').strip().splitlines()[-1][:120] if play_err else ''}")
             continue
         if watch_p.xruns:
-            c.fail(f"{rate} Hz: {watch_p.xruns} playback xrun(s)")
+            # Recorded in xruns_playback, not failed -- a headroom fact at
+            # this rate/host, not a functional defect (pcm_limits.py's
+            # reasoning applies here too).
+            c.progress(f"  {rate} Hz: {watch_p.xruns} playback xrun(s)")
         if cap_rc != 0:
             c.fail(f"{rate} Hz: arecord exited {cap_rc}: "
                    f"{(cap_err or '').strip()[:120]}")
             continue
         if watch_c.xruns:
-            c.fail(f"{rate} Hz: {watch_c.xruns} capture xrun(s)")
+            c.progress(f"  {rate} Hz: {watch_c.xruns} capture xrun(s)")
 
         levels = rms_dbfs_per_channel(raw, CAPTURE_CHANNELS)
         c.metric(f"rms_dbfs_{rate}", levels)

@@ -230,7 +230,10 @@ def run_playback(c, device):
             c.fail(f"{rate} Hz: aplay exited {rc}: "
                    f"{(err or '').strip().splitlines()[-1][:120] if err else ''}")
         elif watch.xruns:
-            c.fail(f"{rate} Hz: {watch.xruns} xrun(s)")
+            # Recorded in the xruns metric, not failed here: an xrun is a
+            # fact about this host's headroom at this rate, not a functional
+            # defect. See pcm_limits.py's docstring for the same reasoning.
+            c.progress(f"  {rate} Hz: {watch.xruns} xrun(s)")
         if elapsed is not None:
             c.metric(f"elapsed_s_{rate}", elapsed)
         c.metric(f"avail_max_{rate}", watch.avail_max)
@@ -271,7 +274,8 @@ def run_capture(c, device):
                    f"{(err or '').strip()[:120]}")
             continue
         if watch.xruns:
-            c.fail(f"{rate} Hz: {watch.xruns} xrun(s)")
+            # Metric only -- see run_playback()'s note above.
+            c.progress(f"  {rate} Hz: {watch.xruns} xrun(s)")
 
         got = os.path.getsize(raw) if os.path.exists(raw) else 0
         expect = rate * seconds * CAPTURE_CHANNELS * BYTES_PER_SAMPLE
@@ -292,9 +296,11 @@ def run_capture(c, device):
 def run_duplex(c, device):
     """JT-PCM-005: playback and capture concurrently, at each rate.
 
-    The pass criterion is that both directions run to completion without an
-    xrun -- the same thing the manual steps checked by watching two
-    terminals. The capture level is reported alongside it but never fails the
+    The pass criterion is that both directions run to completion; an xrun is
+    recorded as a metric (xruns_playback/xruns_capture) rather than failed,
+    for the same reason pcm_limits.py never fails on one -- it is a fact
+    about this host's headroom at this rate, not a functional defect. The
+    capture level is reported alongside it but never fails the
     case: with nothing plugged into the inputs, a noise floor around -90 to
     -110 dBFS is the correct reading, and with a loopback cable and a known
     source it will read far higher. Only the person who knows what is plugged
@@ -342,13 +348,13 @@ def run_duplex(c, device):
             c.fail(f"{rate} Hz: aplay exited {play_rc}: "
                    f"{(play_err or '').strip().splitlines()[-1][:120] if play_err else ''}")
         elif watch_p.xruns:
-            c.fail(f"{rate} Hz: {watch_p.xruns} playback xrun(s)")
+            c.progress(f"  {rate} Hz: {watch_p.xruns} playback xrun(s)")
 
         if cap_rc != 0:
             c.fail(f"{rate} Hz: arecord exited {cap_rc}: "
                    f"{(cap_err or '').strip().splitlines()[-1][:120] if cap_err else ''}")
         elif watch_c.xruns:
-            c.fail(f"{rate} Hz: {watch_c.xruns} capture xrun(s)")
+            c.progress(f"  {rate} Hz: {watch_c.xruns} capture xrun(s)")
 
         levels = rms_dbfs_per_channel(raw, CAPTURE_CHANNELS)
         c.metric(f"rms_dbfs_{rate}", levels)
@@ -508,7 +514,10 @@ def run_soak(c, device):
     recovered stall is a pass in JT-RATE. Those guards stop it retrying for
     hours against a device that is off, unplugged or wedged.
 
-    xruns and avail_max come from watch_pcm. The capture pipe going quiet for
+    xruns and avail_max come from watch_pcm, recorded as metrics
+    (xruns_playback/xruns_capture/xruns_per_hour) rather than failed -- an
+    xrun over an 8 h run is a headroom fact, not a functional defect, the
+    same reasoning as pcm_limits.py's. The capture pipe going quiet for
     CAPTURE_GAP_S while the substream still reports RUNNING is a dead
     transport an xrun count would miss, and is failed -- except across a
     deliberate re-open, whose outage is recorded as
@@ -732,9 +741,9 @@ def run_soak(c, device):
         c.metric("restart_events", restart_events)
 
     if watch_p.xruns:
-        c.fail(f"{watch_p.xruns} playback xrun(s) over the run")
+        c.progress(f"  {watch_p.xruns} playback xrun(s) over the run")
     if watch_c.xruns:
-        c.fail(f"{watch_c.xruns} capture xrun(s) over the run")
+        c.progress(f"  {watch_c.xruns} capture xrun(s) over the run")
 
 
 MODES = {"playback": run_playback, "capture": run_capture, "duplex": run_duplex,

@@ -5,6 +5,7 @@
     ./ledger.py                        coverage table
     ./ledger.py --target x86_64-debug  one target, and drop the target column
     ./ledger.py --metrics              metric trends per target
+    ./ledger.py --xrun-trend           xrun anomaly check, per target/case bucket
     ./ledger.py --markdown             as markdown for publishing
     ./ledger.py --matrix               one-glance pass/fail pivot, all targets
 
@@ -47,6 +48,7 @@ import functools
 import glob
 import json
 import os
+import statistics
 import subprocess
 import sys
 import time
@@ -340,7 +342,10 @@ def build_index(runs, cases=None, clean_only=False):
                 slot = idx.setdefault(key, {"pass": None, "last": None})
                 if slot["last"] is None or (when or "") > (slot["last"]["when"] or ""):
                     slot["last"] = entry
-                if r["status"] == results.PASS:
+                # PASS_XRUN counts as a pass for coverage/matrix purposes --
+                # the case's own functional criterion held; it just also had
+                # a recorded xrun. See results.PASS_XRUN.
+                if r["status"] in (results.PASS, results.PASS_XRUN):
                     if (slot["pass"] is None
                             or (when or "") > (slot["pass"]["when"] or "")):
                         slot["pass"] = entry
@@ -438,6 +443,7 @@ MATRIX_LEGEND = """\
 | | |
 |---|---|
 | ✅ | passed, against the current driver |
+| 🟨 | passed, against the current driver, but recorded an xrun -- see the xrun trend for whether this is normal for this target |
 | 🟡 | passed, but the driver has moved on since -- may no longer hold |
 | ❌ | failed, against the current driver |
 | 🟠 | failed, but the driver has moved on since -- may already be fixed |
@@ -464,7 +470,10 @@ def matrix_cell(slot):
         return ""
     if slot["pass"]:
         n = commits_since(slot["pass"].get("hash"))
-        return "✅" if n == 0 else "🟡"
+        xrun = slot["pass"]["status"] == results.PASS_XRUN
+        if n == 0:
+            return "🟨" if xrun else "✅"
+        return "🟡"
     last = slot["last"]
     if last is None:
         return ""
@@ -545,10 +554,87 @@ def metric_trends(runs, markdown=False):
     return "\n".join(lines)
 
 
+# Metrics that carry a raw or normalized xrun count -- kept in step with
+# runner.py's XRUN_METRIC_KEYS, plus xruns_per_hour, which is already
+# duration-normalized (see pcm.py's soak case).
+XRUN_METRIC_NAMES = ("xruns", "xruns_playback", "xruns_capture", "xruns_per_hour")
+
+# How many prior runs a bucket needs before this file will render a verdict
+# on the latest one. Below this, a single bad-luck run would look identical
+# to an established pattern, so it is reported as "still forming" instead.
+MIN_XRUN_BASELINE = 5
+
+
+def _xrun_anomaly(history, latest):
+    """Is `latest` a clear outlier against this bucket's own `history`?
+
+    Robust (median + MAD), never a fixed cutoff: how many xruns are normal
+    varies by platform tier, sample rate and debug-vs-prod config, and this
+    is deliberately scoped per (target, case, metric) bucket rather than
+    global, so those differences fall out for free -- armhf and
+    x86_64-debug already sort into their own buckets by target name alone.
+    Returns None when there isn't enough history yet to judge.
+    """
+    if len(history) < MIN_XRUN_BASELINE:
+        return None
+    median = statistics.median(history)
+    mad = statistics.median([abs(v - median) for v in history])
+    # A small absolute floor keeps a long streak of exact zeros from reading
+    # the very first nonzero run as an "infinite" outlier just because MAD is
+    # zero -- that first occurrence is exactly the case worth a look, but the
+    # verdict here is "worth a look", not "certainly a regression".
+    threshold = median + max(5 * mad, 2)
+    return latest > threshold
+
+
+def xrun_trends(runs, markdown=False):
+    """Per (target, case, xrun metric), oldest to newest: is the latest run
+    out of line with this exact bucket's own history?
+
+    This is where "how many xruns are acceptable here" gets decided -- never
+    as a static number in a case or anywhere in this file, but as a
+    comparison against what this target/case/metric combination has actually
+    produced before. Single-run reporting (runner.py's PASS_XRUN badge) stays
+    purely descriptive; this is the layer that judges whether a badge is
+    business as usual or a real drift.
+    """
+    series = {}
+    for run in sorted(runs, key=lambda r: r.get("started") or ""):
+        target = run.get("target", "?")
+        for r in run.get("results", []):
+            for name in XRUN_METRIC_NAMES:
+                value = (r.get("metrics") or {}).get(name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                series.setdefault((target, r["id"], name), []).append(value)
+
+    if not series:
+        return "no xrun metrics recorded yet"
+
+    lines = []
+    for (target, cid, name), values in sorted(series.items()):
+        latest = values[-1]
+        verdict = _xrun_anomaly(values[:-1], latest)
+        recent = ", ".join(f"{v:g}" for v in values[-8:])
+        if verdict is None:
+            tag = "(baseline still forming)"
+        elif verdict:
+            tag = "ANOMALY -- well above this bucket's own history"
+        else:
+            tag = ""
+        lines.append(f"{target:<14} {cid:<16} {name:<16} {recent:<28} {tag}".rstrip())
+    if markdown:
+        return "```\n" + "\n".join(lines) + "\n```"
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Coverage and metric trends.")
     ap.add_argument("--results-dir")
     ap.add_argument("--metrics", action="store_true", help="metric trends only")
+    ap.add_argument("--xrun-trend", action="store_true",
+                     help="xrun anomaly check per target/case, against each "
+                          "bucket's own history (see PASS_XRUN)")
     ap.add_argument("--markdown", action="store_true")
     ap.add_argument("--matrix", action="store_true",
                      help="pass/fail pivot, all targets, for publishing")
@@ -589,6 +675,13 @@ def main():
     if not runs:
         print(f"no runs found under {root}")
         print("run ./runner.py --profile smoke to create one")
+        return 0
+
+    if args.xrun_trend:
+        if args.markdown:
+            print(f"## xrun trend — {args.target}\n" if args.target
+                  else "## xrun trend\n")
+        print(xrun_trends(runs, args.markdown))
         return 0
 
     idx = build_index(runs, cases)

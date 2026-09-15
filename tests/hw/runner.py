@@ -430,13 +430,20 @@ def failure_reason(err, out, rc):
 
 # How a verdict looks at a glance. The word is still there for anything
 # parsing the output; the mark is for the person watching it happen.
-MARKS = {results.PASS: "✓", results.FAIL: "✗",
+MARKS = {results.PASS: "✓", results.PASS_XRUN: "✓", results.FAIL: "✗",
          results.SKIP: "–", results.BLOCKED: "⊘",
          results.PENDING: "?"}
 
-MARK_STYLES = {results.PASS: ("bold", "green"), results.FAIL: ("bold", "red"),
+MARK_STYLES = {results.PASS: ("bold", "green"),
+               results.PASS_XRUN: ("bold", "yellow"),
+               results.FAIL: ("bold", "red"),
                results.SKIP: ("dim",), results.BLOCKED: ("yellow",),
                results.PENDING: ("cyan",)}
+
+# Metrics that carry a raw xrun count, checked to rebadge an otherwise-PASSing
+# case as PASS_XRUN. Deliberately just "was it nonzero", not a threshold --
+# see results.PASS_XRUN's docstring for why no cutoff lives here.
+XRUN_METRIC_KEYS = ("xruns", "xruns_playback", "xruns_capture")
 
 
 def mark(status, style=None):
@@ -542,6 +549,12 @@ def run_case(case, iteration, params, ctx):
     if r.status == results.PASS and buckets[kmsg.UNEXPECTED]:
         r.status = results.FAIL
         r.reason = f"unexpected driver message: {buckets[kmsg.UNEXPECTED][0][:160]}"
+
+    # A case that passed its own functional check but recorded xruns gets a
+    # distinct badge, not a downgrade to FAIL -- see results.PASS_XRUN.
+    if r.status == results.PASS and any(
+            r.metrics.get(k) for k in XRUN_METRIC_KEYS):
+        r.status = results.PASS_XRUN
 
     if buckets[kmsg.INVESTIGATE]:
         ctx["investigate"].extend(buckets[kmsg.INVESTIGATE])

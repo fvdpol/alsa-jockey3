@@ -28,7 +28,22 @@ from dataclasses import dataclass, field, asdict
 # profile said not to run it here, BLOCKED means we wanted to and could not
 # (missing capability, missing tool). Only one of those is a coverage gap you
 # might want to close.
+#
+# PASS_XRUN is never something a case exits with -- a case only ever passes
+# or fails on its own functional criterion (see lib/case.py's EXIT_* codes).
+# The runner derives PASS_XRUN after the fact, purely from whether a PASSing
+# case's own recorded metrics show a nonzero xrun count (see
+# runner.py:XRUN_METRIC_KEYS). It says "this ran, and functionally held, but
+# had a performance hiccup worth a second look" -- distinct from a clean
+# PASS, but not a FAIL, because how many xruns are "expected" varies wildly
+# by platform tier, sample rate and debug-vs-prod config. Deciding whether a
+# given count is business as usual or an actual regression is deliberately
+# NOT done here or in any case: it is a longitudinal question against that
+# same (target, case, params) bucket's own history, answered by
+# ledger.py's xrun trend tracking, not a static threshold anywhere in this
+# file or in a case.
 PASS = "pass"
+PASS_XRUN = "pass_xrun"
 FAIL = "fail"
 SKIP = "skip"
 BLOCKED = "blocked"
