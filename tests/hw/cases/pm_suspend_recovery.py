@@ -62,6 +62,13 @@ sys.path.insert(0, os.path.normpath(
 from lib.case import Case            # noqa: E402
 from lib import alsa, kmsg, priv     # noqa: E402
 
+# The driver's own PM callbacks. These are the only exact bracket for "after
+# jockey3_suspend() ran": the PM core's "suspend entry" is logged before
+# userspace is even frozen, with the device still fully live, so recovery
+# between it and the driver callback is legitimate and must not be counted.
+RE_SUSPENDED = re.compile(r"USB suspend, stopping URBs")
+RE_RESUMED = re.compile(r"USB (?:reset )?resume, restoring device")
+
 # Entered the ladder: logged before rate_mutex is taken, so it appears whether
 # or not the fix is in. Counting it is how the case knows it provoked anything.
 RE_ENTERED = re.compile(
@@ -90,6 +97,14 @@ def main():
         c.blocked(f"cannot suspend: {why}")
     c.require_card()
     c.require_tools("aplay")
+
+    ok, why = priv.dyndbg_pm(True)
+    if not ok:
+        c.blocked("cannot enable the driver's suspend/resume messages, which "
+                  f"are the only exact bracket for this measurement ({why})")
+    # Keep them off the serial console: writing there synchronously perturbs the
+    # very timing being measured (docs/test_strategy.md).
+    priv.printk_console(1)
 
     after_s = int(c.params.get("stall_after_s", 3))
     window_ms = int(c.params.get("stall_window_ms", 3000))
@@ -167,9 +182,28 @@ def main():
         card = idx
 
         window = kmsg.slice_since(kmsg.read_log(), mark)
+        # Narrow to what the driver itself considered suspended. Everything
+        # before jockey3_suspend() is a live device recovering legitimately --
+        # which is exactly what the injection provoked, so counting it would
+        # fail every build, fixed or not.
+        suspended = []
+        inside = False
+        for line in window:
+            if RE_SUSPENDED.search(line):
+                inside = True
+                continue
+            if RE_RESUMED.search(line):
+                inside = False
+                continue
+            if inside:
+                suspended.append(line)
+
         n_entered = sum(1 for line in window if RE_ENTERED.search(line))
-        n_restarted = sum(1 for line in window if RE_RESTARTED.search(line))
-        n_reset = sum(1 for line in window if RE_RESET.search(line))
+        n_restarted = sum(1 for line in suspended if RE_RESTARTED.search(line))
+        n_reset = sum(1 for line in suspended if RE_RESET.search(line))
+        if not any(RE_SUSPENDED.search(line) for line in window):
+            c.fail(f"iteration {i}: no suspend callback in the log, so nothing "
+                   "could be bracketed")
         entered += n_entered
         restarted += n_restarted
         reset += n_reset
@@ -181,6 +215,8 @@ def main():
         c.progress(f"cycle {i}/{iterations}  recovery entered {n_entered}x, "
                    f"restarts {n_restarted}, resets {n_reset}, "
                    f"resume {round(time.time() - t0 - sleep_s, 1)}s")
+
+    priv.dyndbg_pm(False)
 
     c.metric("cycles", iterations)
     c.metric("recovery_entered", entered)

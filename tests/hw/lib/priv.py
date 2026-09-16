@@ -121,6 +121,18 @@ def dmesg_mark(token, timeout=20):
     return rc == 0
 
 
+def dyndbg_pm(on=True, timeout=20):
+    """TEST ONLY: enable the driver's suspend/resume dev_dbg lines.
+
+    They are the only exact bracket for "after jockey3_suspend() ran". The PM
+    core's own "suspend entry"/"suspend exit" pair is far too wide: entry is
+    logged before userspace is frozen, with the device still fully live, so
+    recovery in that window is legitimate rather than a defect.
+    """
+    rc, _out, err = call("dyndbg-pm", "on" if on else "off", timeout=timeout)
+    return rc == 0, (err or "").strip()
+
+
 def stall_inject(after_s, window_ms, timeout=20):
     """TEST ONLY: arm the driver's mid-stream stall injection.
 

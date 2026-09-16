@@ -68,6 +68,12 @@ FW_MATCH='Firmware'
 # Space-free for the same reason FW_MATCH is, though this one is never used
 # via the modprobe dyndbg= path -- see dyndbg-hwparams-n below.
 HWPARAMS_N_MATCH='packet(s)/URB'
+# TEST ONLY (branch test/issue43-suspend-stall-injection): the driver's own PM
+# callbacks, the only exact bracket for "after jockey3_suspend() ran". The PM
+# core's "suspend entry"/"suspend exit" pair is far too wide -- entry is logged
+# before userspace is frozen, with the device still fully live.
+PM_MATCH='USB suspend, stopping URBs'
+PM_RESUME_MATCH='USB resume, restoring device'
 
 # The two URB completion handlers trace-callbacks profiles, for JT-PERF-001.
 # Fixed here for the same reason FW_MATCH is: the caller names an ACTION
@@ -113,6 +119,7 @@ usage() {
 #   kmsg-follow            stream the kernel log until killed (whole-run capture)
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
 #   dyndbg-hwparams-n on|off enable/disable the hw_params() packets/URB (N) message
+#   dyndbg-pm on|off       TEST ONLY: the driver's suspend/resume messages
 #   stall-inject <after_s> <window_ms>
 #                          TEST ONLY (branch test/issue43-suspend-stall-injection):
 #                          drop every completion for a direction for window_ms,
@@ -385,6 +392,23 @@ dyndbg-hwparams-n)
 	# hw_params() call (every PCM open), not just at probe, so a live write
 	# to the control file is enough -- no modprobe dyndbg= parameter needed.
 	printf 'format %s %s\n' "$HWPARAMS_N_MATCH" "$flag" > "$DYNDBG" \
+		|| die "cannot write $DYNDBG"
+	exit 0
+	;;
+
+dyndbg-pm)
+	# TEST ONLY: enable the driver's suspend/resume dev_dbg lines, matched by
+	# format string like the other dyndbg verbs so nothing else is enabled.
+	[ $# -eq 1 ] || die "dyndbg-pm needs on or off"
+	case "$1" in
+	on)  flag='+p' ;;
+	off) flag='-p' ;;
+	*)   die "dyndbg-pm takes on or off" ;;
+	esac
+	[ -e "$DYNDBG" ] || die "debugfs dynamic_debug not available"
+	printf 'format %s %s\n' "$PM_MATCH" "$flag" > "$DYNDBG" \
+		|| die "cannot write $DYNDBG"
+	printf 'format %s %s\n' "$PM_RESUME_MATCH" "$flag" > "$DYNDBG" \
 		|| die "cannot write $DYNDBG"
 	exit 0
 	;;
