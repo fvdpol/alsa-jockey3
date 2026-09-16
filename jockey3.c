@@ -2618,7 +2618,8 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 		 * Bailing loses nothing: both paths restart the ring themselves
 		 * on the way back up.
 		 */
-		if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip) ||
+		/* NEGATIVE CONTROL: suspended term removed, restoring the #43 bug. */
+		if (jockey3_is_disconnected(chip) ||
 		    jockey3_is_resetting(chip)) {
 			dev_dbg(&chip->intf0->dev,
 				"%s stream stalled (%s), but the device is being taken down; leaving the restart to the resume path\n",
@@ -2697,7 +2698,8 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 			msleep(20);
 	}
 
-	if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip)) {
+	/* NEGATIVE CONTROL: suspended term removed, restoring the #43 bug. */
+	if (jockey3_is_disconnected(chip)) {
 		dev_dbg(&chip->intf0->dev,
 			"%s stream still stalled after URB restart, but the device is down; not resetting (%s)\n",
 			type, context);
