@@ -508,11 +508,15 @@ def recover_host(ctx, style):
     run summary, because "the controller was reloaded" is something the
     operator has to know before reading anything else from this run.
     """
+    # Plain text in the log: it is echoed again with the run summary and, on
+    # a future run, may be read back from run.json. Styling belongs on the
+    # way to the terminal only.
     log = ctx.setdefault("host_recovery", [])
 
-    def note(line):
+    def note(line, *styles):
         log.append(line)
-        print(f"  {line}", flush=True)
+        print(f"  {style(line, *styles) if style and styles else line}",
+              flush=True)
 
     ok, why = priv.available()
     if not ok:
@@ -525,8 +529,7 @@ def recover_host(ctx, style):
     tail = detail[-1] if detail else ""
 
     if rc == 0:
-        note(style("controller reloaded and the device is back", "green")
-             if style else "controller reloaded and the device is back")
+        note("controller reloaded and the device is back", "bold", "green")
         note("the run still ends here -- results either side of a bus reset "
              "are not one dataset")
     elif rc == 125:
