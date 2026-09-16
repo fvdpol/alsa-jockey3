@@ -9,41 +9,37 @@ mutex, wakes when suspend drops it, reads the zeroed timestamps as a stall, and
 -- before the fix -- restarts the URB ring on a device the PM core believes is
 suspended, then escalates to resetting it.
 
-THIS CASE DOES NOT YET REACH THE RACE. READ THIS BEFORE TRUSTING A PASS.
------------------------------------------------------------------------
-The case was written on the assumption that suspend manufactures the appearance
-of a stall by zeroing the timestamps, so a tick landing just after it would
-enter recovery. That is wrong, and the first run on hardware showed it:
-recovery_entered was 0 across six suspends.
+HOW THE RACE IS PROVOKED
+------------------------
+It cannot be provoked by ordinary means, which the first version of this case
+demonstrated: recovery_entered was 0 across six suspends. jockey3_stop_urbs()
+sets urb_stream->stopping before it zeroes the liveness timestamps, and
+jockey3_watchdog_check() returns early on that flag, so between
+jockey3_suspend() and the resume path's jockey3_start_urbs() the watchdog cannot
+report a stall at all. Cutting USB power does not help either -- that
+disconnects the device, and jockey3_recover_urb_stream() returns -ENODEV at its
+first check.
 
-jockey3_stop_urbs() sets urb_stream->stopping before it zeroes the timestamps,
-and jockey3_watchdog_check() returns early on exactly that flag. From
-jockey3_suspend() until the resume path calls jockey3_start_urbs(), the watchdog
-cannot report a stall at all.
+So the stall is injected. The driver on branch
+test/issue43-suspend-stall-injection carries a debug_force_stall module
+parameter that makes every liveness sample report the stream as dead. With it
+set, the watchdog enters the recovery ladder and stays there, which is exactly
+the state the race needs: a tick inside jockey3_recover_urb_stream(), past
+detection, blocked on rate_mutex when jockey3_suspend() takes it.
 
-So the race needs what the Sashiko report actually described: a tick already
-INSIDE jockey3_recover_urb_stream(), past stall detection and blocked on
-rate_mutex, at the moment suspend takes it. That requires a genuine mid-stream
-stall in progress when the machine suspends, and nothing in the test framework
-can produce one on demand -- cutting USB power disconnects the device instead,
-which makes jockey3_recover_urb_stream() return -ENODEV at its first check.
+priv.force_stall() fails rather than succeeding quietly against a driver without
+that parameter, so this case cannot mistake "knob absent" for "stall provoked".
 
-Reaching it needs fault injection: a development-time knob that forces a
-direction to be seen as stalled. That is a driver change and a decision about
-the no-test-hooks rule, so it is not made here.
+The discriminators are the two dev_warn lines only jockey3_start_urbs() can
+produce: "URB stream restarted after stalling", emitted by
+jockey3_watchdog_clear_stall() from inside it, and the reset escalation behind
+it. The dev_dbg pair that would show the restart directly is not relied on,
+because enabling dynamic debug on this host writes to a serial console and
+perturbs the very timing being measured.
 
-What the case is worth meanwhile: a no-regression check that suspending with a
-stream open leaves no restart or reset behind, and an honest report that the
-race was not provoked. It reports blocked, never pass, when recovery was not
-entered -- the trap JT-PM-001 falls into for this bug is passing without ever
-reaching it.
-
-The discriminators, once the race can be provoked, are the two dev_warn lines
-only jockey3_start_urbs() can produce: "URB stream restarted after stalling",
-emitted by jockey3_watchdog_clear_stall() from inside it, and the reset
-escalation behind it. The dev_dbg pair that would show the restart directly is
-not relied on, because enabling dynamic debug on this host writes to a serial
-console and perturbs the very timing being measured.
+A run in which the watchdog never entered recovery is reported blocked, not
+passed. JT-PM-001 passes on a driver with this bug; a green here must mean the
+race was reached and survived, never that it was missed.
 
 Like JT-PM-001, this suspends the machine it runs on.
 """
@@ -89,6 +85,12 @@ def main():
     c.require_card()
     c.require_tools("aplay")
 
+    ok, why = priv.force_stall(True)[0] == 0, ""
+    if not ok:
+        priv.force_stall(False)
+        c.blocked("no debug_force_stall parameter: this needs the driver built "
+                  "from test/issue43-suspend-stall-injection")
+
     iterations = int(c.params.get("iterations_per_run", 6))
     sleep_s = int(c.params.get("sleep_seconds", 8))
     settle_s = float(c.params.get("settle_seconds", 3))
@@ -100,6 +102,9 @@ def main():
     for i in range(1, iterations + 1):
         c.status(f"cycle {i}/{iterations}  suspending with playback open")
 
+        # Streaming normally first: the forced stall must land on a ring that
+        # is genuinely running, or recovery has nothing to restart.
+        priv.force_stall(False)
         proc = playback(card, rate)
         time.sleep(settle_s)
         if proc.poll() is not None:
@@ -110,6 +115,11 @@ def main():
         mark = kmsg.Marker(f"{c.id}#cycle{i}")
         mark.write()
 
+        # Recovery enters within about one watchdog tick; give it long enough to
+        # be inside the ladder, then suspend on top of it.
+        priv.force_stall(True)
+        time.sleep(float(c.params.get("stall_lead_s", 0.2)))
+
         t0 = time.time()
         rc, _out, err = priv.rtcwake_mem(sleep_s)
         if rc == 124:
@@ -118,6 +128,8 @@ def main():
         if rc != 0:
             c.fail(f"iteration {i}: rtcwake exited {rc}: {(err or '').strip()[:160]}")
             break
+
+        priv.force_stall(False)
 
         # The suspend killed the stream; the driver does not advertise
         # SNDRV_PCM_INFO_RESUME, so aplay dying here is correct (see JT-PM-002).
@@ -154,6 +166,8 @@ def main():
         c.progress(f"cycle {i}/{iterations}  recovery entered {n_entered}x, "
                    f"restarts {n_restarted}, resets {n_reset}, "
                    f"resume {round(time.time() - t0 - sleep_s, 1)}s")
+
+    priv.force_stall(False)
 
     c.metric("cycles", iterations)
     c.metric("recovery_entered", entered)

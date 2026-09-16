@@ -2118,6 +2118,7 @@ cases:
       iterations_per_run: 6
       sleep_seconds: 8
       settle_seconds: 3
+      stall_lead_s: 0.2
       rate: 48000
     metrics:
       - cycles
@@ -2132,33 +2133,35 @@ cases:
     expect_dmesg:
       - 'stream stalled \(watchdog\); restarting URBs to recover'
     notes: >
-      Intended as the predicate for issue #43, but it DOES NOT REACH THE RACE
-      yet -- see the module docstring. The first hardware run recorded
-      recovery_entered 0 across six suspends, because jockey3_stop_urbs() sets
-      urb_stream->stopping before zeroing the liveness timestamps and
-      jockey3_watchdog_check() returns early on that flag. Between
-      jockey3_suspend() and the resume path's jockey3_start_urbs() the watchdog
-      cannot report a stall at all, so suspend does not manufacture one.
+      The predicate for issue #43. Requires the driver built from branch
+      test/issue43-suspend-stall-injection; it is blocked against any other
+      build, because the stall has to be injected.
 
-      The race needs a tick already inside jockey3_recover_urb_stream(), past
-      detection and blocked on rate_mutex, when suspend takes it -- which needs
-      a genuine mid-stream stall in flight. Nothing in the framework produces
-      one on demand: cutting USB power disconnects the device instead, and
-      jockey3_recover_urb_stream() returns -ENODEV at its first check. Reaching
-      it needs development-time fault injection, which is a driver change and a
-      decision about the no-test-hooks rule.
+      It cannot be provoked otherwise, which the first version of this case
+      demonstrated: recovery_entered was 0 across six suspends.
+      jockey3_stop_urbs() sets urb_stream->stopping before zeroing the liveness
+      timestamps and jockey3_watchdog_check() returns early on that flag, so
+      between jockey3_suspend() and the resume path's jockey3_start_urbs() the
+      watchdog cannot report a stall at all. Cutting USB power disconnects the
+      device instead, and jockey3_recover_urb_stream() returns -ENODEV at its
+      first check.
 
-      Kept because it is still a useful no-regression check that suspending with
-      a stream open leaves no restart or reset behind, and because it reports
-      blocked rather than pass when recovery was not entered. JT-PM-001 passes
-      on a driver with this bug; this case at least says so out loud.
+      The injection branch adds a debug_force_stall module parameter that makes
+      every liveness sample report the stream as dead. The case starts playback,
+      sets it, waits about one watchdog tick so recovery is inside its ladder,
+      and suspends on top of that -- which is the state the race needs, a tick
+      blocked on rate_mutex when jockey3_suspend() takes it.
 
-      The discriminators, once the race can be provoked, are the two dev_warn
-      lines only jockey3_start_urbs() can produce: "URB stream restarted after
-      stalling", from jockey3_watchdog_clear_stall() inside it, and the reset
-      escalation behind it. The dev_dbg pair that would show the restart
-      directly is deliberately not used -- enabling dynamic debug on the x86
-      host writes to a serial console and perturbs the timing being measured.
+      The discriminators are the two dev_warn lines only jockey3_start_urbs()
+      can produce: "URB stream restarted after stalling", from
+      jockey3_watchdog_clear_stall() inside it, and the reset escalation behind
+      it. The dev_dbg pair that would show the restart directly is deliberately
+      not used -- enabling dynamic debug on the x86 host writes to a serial
+      console and perturbs the timing being measured.
+
+      A run where recovery was never entered is reported blocked, not passed.
+      JT-PM-001 passes on a driver with this bug; a green here must mean the
+      race was reached and survived.
 
   # ---------------------------------------------------------------- HOTPLUG
 

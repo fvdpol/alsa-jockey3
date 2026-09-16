@@ -113,6 +113,9 @@ usage() {
 #   kmsg-follow            stream the kernel log until killed (whole-run capture)
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
 #   dyndbg-hwparams-n on|off enable/disable the hw_params() packets/URB (N) message
+#   force-stall on|off     TEST ONLY (branch test/issue43-suspend-stall-injection):
+#                          make the driver report every stream as stalled, to
+#                          provoke watchdog recovery on demand
 #   printk-console <1-8>   set the console loglevel
 #   xrun-debug 0|1        make the ALSA core log every xrun to the kernel log
 #   xrun-inject pcm0p|pcm0c   force an xrun on that substream's sub0, via
@@ -382,6 +385,23 @@ dyndbg-hwparams-n)
 	# to the control file is enough -- no modprobe dyndbg= parameter needed.
 	printf 'format %s %s\n' "$HWPARAMS_N_MATCH" "$flag" > "$DYNDBG" \
 		|| die "cannot write $DYNDBG"
+	exit 0
+	;;
+
+force-stall)
+	# TEST ONLY, and only present on the branch that carries the driver's
+	# matching debug_force_stall parameter. Deliberately fails loudly rather
+	# than succeeding quietly when run against a driver without it, so a
+	# case cannot mistake "knob absent" for "stall provoked".
+	[ $# -eq 1 ] || die "force-stall needs on or off"
+	case "$1" in
+	on)  val=1 ;;
+	off) val=0 ;;
+	*)   die "force-stall takes on or off" ;;
+	esac
+	param="/sys/module/${MODULE//-/_}/parameters/debug_force_stall"
+	[ -w "$param" ] || die "no debug_force_stall parameter: this driver is not the injection build"
+	echo "$val" > "$param" || die "cannot write $param"
 	exit 0
 	;;
 

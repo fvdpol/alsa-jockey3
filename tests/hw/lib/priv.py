@@ -121,6 +121,18 @@ def dmesg_mark(token, timeout=20):
     return rc == 0
 
 
+def force_stall(on=True, timeout=20):
+    """TEST ONLY: make the driver report every stream as stalled.
+
+    Only works against the driver built from
+    test/issue43-suspend-stall-injection, which carries the matching
+    debug_force_stall parameter. The helper fails against any other build
+    rather than succeeding quietly, so a case cannot read "knob absent" as
+    "stall provoked".
+    """
+    return call("force-stall", "on" if on else "off", timeout=timeout)
+
+
 def dyndbg_firmware(on=True, timeout=20):
     rc, _out, err = call("dyndbg-firmware", "on" if on else "off",
                          timeout=timeout)

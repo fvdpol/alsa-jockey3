@@ -331,6 +331,20 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * [JOCKEY3_GRACE_MS_MIN, JOCKEY3_GRACE_MS_MAX] so a bad write cannot drive the
  * grace down to or below the stall threshold.
  */
+/*
+ * TEST INSTRUMENTATION -- branch test/issue43-suspend-stall-injection only.
+ * Must never reach main. See the branch's commit message for why the race it
+ * provokes cannot be reached any other way.
+ *
+ * While set, every liveness sample reports the stream as dead, so the watchdog
+ * enters jockey3_recover_urb_stream() and stays in its ladder. That is what
+ * puts a tick inside recovery, blocked on rate_mutex, for jockey3_suspend() to
+ * race with -- the predicate for issue #43.
+ */
+static bool debug_force_stall;
+module_param(debug_force_stall, bool, 0644);
+MODULE_PARM_DESC(debug_force_stall, "TEST ONLY: report every stream as stalled, to provoke watchdog recovery on demand.");
+
 static int cold_start_grace_ms = 200;
 static int warm_start_grace_ms = 150;
 module_param(cold_start_grace_ms, int, 0644);
@@ -1984,6 +1998,10 @@ static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *
 {
 	u64 last_time = atomic64_read(&urb_stream->last_callback_time);
 	u64 window_ns = JOCKEY3_LIVENESS_WINDOW_NS(urb_stream->n_shift);
+
+	/* TEST INSTRUMENTATION -- see debug_force_stall's comment. */
+	if (READ_ONCE(debug_force_stall))
+		return false;
 
 	if (!last_time)
 		return false;
