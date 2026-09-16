@@ -780,6 +780,73 @@ step, not the first.
 
 ---
 
+## 11b. Validating a fix for a race
+
+Most cases here provoke a condition the driver is expected to survive. A race is
+different: the condition may not be reachable by any ordinary sequence of test
+actions, and a case that never reaches it passes on a driver that still has the
+defect. JT-PM-001 did exactly that for issue #43 throughout, and reading its
+green as evidence is what left that fix untested for as long as it was.
+
+Three rules came out of building JT-PM-004, which took seven attempts.
+
+### Instrumentation goes on a labeled branch
+
+Fault injection, forced stalls and artificial delays do not belong in `main`,
+and equally do not need Kconfig symbols or `#ifdef` scaffolding to keep them
+out. A branch named for the issue keeps `main` clean while retaining full
+visibility of what was done, and the work stays reusable: rebase it onto
+`main`'s head when the same or a similar scenario needs testing again. A plain
+module parameter on that branch is enough. Keep the branch passing the build
+gate, or every rebase will fight you.
+
+`test/issue43-suspend-stall-injection` is the worked example. It reuses the
+completion-dropping injection from `dev/jockey3-watchdog-stall-injection`, adds
+module parameters for its timings, and carries the `stall-inject`, `race-delay`,
+`grace-ms` and `dyndbg-pm` verbs in `jockey3-testctl`.
+
+### Widen the window rather than trying to hit it
+
+A race's natural window is often a few hundred milliseconds. In #43 it was the
+warm start grace, and `JOCKEY3_RECOVERY_MAX_ATTEMPTS` additionally capped a
+persistent stall at three escalations about 600 ms apart, so the total exposure
+was around two seconds however the injection was configured. Six attempts to
+land a suspend inside it by timing from userspace failed, including one that
+made things worse: widening the grace lengthens the wait between escalations, so
+there are fewer of them, not more.
+
+A knob that holds the driver open at the critical point turns the outcome from
+luck into certainty. Two details matter:
+
+- Park by waiting for the condition that *defines* the race -- the flag, the
+  state change -- not for a fixed duration.
+- `msleep()` cannot park across a system suspend. Jiffies do not advance during
+  S3, so a tick parked N ms wakes N ms after the **resume**, with the state
+  already gone and the window missed entirely.
+
+### Both a positive and a negative test, always
+
+A test that has never failed against broken code proves nothing. Build the
+defect back in, confirm the case fails, and only then read its pass as evidence.
+A targeted revert of just the guard is cleaner than reverting the whole commit,
+which would fight everything built on top of it --
+`test/issue43-negative-control` removes two terms and nothing else.
+
+Compare the provocation metrics across the pair, not only the verdicts. Equal
+provocation with opposite outcomes is what makes a pass non-vacuous:
+
+| metric | bug restored | fixed |
+|---|---|---|
+| `stalls_playback` | 20 | 22 |
+| `playback_recovery_on_watchdog` | 6 | 6 |
+| `restart_escalated` | 5 | 0 |
+| `resets_while_suspended` | **5** | **0** |
+| verdict | FAIL | PASS |
+
+A case that cannot tell "the race was survived" from "the race was never
+reached" should report the second as blocked rather than as a pass. JT-PM-004
+does, and that guard fired repeatedly while it was being built.
+
 ## 12. Roadmap
 
 **Now:** the catalog, the runner, and a small set of automated cases proving
