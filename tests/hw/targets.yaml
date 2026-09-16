@@ -73,6 +73,9 @@ capabilities:
   rtc-wake:         rtcwake can suspend and wake the machine
   python-mido:      mido and python-rtmidi are available
   usb-power:        Control over VBUS at the device's hub port (ppps, uhubctl)
+  hcd-reset:        The USB host controller can be recovered by reloading its
+                    driver (issue 40). Absent wherever the controller is built
+                    in, or the machine boots, swaps or networks over USB
   gadget-emulation: USB gadget or dummy_hcd for malformed-descriptor tests
   device-power:     Control over the device's own mains supply, for the
                     cold boot JT-AUDIO-005 needs. Configured in the local

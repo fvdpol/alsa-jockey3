@@ -179,6 +179,33 @@ def usb_power_available():
     return rc == 0
 
 
+def hcd_reset(timeout=180):
+    """Reload the USB host controller driver after the controller has died.
+
+    The recovery half of issue #40, and the most destructive thing the suite
+    can ask for: it takes the whole bus down on purpose. Nothing here names
+    what to reset -- the helper resolves the controller from the Jockey 3's
+    own position on the bus, refuses any host-controller driver not on its
+    allowlist, refuses outright if root, swap or the default-route interface
+    is backed by USB, and rate-limits itself. A refusal is a normal outcome
+    and means the caller should stop, not retry.
+
+    Returns (rc, stdout, stderr); rc 0 means the controller came back AND the
+    device re-enumerated and rebound.
+    """
+    return call("hcd-reset", timeout=timeout)
+
+
+def hcd_reset_available():
+    """Could a dead controller be recovered on this machine?
+
+    Runs the helper's own gates in `check` mode -- resolving the controller
+    and testing the USB-dependency refusals -- without touching anything.
+    """
+    rc, _out, _err = call("hcd-reset", "check", timeout=30)
+    return rc == 0
+
+
 def rtcwake_mem(seconds, timeout=None):
     # The helper blocks for the whole suspend, so the timeout has to outlast
     # it by enough to cover a slow resume rather than by a fixed margin.

@@ -92,6 +92,22 @@ JOCKEY3_USB_IDS='200c:1037 200c:1019'      # Remix, Master Edition
 # root-owned, so the record of which port to re-energize is not user-writable.
 USB_STATE_DIR=/run/jockey3-testctl
 USB_STATE=$USB_STATE_DIR/usb-port
+HCD_STATE=$USB_STATE_DIR/hcd-reset-last
+
+# Host-controller drivers hcd-reset is allowed to reload. An allowlist and
+# not a lookup: reloading whatever module happens to drive the controller
+# would make this verb 'unload an arbitrary module by plugging the device
+# into a different port', which is not a boundary anyone can review. Only
+# xhci_pci is listed because that is the controller issue #40 is about, and
+# because a built-in HCD -- dwc2 on the Pi, typically -- cannot be reloaded
+# at all. Adding an entry here is a change to the privileged surface.
+HCD_MODULES='xhci_pci'
+
+# Shortest interval between two reloads. The recovery exists so that one
+# dead controller does not waste a whole overnight batch; a controller that
+# dies again immediately is a different problem, and reloading in a tight
+# loop would turn it into an unattended one.
+HCD_MIN_INTERVAL=300
 
 die() { echo "jockey3-testctl: $*" >&2; exit 2; }
 
@@ -216,6 +232,102 @@ usb_iface0_resolve() {
 # is what this is for, and on a hub without it uhubctl reports success while
 # changing nothing -- a test that silently never disconnects the device would
 # pass while proving nothing, which is worse than refusing.
+# The Jockey 3's bus address ("1-13"), resolved from idVendor/idProduct the
+# same way usb_resolve() does, but from sysfs rather than uhubctl: this is
+# needed when the bus has just come back and no hub tooling is involved.
+hcd_usb_devpath() {
+	local d vid pid want
+	for d in /sys/bus/usb/devices/*; do
+		[ -r "$d/idVendor" ] && [ -r "$d/idProduct" ] || continue
+		read -r vid < "$d/idVendor" || continue
+		read -r pid < "$d/idProduct" || continue
+		for want in $JOCKEY3_USB_IDS; do
+			if [ "$vid:$pid" = "$want" ]; then
+				basename "$d"
+				return 0
+			fi
+		done
+	done
+	return 1
+}
+
+# Walk up from a USB device to the first ancestor driven by a module we are
+# allowed to reload, and print "<module> <slot>". Returns non-zero if the
+# controller is built in, or is driven by anything not on the allowlist --
+# which is the safe answer in both cases.
+hcd_resolve() {
+	local d mod allowed
+	d=$(readlink -f "/sys/bus/usb/devices/$1" 2>/dev/null) || return 1
+	while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "/sys" ]; do
+		if [ -L "$d/driver/module" ]; then
+			mod=$(basename "$(readlink -f "$d/driver/module")")
+			for allowed in $HCD_MODULES; do
+				if [ "$mod" = "$allowed" ]; then
+					printf '%s %s\n' "$mod" "$(basename "$d")"
+					return 0
+				fi
+			done
+		fi
+		d=$(dirname "$d")
+	done
+	return 1
+}
+
+# Is anything the machine depends on sitting behind USB? Prints what, and
+# returns 0, when it finds one -- so the caller refuses.
+#
+# Deliberately broader than "the controller we are about to reset": a box that
+# boots off USB, swaps to USB, or reaches the network over a USB NIC (a Pi 3
+# does all three) must never run this verb at all, and the cost of being
+# over-cautious here is a refused recovery, while the cost of being wrong is a
+# machine that needs a physical power cycle to come back.
+hcd_usb_dependency() {
+	local src dev real iface
+
+	# Mounted block devices, including the one holding the results.
+	while read -r src _mnt _fs _opts _d _p; do
+		case "$src" in /dev/*) ;; *) continue ;; esac
+		dev=$(basename "$(readlink -f "$src")")
+		real=$(readlink -f "/sys/class/block/$dev" 2>/dev/null) || continue
+		case "$real" in
+		*/usb[0-9]*/*)
+			echo "the filesystem on $src"
+			return 0
+			;;
+		esac
+	done < /proc/mounts
+
+	# Swap, which is not in /proc/mounts.
+	while read -r src type _rest; do
+		[ "$type" = partition ] || continue
+		case "$src" in /dev/*) ;; *) continue ;; esac
+		dev=$(basename "$(readlink -f "$src")")
+		real=$(readlink -f "/sys/class/block/$dev" 2>/dev/null) || continue
+		case "$real" in
+		*/usb[0-9]*/*)
+			echo "swap on $src"
+			return 0
+			;;
+		esac
+	done < <(tail -n +2 /proc/swaps)
+
+	# The network interface carrying the default route. Matters because the
+	# results directory is an NFS mount on this rig, and because losing the
+	# network mid-batch loses the operator's way back in.
+	iface=$(ip route show default 2>/dev/null | awk '/^default/ {print $5; exit}')
+	if [ -n "${iface:-}" ]; then
+		real=$(readlink -f "/sys/class/net/$iface" 2>/dev/null) || real=""
+		case "$real" in
+		*/usb[0-9]*/*)
+			echo "the default-route interface $iface"
+			return 0
+			;;
+		esac
+	fi
+
+	return 1
+}
+
 usb_resolve() {
 	local id out found
 	for id in $JOCKEY3_USB_IDS; do
@@ -582,6 +694,92 @@ usb-power)
 		die "usb-power takes status, off, on or cycle"
 		;;
 	esac
+	;;
+
+hcd-reset)
+	# Reload the USB host controller driver after the controller has died --
+	# the recovery half of issue #40. xhci-hcd declares the controller dead
+	# when a Stop Endpoint command goes unanswered for 5 s, drops every
+	# device on the bus, and does not come back on its own; a module reload
+	# is the only way back short of a reboot.
+	#
+	# This is the most destructive verb in this file. It takes the whole bus
+	# down deliberately, which on this rig includes the keyboard, so every
+	# gate below is a refusal rather than a warning. It also takes no
+	# argument naming what to reset: the controller is resolved from the
+	# Jockey 3's own position on the bus, so nothing this side can point it
+	# at a different one.
+	[ $# -le 1 ] || die "hcd-reset takes at most 'check'"
+	mode=${1:-reset}
+	[ "$mode" = reset ] || [ "$mode" = check ] \
+		|| die "hcd-reset takes 'check' or no argument"
+
+	# --- what would we be reloading? -----------------------------------
+	dev=$(hcd_usb_devpath) \
+		|| die "no Reloop Jockey 3 on the bus -- nothing to resolve a controller from"
+	resolved=$(hcd_resolve "$dev") \
+		|| die "the controller behind $dev is not a reloadable module (built-in, or not in HCD_MODULES)"
+	read -r hcd_mod hcd_slot <<< "$resolved"
+
+	grep -q "^${hcd_mod} " /proc/modules \
+		|| die "$hcd_mod is not a loaded module"
+
+	# --- would reloading it cut the ground out from under us? ----------
+	# Anything the machine needs in order to keep running, or to record the
+	# result, must not live behind the controller being reset. Checked
+	# positively against sysfs rather than assumed from the target name.
+	if blocker=$(hcd_usb_dependency); then
+		die "refusing: $blocker is backed by USB, and reloading $hcd_mod would take it away"
+	fi
+
+	if [ "$mode" = check ]; then
+		echo "hcd-reset ok"
+		echo "module=$hcd_mod slot=$hcd_slot device=$dev"
+		exit 0
+	fi
+
+	# --- rate limit ----------------------------------------------------
+	now=$(date +%s)
+	if [ -r "$HCD_STATE" ]; then
+		read -r last < "$HCD_STATE" || last=0
+		[[ $last =~ ^[0-9]+$ ]] || last=0
+		if [ $((now - last)) -lt "$HCD_MIN_INTERVAL" ]; then
+			die "refusing: $hcd_mod was reloaded $((now - last))s ago (minimum ${HCD_MIN_INTERVAL}s) -- the controller is dying repeatedly, which needs a human"
+		fi
+	fi
+	mkdir -p "$USB_STATE_DIR" || die "cannot create $USB_STATE_DIR"
+	printf '%s\n' "$now" > "$HCD_STATE" || die "cannot record the attempt in $HCD_STATE"
+
+	# --- do it ---------------------------------------------------------
+	# The module is removed and reloaded rather than the PCI device being
+	# unbound and rebound: a controller in this state has already failed to
+	# answer a command, and unbind runs the same teardown that is stuck.
+	echo "hcd-reset: removing $hcd_mod"
+	modprobe -r "$hcd_mod" || die "modprobe -r $hcd_mod failed -- something still holds it"
+	sleep 2
+	echo "hcd-reset: loading $hcd_mod"
+	modprobe "$hcd_mod" || die "modprobe $hcd_mod failed -- the bus is down and needs a reboot"
+
+	# --- verify, positively --------------------------------------------
+	# Re-enumeration is not instant and "no error" is not evidence. Wait for
+	# the device to actually reappear by its own ids, and then for the
+	# driver to rebind it -- a card that enumerates but does not bind is
+	# still a dead run.
+	deadline=$((SECONDS + 45))
+	while [ $SECONDS -lt $deadline ]; do
+		if back=$(hcd_usb_devpath); then
+			if [ -d "/sys/bus/usb/devices/$back:1.0/driver" ]; then
+				echo "hcd-reset: $hcd_mod reloaded, device back at $back and bound"
+				exit 0
+			fi
+		fi
+		sleep 1
+	done
+
+	if back=$(hcd_usb_devpath); then
+		die "the controller came back and the device enumerated at $back, but $MODULE did not bind it"
+	fi
+	die "$hcd_mod reloaded but the Jockey 3 did not re-enumerate within 45s"
 	;;
 
 rtcwake-mem)

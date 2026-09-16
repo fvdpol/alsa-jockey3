@@ -495,6 +495,50 @@ def decide_outcome(ctx, case_results):
     return results.RUN_PASS
 
 
+def recover_host(ctx, style):
+    """Try to bring the USB host controller back after it died (issue #40).
+
+    Best-effort and strictly bounded: one attempt per run, and the run ends
+    either way. The point is not to rescue the batch -- everything after a
+    dead controller is invalid regardless, and resuming would silently mix
+    results from before and after a bus reset -- but to leave the machine
+    usable, so the next run does not start against a bus that is still gone.
+
+    Every outcome is recorded in ctx["host_recovery"] and printed with the
+    run summary, because "the controller was reloaded" is something the
+    operator has to know before reading anything else from this run.
+    """
+    log = ctx.setdefault("host_recovery", [])
+
+    def note(line):
+        log.append(line)
+        print(f"  {line}", flush=True)
+
+    ok, why = priv.available()
+    if not ok:
+        note(f"controller not recovered: no privileged helper ({why})")
+        return
+
+    note("attempting to reload the USB host controller driver...")
+    rc, out, err = priv.hcd_reset()
+    detail = (err or out or "").strip().splitlines()
+    tail = detail[-1] if detail else ""
+
+    if rc == 0:
+        note(style("controller reloaded and the device is back", "green")
+             if style else "controller reloaded and the device is back")
+        note("the run still ends here -- results either side of a bus reset "
+             "are not one dataset")
+    elif rc == 125:
+        note(f"controller not recovered: helper unavailable ({tail})")
+    else:
+        # Includes every deliberate refusal: a built-in controller, a machine
+        # with root or the network behind USB, the rate limit. These are the
+        # helper working correctly, not an error to chase here.
+        note(f"controller not recovered: {tail or f'helper exited {rc}'}")
+        note("the machine needs attention before the next run")
+
+
 def run_case(case, iteration, params, ctx):
     """Execute one automated case and classify what the kernel said about it."""
     started = time.time()
@@ -1041,8 +1085,10 @@ def main():
             if ctx["host_fail"]:
                 # The bus is gone. Stop before anything else is recorded --
                 # every remaining cycle would be switching a hub that is no
-                # longer there.
+                # longer there -- then try to bring the controller back, so
+                # the operator finds a usable machine rather than a dead one.
                 aborted = True
+                recover_host(ctx, style)
                 break
 
             if ctx["investigate"]:
@@ -1109,6 +1155,8 @@ def main():
         print("This is not a test failure and not a driver defect -- the bus")
         print("went away, so nothing recorded after it is data. See issue #40:")
         for line in ctx["host_fail"][:5]:
+            print(f"  {line}")
+        for line in ctx.get("host_recovery", []):
             print(f"  {line}")
     if ctx["investigate"]:
         print("\nA kernel defect was detected; the run was abandoned.")

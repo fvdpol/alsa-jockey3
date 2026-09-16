@@ -26,7 +26,39 @@ sudo ./install.sh --remove
 | `printk-console <1-8>` | `/proc/sys/kernel/printk` is root-owned |
 | `rtcwake-mem <1-3600>` | suspend to RAM |
 | `usb-power status\|off\|on\|cycle` | per-port hub power, via `uhubctl` |
+| `hcd-reset [check]` | reloads the USB host-controller driver after the controller dies |
 | `status` | reports the helper is installed and reachable |
+
+### `hcd-reset` is the most destructive verb here
+
+It reloads the host-controller driver, which takes down every USB device on
+that controller -- on the test rig, that includes the keyboard. It exists
+because a controller that has died (issue #40) does not come back on its own
+and otherwise costs a reboot and the rest of an overnight batch.
+
+It takes no argument naming what to reset. The controller is resolved by
+walking up from the Jockey 3's own position on the bus, so nothing on the
+calling side can aim it somewhere else, and only host-controller drivers on
+the helper's own `HCD_MODULES` allowlist are eligible -- a built-in controller
+resolves to nothing and is refused, which is the right answer since it could
+not be reloaded anyway.
+
+Every gate is a refusal rather than a warning:
+
+- refuses if root, any mounted filesystem, swap, or the default-route network
+  interface is backed by USB -- a machine that boots, swaps or reaches the
+  network over USB must never run this;
+- refuses if the module is not loaded, or is not on the allowlist;
+- rate-limits itself to one reload per `HCD_MIN_INTERVAL` seconds, so a
+  controller that dies repeatedly stops the batch instead of being reloaded
+  in a loop overnight;
+- verifies positively before reporting success: the device must re-enumerate
+  by its own USB ids *and* the driver must rebind it, within a timeout.
+  Absence of errors is not treated as evidence.
+
+`hcd-reset check` runs the resolution and all the refusals without touching
+anything, and is what `capabilities.py` probes so a machine that cannot do
+this reports the capability as absent rather than discovering it mid-recovery.
 
 ### `usb-power` takes an action, never a target
 

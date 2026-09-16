@@ -51,7 +51,7 @@ DEFAULT_PATH = "~/.config/jockey3/capabilities.yaml"
 # Settled by asking the machine. Never declared, never in a file.
 PROBED = ("device", "root", "kernel-tree", "cross-toolchains", "qemu", "sox",
           "python-mido", "rtc-wake", "usb-power", "gadget-emulation",
-          "device-power")
+          "device-power", "hcd-reset")
 
 # No probe exists, or none can exist. These come from the local file, and
 # default to false when it is absent. mixxx/jackd/pipewire mean "set up and
@@ -205,6 +205,19 @@ def _probe_usb_power():
     return rc == 0
 
 
+def _probe_hcd_reset():
+    """Can this machine recover from a dead USB host controller?
+
+    False is the common and correct answer: it needs a host-controller driver
+    that is a loadable module (a built-in dwc2 cannot be reloaded at all) and
+    a machine that does not boot, swap or reach the network over USB. The
+    helper decides, in `check` mode, so this answers for the real gates
+    rather than guessing from the target name.
+    """
+    rc, _out, _err = priv.call("hcd-reset", "check", timeout=30)
+    return rc == 0
+
+
 PROBES = {
     "device": lambda: env.usb_device_info() is not None,
     "root": lambda: priv.available()[0],
@@ -216,6 +229,7 @@ PROBES = {
     "python-mido": _probe_python_mido,
     "rtc-wake": _probe_rtc_wake,
     "usb-power": _probe_usb_power,
+    "hcd-reset": _probe_hcd_reset,
     "device-power": _probe_device_power,
     "gadget-emulation": _probe_gadget_emulation,
 }
