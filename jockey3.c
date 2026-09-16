@@ -2509,19 +2509,30 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	}
 
 	/*
-	 * Re-tested because the restart and grace above take long enough for an
-	 * unplug to land in between. jockey3_queue_reset() would then
-	 * reinit_completion() over the complete_all() that jockey3_disconnect()
-	 * issues to release waiters, and block the full timeout on a reset that
-	 * will never come. Ahead of the budget, so an unplug spends no attempt.
+	 * Re-tested because the restart and grace above take long enough for the
+	 * device to go away underneath them, and escalating then goes badly.
+	 * jockey3_queue_reset() would reinit_completion() over the complete_all()
+	 * that jockey3_disconnect() issues to release waiters, and block the full
+	 * timeout on a reset that will never come. Ahead of the budget, so this
+	 * spends no attempt.
 	 *
-	 * Racy by construction -- an unplug just after the test still hits it.
-	 * The timeout bounds that; closing it properly would mean serializing
-	 * against jockey3_disconnect(), which must not block on driver locks.
+	 * Suspended as well as disconnected, and this is not the same check as
+	 * the one under rate_mutex above. That one covers a tick that arrives
+	 * after jockey3_suspend() has run. A tick which passed it earlier, while
+	 * the device was still live, is legitimately mid-recovery and reaches
+	 * here only after its grace has elapsed -- by which time suspend may have
+	 * happened. Resetting from there was observed to queue a reset the
+	 * suspended device could not complete, leaving the resume path waiting
+	 * out jockey3_wait_for_reset_completion() twice over.
+	 *
+	 * Racy by construction -- either state arriving just after the test still
+	 * hits it. The timeout bounds that; closing it properly would mean
+	 * serializing against jockey3_disconnect(), which must not block on
+	 * driver locks.
 	 */
-	if (jockey3_is_disconnected(chip)) {
+	if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip)) {
 		dev_dbg(&chip->intf0->dev,
-			"%s stream still stalled after URB restart, but the device is gone; not resetting (%s)\n",
+			"%s stream still stalled after URB restart, but the device is down; not resetting (%s)\n",
 			type, context);
 		ret = -ENODEV;
 		goto out;
