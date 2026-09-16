@@ -174,7 +174,11 @@ def main():
         # somewhere in there.
         lead = random.uniform(float(c.params.get("lead_min_s", 0.1)),
                               float(c.params.get("lead_max_s", 1.8)))
-        priv.stall_inject(after_s, int((lead + 0.6) * 1000), 0)
+        # after_s 0: fire on the next completion. The window is sized to end
+        # about 600 ms after the suspend is issued, so a reset queued
+        # post-suspend succeeds on resume instead of being starved into a
+        # give-up.
+        priv.stall_inject(0, int((lead + 0.6) * 1000), 0)
         time.sleep(max(0.0, after_s - settle_s) + lead)
 
         t0 = time.time()

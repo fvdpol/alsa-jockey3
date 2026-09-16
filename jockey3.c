@@ -1137,6 +1137,16 @@ static bool debug_stall_inject_should_drop(struct jockey3_chip *chip,
 		return false;
 
 	/*
+	 * A zero window means disabled, and must not latch. Without this the
+	 * one-shot latch burns at after_s with whatever window happens to be set
+	 * -- zero, during a case's setup -- and arming a real window afterwards
+	 * does nothing, because the latch is already non-zero. That silently
+	 * disabled the injection for the whole probe.
+	 */
+	if (!window_ns)
+		return false;
+
+	/*
 	 * Periodic mode, which is what a case needs to race the injection
 	 * against something else. One-shot gives a single ~window_ns opportunity
 	 * and is over in well under a second: JT-PM-004 measured recovery
