@@ -37,6 +37,13 @@ UNEXPECTED = "unexpected"    # ours, and not normal here -> fail
 UNRELATED = "unrelated"      # someone else's, known noise -> ignore
 UNCLASSIFIED = "unclassified"  # -> flag for review
 INVESTIGATE = "investigate"  # a defect, not a test failure -> abort
+# The USB host controller died underneath the run. Not a test failure and not
+# a driver defect: every result recorded from here on is a measurement of a
+# bus that is not there. Kept separate from INVESTIGATE because the response
+# differs -- an oops means stop and open an issue, a dead controller means
+# invalidate what is in flight and, if the target allows it, reload the HCD
+# and carry on. See issue #40.
+HOST_FAIL = "host_fail"      # the bus died -> invalidate, maybe recover
 
 # Recognizing our own messages. dmesg renders the module name with either
 # spelling depending on how it was loaded, so accept both. "ploytec" also
@@ -342,6 +349,10 @@ class Classifier:
         # ownership test, or they would be unclassifiable by construction.
         self.driver_fail_by_device = _compile(rules, "driver_fail_by_device")
         self.investigate = _compile(rules, "investigate")
+        # Checked before investigate, because the HC-death cascade includes
+        # lines a generic defect pattern could claim first and the two want
+        # opposite responses. See classify().
+        self.host_fail = _compile(rules, "host_fail")
         self.unrelated = _compile(rules, "unrelated")
 
     def classify(self, lines, expect_patterns=None):
@@ -356,7 +367,7 @@ class Classifier:
         """
         expect = [re.compile(p) for p in (expect_patterns or [])]
         buckets = {EXPECTED: [], UNEXPECTED: [], UNRELATED: [],
-                   UNCLASSIFIED: [], INVESTIGATE: []}
+                   UNCLASSIFIED: [], INVESTIGATE: [], HOST_FAIL: []}
         metrics = {}
 
         for raw in lines:
@@ -365,7 +376,18 @@ class Classifier:
             line = strip_prefix(raw)
             level = msg_level(raw)
 
-            # Defects first: an oops inside an otherwise expected message is
+            # A dead host controller outranks everything, including the defect
+            # patterns below. The cascade it produces ("HC died; cleaning up",
+            # then a USB disconnect for every device on the bus) reads like a
+            # pile of unrelated failures, and whichever bucket claims the first
+            # line decides how the run is attributed. It is checked here so the
+            # attribution is the controller, not the wreckage.
+            hit = self._first(self.host_fail, line)
+            if hit:
+                buckets[HOST_FAIL].append(raw)
+                continue
+
+            # Defects next: an oops inside an otherwise expected message is
             # still an oops, and ordering here is a correctness property.
             hit = self._first(self.investigate, line)
             if hit:

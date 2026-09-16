@@ -431,12 +431,15 @@ def failure_reason(err, out, rc):
 # How a verdict looks at a glance. The word is still there for anything
 # parsing the output; the mark is for the person watching it happen.
 MARKS = {results.PASS: "✓", results.PASS_XRUN: "✓", results.FAIL: "✗",
-         results.SKIP: "–", results.BLOCKED: "⊘",
+         results.INVALID: "!", results.SKIP: "–", results.BLOCKED: "⊘",
          results.PENDING: "?"}
 
 MARK_STYLES = {results.PASS: ("bold", "green"),
                results.PASS_XRUN: ("bold", "yellow"),
                results.FAIL: ("bold", "red"),
+               # Not red: an invalid result is not a failure, and colouring it
+               # like one is exactly the confusion the status exists to stop.
+               results.INVALID: ("bold", "magenta"),
                results.SKIP: ("dim",), results.BLOCKED: ("yellow",),
                results.PENDING: ("cyan",)}
 
@@ -451,6 +454,45 @@ def mark(status, style=None):
     if style is None:
         return glyph
     return style(glyph, *MARK_STYLES.get(status, ()))
+
+
+def decide_outcome(ctx, case_results):
+    """What the run as a whole says, given its cases and what the kernel said.
+
+    Ordered by what the operator has to do about it, and the order is the
+    contract -- see selftest.test_host_controller_death(). A dead controller
+    outranks a kernel defect, which outranks a case failure:
+
+    - A dead controller explains any wreckage the defect rules also matched,
+      and unlike a defect it says nothing at all about the driver.
+    - Neither is a test failure, and both are decided before FAIL, so the
+      cases invalidated on the way down cannot colour the run red. That is
+      the whole point of the INVALID status: results recorded while the
+      hardware was known dead are not failure-rate data.
+    """
+    if ctx["host_fail"]:
+        return results.RUN_INVALID
+    # A defect is not a test failure. The machine needs attention, the right
+    # response is to open an issue, and continuing would only produce results
+    # from a kernel that is already in an undefined state.
+    if ctx["investigate"]:
+        return results.RUN_INVESTIGATE
+    if any(r.status == results.FAIL for r in case_results):
+        return results.RUN_FAIL
+    if any(r.status == results.PENDING for r in case_results):
+        # Manual cases are still unanswered, so the run is not yet a pass.
+        # checklist.py --import settles it.
+        return results.PENDING
+    if case_results and all(r.status in (results.SKIP, results.BLOCKED,
+                                         results.INVALID)
+                            for r in case_results):
+        # Nothing actually ran -- every selected case was disabled on this
+        # target or blocked on a missing capability. That is not a pass:
+        # a `--case JT-PM-001` run on a Pi with no RTC tested nothing, and
+        # calling it PASS would read as "the driver was verified" when it
+        # was not exercised at all.
+        return results.RUN_SKIP
+    return results.RUN_PASS
 
 
 def run_case(case, iteration, params, ctx):
@@ -555,6 +597,17 @@ def run_case(case, iteration, params, ctx):
     if r.status == results.PASS and any(
             r.metrics.get(k) for k in XRUN_METRIC_KEYS):
         r.status = results.PASS_XRUN
+
+    # The controller died while this case was running, so whatever it just
+    # measured is a reading of a bus that is not there. Overrides the verdict
+    # the case reached on its own, including a PASS: a case that happened to
+    # finish before the cascade reached it still ran on hardware that was on
+    # its way out, and recording it either way would be asserting something
+    # the run cannot support.
+    if buckets[kmsg.HOST_FAIL]:
+        ctx["host_fail"].extend(buckets[kmsg.HOST_FAIL])
+        r.status = results.INVALID
+        r.reason = f"USB host controller died: {buckets[kmsg.HOST_FAIL][0][:120]}"
 
     if buckets[kmsg.INVESTIGATE]:
         ctx["investigate"].extend(buckets[kmsg.INVESTIGATE])
@@ -886,6 +939,7 @@ def main():
         "classifier": kmsg.Classifier(rules),
         "timeout": args.timeout,
         "investigate": [],
+        "host_fail": [],
         "unclassified": [],
         # Echoed live. Indented under the case header so a case's own account
         # of what it is doing is visibly subordinate to the runner's verdict.
@@ -984,33 +1038,20 @@ def main():
                   f"{r.status.upper():<8} {r.duration_s:>6.1f}s{extra}")
             results.write(run, run_json)
 
+            if ctx["host_fail"]:
+                # The bus is gone. Stop before anything else is recorded --
+                # every remaining cycle would be switching a hub that is no
+                # longer there.
+                aborted = True
+                break
+
             if ctx["investigate"]:
                 aborted = True
                 break
         if aborted:
             break
 
-    # A defect is not a test failure. The machine needs attention, the right
-    # response is to open an issue, and continuing would only produce results
-    # from a kernel that is already in an undefined state.
-    if ctx["investigate"]:
-        run.outcome = results.RUN_INVESTIGATE
-    elif any(r.status == results.FAIL for r in run.results):
-        run.outcome = results.RUN_FAIL
-    elif any(r.status == results.PENDING for r in run.results):
-        # Manual cases are still unanswered, so the run is not yet a pass.
-        # checklist.py --import settles it.
-        run.outcome = results.PENDING
-    elif run.results and all(r.status in (results.SKIP, results.BLOCKED)
-                             for r in run.results):
-        # Nothing actually ran -- every selected case was disabled on this
-        # target or blocked on a missing capability. That is not a pass:
-        # a `--case JT-PM-001` run on a Pi with no RTC tested nothing, and
-        # calling it PASS would read as "the driver was verified" when it
-        # was not exercised at all.
-        run.outcome = results.RUN_SKIP
-    else:
-        run.outcome = results.RUN_PASS
+    run.outcome = decide_outcome(ctx, run.results)
 
     run.unclassified = ctx["unclassified"][:200]
     run.ended = results.utc_iso()
@@ -1063,6 +1104,12 @@ def main():
     counts = run.counts()
     print("\n" + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     print(f"outcome: {run.outcome.upper()}")
+    if ctx["host_fail"]:
+        print("\nThe USB host controller died; the run was abandoned.")
+        print("This is not a test failure and not a driver defect -- the bus")
+        print("went away, so nothing recorded after it is data. See issue #40:")
+        for line in ctx["host_fail"][:5]:
+            print(f"  {line}")
     if ctx["investigate"]:
         print("\nA kernel defect was detected; the run was abandoned.")
         print("This is not a test failure -- open an issue and investigate:")

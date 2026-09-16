@@ -328,6 +328,16 @@ def build_index(runs, cases=None, clean_only=False):
             continue
         rev = driver_rev(git)
         for r in run.get("results", []):
+            # A result recorded while the USB host controller was dead is not
+            # evidence about the driver, so it does not enter the index at
+            # all -- neither as a pass nor, more importantly, as the most
+            # recent result, which would paint the case red in the matrix on
+            # the strength of a bus that had gone away. The case keeps
+            # whatever it last genuinely measured, and the run.json still
+            # carries the invalid record for anyone reading that run. See
+            # results.INVALID.
+            if r["status"] == results.INVALID:
+                continue
             when = run.get("started")
             entry = {"when": when, "rev": rev, "target": target,
                      "hash": git.get("git_hash"), "status": r["status"],

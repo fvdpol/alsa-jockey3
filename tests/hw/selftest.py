@@ -138,6 +138,96 @@ def test_classifier(rules):
           "suppressed-callback summaries are counted")
 
 
+def test_host_controller_death(rules):
+    """The xHCI controller dying mid-run -- issue #40.
+
+    The property under test is attribution, not detection: these lines are
+    easy to match and the whole difficulty is that the cascade they start
+    looks exactly like a pile of driver failures.
+    """
+    print("\nhost controller death")
+    import runner
+    c = kmsg.Classifier(rules)
+    T = "[ 4105.768524] "
+
+    # The cascade as it was actually recorded on x86_64-prod, issue #40.
+    cascade = [
+        T + "xhci_hcd 0000:00:14.0: xHCI host not responding to stop endpoint command",
+        T + "xhci_hcd 0000:00:14.0: xHCI host controller not responding, assume dead",
+        T + "xhci_hcd 0000:00:14.0: HC died; cleaning up",
+        T + "usb 1-3: USB disconnect, device number 2",
+        T + "usb 1-4: USB disconnect, device number 3",
+    ]
+    b, _m = c.classify(cascade, [])
+    check(len(b[kmsg.HOST_FAIL]) == 3,
+          "all three host-controller lines are caught, not just the first",
+          str(kmsg.summarize(b)))
+    check(len(b[kmsg.UNEXPECTED]) == 0,
+          "the disconnects the cascade causes are not driver failures")
+
+    # Ordering. "HC died" arrives with a backtrace often enough that a
+    # generic defect pattern can claim it; if it does, the run is attributed
+    # to the driver and the recovery never runs.
+    b2, _ = c.classify(
+        [T + "xhci_hcd 0000:00:14.0: HC died; cleaning up  WARNING: at xhci.c:1"], [])
+    check(len(b2[kmsg.HOST_FAIL]) == 1 and len(b2[kmsg.INVESTIGATE]) == 0,
+          "a dead controller outranks a defect pattern on the same line")
+
+    # A driver message that happens to mention the controller must not be
+    # swallowed by the host rules.
+    b3, _ = c.classify([T + DRIVER + "Playback URB error: -71 (1 consecutive)"], [])
+    check(len(b3[kmsg.HOST_FAIL]) == 0,
+          "an ordinary driver message is not mistaken for a dead controller")
+
+    # The run-level contract: invalid, never failed. A campaign that trips
+    # this bug must not record the rest of its cycles as driver failures.
+    failed = results.CaseResult(id="JT-HOTPLUG-003", status=results.FAIL)
+    invalid = results.CaseResult(id="JT-HOTPLUG-003", status=results.INVALID)
+
+    check(runner.decide_outcome({"host_fail": ["HC died"], "investigate": []},
+                                [invalid]) == results.RUN_INVALID,
+          "a dead controller makes the run invalid")
+    check(runner.decide_outcome({"host_fail": ["HC died"], "investigate": []},
+                                [failed]) == results.RUN_INVALID,
+          "and outranks a case that had already failed")
+    check(runner.decide_outcome({"host_fail": ["HC died"],
+                                 "investigate": ["BUG: somewhere"]},
+                                [invalid]) == results.RUN_INVALID,
+          "and outranks a kernel defect, which it usually also caused")
+    check(runner.decide_outcome({"host_fail": [], "investigate": []},
+                                [failed]) == results.RUN_FAIL,
+          "while an ordinary failure is still a failure")
+    check(runner.decide_outcome({"host_fail": [], "investigate": []},
+                                [results.CaseResult(id="x", status=results.PASS)])
+          == results.RUN_PASS,
+          "and a clean run is unaffected")
+
+    # INVALID must not read as "nothing ran" in a way that hides it, nor as
+    # a pass. It is its own thing.
+    check(results.INVALID not in (results.PASS, results.FAIL, results.SKIP),
+          "invalid is a status of its own")
+
+    # And it must not reach the ledger. The matrix shows the LAST result for
+    # a case, so an invalid one left in the index would paint the case red on
+    # the strength of a bus that had gone away -- the exact misreading the
+    # status exists to prevent.
+    import ledger
+    def _run(status, when):
+        return {"target": "x86_64-prod", "started": when, "_path": "p",
+                "env": {"driver": {"build": {"git_hash": "abc1234",
+                                             "git_dirty": False}}},
+                "results": [{"id": "JT-HOTPLUG-003", "status": status}]}
+
+    idx = ledger.build_index([_run(results.PASS, "2026-09-01T00:00:00Z"),
+                              _run(results.INVALID, "2026-09-02T00:00:00Z")])
+    slot = idx.get(("x86_64-prod", "JT-HOTPLUG-003")) or {}
+    check(slot.get("last") and slot["last"]["status"] == results.PASS,
+          "an invalid result does not become the case's latest result",
+          str(slot.get("last")))
+    check(slot.get("pass") is not None,
+          "and the real pass behind it is still the pass on record")
+
+
 def test_wedged_device(rules):
     """The 2026-08-11 lockup, replayed line for line.
 
@@ -2075,6 +2165,7 @@ def main():
 
     test_classifier(rules)
     test_wedged_device(rules)
+    test_host_controller_death(rules)
     test_watchdog(rules)
     test_recovery_giveup(rules)
     test_error_handling(rules)

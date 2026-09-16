@@ -42,9 +42,22 @@ from dataclasses import dataclass, field, asdict
 # same (target, case, params) bucket's own history, answered by
 # ledger.py's xrun trend tracking, not a static threshold anywhere in this
 # file or in a case.
+#
+# INVALID is the second derived status, and derived for the same kind of
+# reason: the case ran, but the hardware went away underneath it, so whatever
+# it measured is not evidence about the driver. The runner assigns it when the
+# USB host controller dies mid-run (kmsg.HOST_FAIL, see lib/rules.yaml), which
+# on the affected target drops every device on the bus including the hub the
+# harness switches. The distinction from FAIL is the whole point: a
+# power-cycle campaign that trips issue #40 would otherwise record the
+# remainder of its cycles as driver failures, which corrupts the numerator,
+# and count them as cycles performed, which corrupts the denominator. An
+# INVALID result is excluded from both. Counts logged while the hardware is
+# known dead are not failure-rate data.
 PASS = "pass"
 PASS_XRUN = "pass_xrun"
 FAIL = "fail"
+INVALID = "invalid"          # ran, but the hardware died under it -- not data
 SKIP = "skip"
 BLOCKED = "blocked"
 ERROR = "error"
@@ -54,6 +67,7 @@ PENDING = "pending"          # manual case, awaiting a human answer
 RUN_PASS = "pass"
 RUN_FAIL = "fail"
 RUN_INVESTIGATE = "investigate"
+RUN_INVALID = "invalid"      # the bus died; the run measured nothing usable
 RUN_SKIP = "skip"            # every case skipped or blocked -- nothing ran
 
 

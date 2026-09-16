@@ -436,6 +436,50 @@ driver_fail_by_device:
 # INVESTIGATE and the remaining profile is abandoned: the machine needs manual
 # attention, and the right response is to open an issue and look at it -- not
 # to retry, and not to record a count and carry on.
+# The USB host controller itself died. Not a driver defect and not a test
+# failure: from the first of these lines onward the bus is gone, every device
+# on it has been dropped, and anything the run records afterwards is a
+# measurement of absent hardware. The runner invalidates the case in flight,
+# abandons the rest of the batch, and -- where the target supports it --
+# reloads the HCD and re-verifies the device before anything else runs.
+#
+# Why this is a category of its own rather than an `investigate` entry: an
+# oops means the kernel is in an undefined state and the right response is to
+# stop and open an issue. A dead controller is a known, filed condition
+# (issue #40) with a known recovery, and the results it invalidates must not
+# be counted as failures -- a power-cycle campaign that trips it would
+# otherwise report the rest of its cycles as driver failures and silently
+# corrupt both halves of the failure rate it exists to measure.
+#
+# Matched on any of the three, not just the first: the "assume dead" line is
+# the diagnosis, but a run whose capture starts mid-cascade may only ever see
+# the cleanup. Any one of them is sufficient and they are not double-counted,
+# since the whole batch stops at the first.
+host_fail:
+  - pattern: 'xHCI host controller not responding, assume dead'
+    why: >
+      xhci-hcd has given up on the controller. This is the diagnosis line, and
+      in every occurrence recorded on issue #40 it arrives 5.10-5.19 s after a
+      USB disconnect -- XHCI_STOP_EP_CMD_TIMEOUT -- following a Stop Endpoint
+      command the controller never answered.
+  - pattern: 'HC died; cleaning up'
+    why: >
+      The teardown that follows the line above. Every device on the
+      controller is disconnected next, including, on alsa-test, the hub the
+      harness drives with uhubctl -- which is why the batch cannot simply
+      continue.
+  - pattern: 'xHCI host not responding to stop endpoint command'
+    why: >
+      The symptom that precedes the diagnosis by microseconds. Matched so
+      that a controller which recovers before "assume dead" -- not yet
+      observed, but not excluded either -- is still surfaced rather than
+      silently passing.
+  - pattern: 'HC halt failed'
+    why: >
+      An adjacent xhci-hcd give-up path. Grouped here because the outcome for
+      the run is identical: the controller is not usable and nothing measured
+      after it means anything.
+
 investigate:
   - pattern: 'BUG:'
   - pattern: 'WARNING:'
