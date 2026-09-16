@@ -1724,27 +1724,27 @@ static bool jockey3_err_device_gone(int err)
  * must stay loud -- it means the endpoints were disabled while the driver is
  * still bound, which takes a device reset to undo.
  *
- * @index is the ring slot, or -1 for the single MIDI IN URB.
+ * @slot is the ring slot, or -1 for the single MIDI IN URB.
  */
 static void jockey3_submit_failed(struct jockey3_chip *chip, int err,
-				  const char *what, int index)
+				  const char *what, int slot)
 {
 	if (jockey3_err_device_gone(err)) {
-		if (index < 0)
+		if (slot < 0)
 			dev_dbg(&chip->intf0->dev,
 				"Not submitting the %s URB: device is gone (%d)\n", what, err);
 		else
 			dev_dbg(&chip->intf0->dev,
 				"Not submitting %s URB %d: device is gone (%d)\n",
-				what, index, err);
+				what, slot, err);
 		return;
 	}
 
-	if (index < 0)
+	if (slot < 0)
 		dev_err(&chip->intf0->dev, "Failed to submit the %s URB: %d\n", what, err);
 	else
 		dev_err(&chip->intf0->dev, "Failed to submit %s URB %d: %d\n",
-			what, index, err);
+			what, slot, err);
 }
 
 /**
@@ -3068,12 +3068,110 @@ static void jockey3_pcm_set_n(struct jockey3_chip *chip, struct snd_pcm_substrea
 		is_playback ? "playback" : "capture", 1U << n_shift, period_bytes);
 }
 
+/**
+ * jockey3_pcm_change_rate() - reprogram the hardware rate for hw_params()
+ * @chip: driver state
+ * @substream: the substream asking for the rate
+ * @rate: the requested rate in Hz
+ * @changed: set true if the hardware was actually reprogrammed
+ *
+ * Split out of jockey3_pcm_hw_params() so that the USB device lock its caller
+ * holds and the rate_mutex taken here sit in separate functions: nesting two
+ * scoped_guard() blocks in one scope shadows the guard's own variable and trips
+ * -Wshadow, which this driver builds clean at W=12.
+ *
+ * Must be called with the USB device lock held; the call site explains why that
+ * lock is needed and why it cannot be taken further down.
+ *
+ * Return: 0 on success or if the rate already matched (@changed stays false),
+ * %-EBUSY if the other direction holds a different rate, %-ENODEV if the device
+ * is gone, or the error from programming the rate.
+ */
+static int jockey3_pcm_change_rate(struct jockey3_chip *chip,
+				   struct snd_pcm_substream *substream,
+				   unsigned int rate, bool *changed)
+{
+	int ret;
+
+	/*
+	 * rate_mutex is held across the whole stop/set-rate/start sequence, which
+	 * is what excludes a concurrent rate change from another substream: any
+	 * other sleepable path that needs a settled rate takes the same mutex.
+	 */
+	guard(mutex)(&chip->rate_mutex);
+
+	if (jockey3_is_disconnected(chip))
+		return -ENODEV;
+
+	/*
+	 * Drop this direction's own claim on the rate before counting:
+	 * an application is free to hw_free and run hw_params again at
+	 * a different rate, and its previous commitment must not be
+	 * what blocks it. Cleared inside rate_mutex, so the other
+	 * direction cannot observe the gap and reprogram the hardware.
+	 */
+	jockey3_set_rate_committed(chip, substream->stream, false);
+
+	if (chip->current_rate == rate) {
+		dev_dbg(&chip->intf0->dev, "Rate already set to %u, skipping change\n",
+			rate);
+		jockey3_set_rate_committed(chip, substream->stream, true);
+		return 0;
+	}
+
+	*changed = true;
+
+	/*
+	 * The other direction already holds the rate. The ALSA core
+	 * should have enforced the constraint from jockey3_pcm_open(),
+	 * so this is a backstop -- but it is also the only check that
+	 * covers a stream which opened while the device was idle and
+	 * only now asks for a rate the other direction has since fixed.
+	 */
+	if (jockey3_rate_committed_streams(chip) > 0) {
+		dev_err(&chip->intf0->dev,
+			"Cannot change rate to %u while the other stream holds %u\n",
+			rate, chip->current_rate);
+		return -EBUSY;
+	}
+
+	jockey3_stop_urbs(chip);
+
+	ret = jockey3_set_rate(chip, rate, false);
+	if (ret != 0) {
+		if (jockey3_err_device_gone(ret))
+			dev_dbg(&chip->intf0->dev,
+				"Rate change to %u abandoned; device is gone (%d)\n",
+				rate, ret);
+		else
+			dev_err(&chip->intf0->dev,
+				"Rate change to %u failed: %d\n", rate, ret);
+		/*
+		 * The rate change is what left the endpoints disabled if
+		 * they are, so this restart is the one most likely to
+		 * come back -ENOENT. Report it before returning the rate
+		 * error, which would otherwise be the only thing seen.
+		 */
+		jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip, false),
+					  "a failed rate change");
+		return ret;
+	}
+
+	jockey3_set_current_rate(chip, rate);
+	jockey3_set_rate_committed(chip, substream->stream, true);
+
+	jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip, false), "a rate change");
+
+	return 0;
+}
+
 static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 				 struct snd_pcm_hw_params *hw_params)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
 	unsigned int rate = params_rate(hw_params);
 	bool playback_alive, capture_alive, capture_open;
+	bool rate_changed = false;
 	unsigned int grace;
 	int ret = 0;
 
@@ -3099,71 +3197,46 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	jockey3_pcm_set_n(chip, substream, hw_params);
 
 	/*
-	 * rate_mutex is held across the whole stop/set-rate/start sequence, which
-	 * is what excludes a concurrent rate change from another substream: any
-	 * other sleepable path that needs a settled rate takes the same mutex.
+	 * The USB device lock, for the whole rate change and no longer.
+	 *
+	 * Programming a rate runs usb_set_interface() (four times, in
+	 * ploytec_initialize_device()), and the USB core serializes altsetting
+	 * changes against disconnect by this lock and nothing else:
+	 * usb_disconnect() holds it across usb_disable_device(), and usbfs takes
+	 * it around its own SETINTERFACE ioctl. Without it usb_set_interface() and
+	 * usb_disable_device() can both reach remove_intf_ep_devs() for the same
+	 * interface -- guarded only by the unlocked bitfield intf->ep_devs_created
+	 * -- and the second device_del() lands on an endpoint device that has
+	 * already been deleted. That is a kernel oops, reproduced by unplugging the
+	 * device during a rate change.
+	 *
+	 * Taken here, in the ALSA entry point, and NOT inside
+	 * ploytec_initialize_device(): probe(), disconnect(), pre_reset() and
+	 * post_reset() are all called by the USB core with this lock already held,
+	 * and it is not recursive, so locking further down would self-deadlock the
+	 * reset path (post_reset() -> jockey3_set_rate() ->
+	 * ploytec_initialize_device()).
+	 *
+	 * Released before the recovery below, which is not optional: recovery can
+	 * reach jockey3_queue_reset(), and the reset it queues takes this same lock
+	 * in usb_reset_device(). Holding it across that wait would stall every
+	 * recovery until jockey3_wait_for_reset_completion() gave up.
+	 *
+	 * Outside rate_mutex, matching the order the core already establishes:
+	 * pre_reset() and post_reset() run holding the device lock and take
+	 * rate_mutex underneath it.
+	 *
+	 * The watchdog must never take this lock. jockey3_disconnect() runs with it
+	 * held and waits there in cancel_delayed_work_sync(), so a tick blocking on
+	 * it would deadlock. Nothing on the watchdog's path reaches
+	 * usb_set_interface() today; keep it that way.
 	 */
-	scoped_guard(mutex, &chip->rate_mutex) {
-		if (jockey3_is_disconnected(chip))
-			return -ENODEV;
-
-		/*
-		 * Drop this direction's own claim on the rate before counting:
-		 * an application is free to hw_free and run hw_params again at
-		 * a different rate, and its previous commitment must not be
-		 * what blocks it. Cleared inside rate_mutex, so the other
-		 * direction cannot observe the gap and reprogram the hardware.
-		 */
-		jockey3_set_rate_committed(chip, substream->stream, false);
-
-		if (chip->current_rate == rate) {
-			dev_dbg(&chip->intf0->dev, "Rate already set to %u, skipping change\n",
-				rate);
-			jockey3_set_rate_committed(chip, substream->stream, true);
-			return 0;
-		}
-
-		/*
-		 * The other direction already holds the rate. The ALSA core
-		 * should have enforced the constraint from jockey3_pcm_open(),
-		 * so this is a backstop -- but it is also the only check that
-		 * covers a stream which opened while the device was idle and
-		 * only now asks for a rate the other direction has since fixed.
-		 */
-		if (jockey3_rate_committed_streams(chip) > 0) {
-			dev_err(&chip->intf0->dev,
-				"Cannot change rate to %u while the other stream holds %u\n",
-				rate, chip->current_rate);
-			return -EBUSY;
-		}
-
-		jockey3_stop_urbs(chip);
-
-		ret = jockey3_set_rate(chip, rate, false);
-		if (ret != 0) {
-			if (jockey3_err_device_gone(ret))
-				dev_dbg(&chip->intf0->dev,
-					"Rate change to %u abandoned; device is gone (%d)\n",
-					rate, ret);
-			else
-				dev_err(&chip->intf0->dev,
-					"Rate change to %u failed: %d\n", rate, ret);
-			/*
-			 * The rate change is what left the endpoints disabled if
-			 * they are, so this restart is the one most likely to
-			 * come back -ENOENT. Report it before returning the rate
-			 * error, which would otherwise be the only thing seen.
-			 */
-			jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip, false),
-						  "a failed rate change");
-			return ret;
-		}
-
-		jockey3_set_current_rate(chip, rate);
-		jockey3_set_rate_committed(chip, substream->stream, true);
-
-		jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip, false), "a rate change");
-	}
+	scoped_guard(device, &chip->dev->dev)
+		ret = jockey3_pcm_change_rate(chip, substream, rate, &rate_changed);
+	if (ret < 0)
+		return ret;
+	if (!rate_changed)
+		return 0;
 
 	/*
 	 * Ploytec firmware re-synchronization:
