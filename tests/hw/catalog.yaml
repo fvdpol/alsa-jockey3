@@ -2120,6 +2120,7 @@ cases:
       settle_seconds: 3
       stall_after_s: 3
       stall_window_ms: 300
+      stall_period_ms: 1200
       stall_lead_s: 0.5
       rate: 48000
     metrics:

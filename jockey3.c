@@ -1111,12 +1111,16 @@ static void jockey3_note_completion(struct jockey3_pcm_urb_stream *urb_stream)
  */
 static int debug_stall_inject_after_s = 10;
 static int debug_stall_inject_window_ms = 200;
+static int debug_stall_inject_period_ms;
 module_param(debug_stall_inject_after_s, int, 0644);
 MODULE_PARM_DESC(debug_stall_inject_after_s,
 		 "TEST ONLY: seconds after a ring (re)starts before completions are dropped.");
 module_param(debug_stall_inject_window_ms, int, 0644);
 MODULE_PARM_DESC(debug_stall_inject_window_ms,
 		 "TEST ONLY: how long completions are dropped for, in ms.");
+module_param(debug_stall_inject_period_ms, int, 0644);
+MODULE_PARM_DESC(debug_stall_inject_period_ms,
+		 "TEST ONLY: repeat the drop window this often, in ms; 0 means one-shot.");
 
 static bool debug_stall_inject_should_drop(struct jockey3_chip *chip,
 					   const struct jockey3_pcm_urb_stream *urb_stream,
@@ -1127,10 +1131,35 @@ static bool debug_stall_inject_should_drop(struct jockey3_chip *chip,
 	u64 end = atomic64_read(&chip->debug_stall_window_end[direction]);
 	u64 after_ns = (u64)READ_ONCE(debug_stall_inject_after_s) * NSEC_PER_SEC;
 	u64 window_ns = (u64)READ_ONCE(debug_stall_inject_window_ms) * NSEC_PER_MSEC;
+	u64 period_ns = (u64)READ_ONCE(debug_stall_inject_period_ms) * NSEC_PER_MSEC;
+
+	if (!started || now - started < after_ns)
+		return false;
+
+	/*
+	 * Periodic mode, which is what a case needs to race the injection
+	 * against something else. One-shot gives a single ~window_ns opportunity
+	 * and is over in well under a second: JT-PM-004 measured recovery
+	 * entering once per suspend that way, always finishing long before the
+	 * suspend landed, so nothing was ever in flight to race and the case
+	 * passed against a driver that still had the bug.
+	 *
+	 * Repeating keeps recovery cycling for as long as the case needs. The
+	 * window stays shorter than the period, so each cycle's escalated reset
+	 * lands after the drops have stopped and recovery succeeds -- sustained
+	 * churn without ever driving the ladder to give up, which would trip
+	 * lib/rules.yaml's driver_fail.
+	 *
+	 * The latch below is not used in this mode: there is nothing to latch,
+	 * the phase is a pure function of the clock.
+	 */
+	if (period_ns) {
+		u64 phase = (now - started - after_ns) % period_ns;
+
+		return phase < window_ns;
+	}
 
 	if (!end) {
-		if (!started || now - started < after_ns)
-			return false;
 		/* First completion past the threshold arms it; harmless if racing. */
 		atomic64_cmpxchg(&chip->debug_stall_window_end[direction], 0,
 				 now + window_ns);

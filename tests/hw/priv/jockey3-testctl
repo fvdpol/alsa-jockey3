@@ -123,10 +123,11 @@ usage() {
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
 #   dyndbg-hwparams-n on|off enable/disable the hw_params() packets/URB (N) message
 #   dyndbg-pm on|off       TEST ONLY: the driver's suspend/resume messages
-#   stall-inject <after_s> <window_ms>
+#   stall-inject <after_s> <window_ms> <period_ms>
 #                          TEST ONLY (branch test/issue43-suspend-stall-injection):
 #                          drop every completion for a direction for window_ms,
-#                          starting after_s after its ring (re)starts
+#                          starting after_s after its ring (re)starts; period_ms
+#                          repeats it, 0 means one-shot
 #   printk-console <1-8>   set the console loglevel
 #   xrun-debug 0|1        make the ALSA core log every xrun to the kernel log
 #   xrun-inject pcm0p|pcm0c   force an xrun on that substream's sub0, via
@@ -423,17 +424,19 @@ stall-inject)
 	# rather than succeeding quietly against a driver without them, so a case
 	# cannot read "knob absent" as "stall provoked".
 	#
-	#   stall-inject <after_s> <window_ms>
+	#   stall-inject <after_s> <window_ms> <period_ms>
 	#
 	# Arming is one-shot per probe(), so re-arm with unbind + bind rather
 	# than a module reload.
-	[ $# -eq 2 ] || die "stall-inject needs <after_s> <window_ms>"
-	[[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ ]] || die "stall-inject takes two non-negative integers"
+	[ $# -eq 3 ] || die "stall-inject needs <after_s> <window_ms> <period_ms>"
+	[[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] \
+		|| die "stall-inject takes three non-negative integers"
 	base="/sys/module/${MODULE//-/_}/parameters"
 	[ -w "$base/debug_stall_inject_after_s" ] \
 		|| die "no debug_stall_inject_* parameters: this driver is not the injection build"
 	echo "$1" > "$base/debug_stall_inject_after_s" || die "cannot set after_s"
 	echo "$2" > "$base/debug_stall_inject_window_ms" || die "cannot set window_ms"
+	echo "$3" > "$base/debug_stall_inject_period_ms" || die "cannot set period_ms"
 	exit 0
 	;;
 

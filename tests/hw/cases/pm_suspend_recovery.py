@@ -27,10 +27,18 @@ dropped for a window, producing genuine silence rather than a lie about
 liveness -- and makes its two timing constants module parameters so a case can
 line the window up with something else. Here that is a suspend.
 
-Each iteration re-arms with unbind/bind, because the window latches once per
-probe(). priv.stall_inject() fails rather than succeeding quietly against a
-driver without those parameters, so this case cannot mistake "knob absent" for
-"stall provoked".
+The injection runs in periodic mode, and that is load-bearing. One-shot gives a
+single opportunity that is over in well under a second: the case measured
+recovery entering once per suspend that way, always finishing before the suspend
+landed, and so passed against a driver with the bug still in it -- the negative
+control caught that. Repeating keeps recovery cycling for as long as the case
+needs, with the window kept shorter than the period so each cycle's escalated
+reset lands after the drops stop and recovery succeeds. Sustained churn, without
+driving the ladder to give up.
+
+priv.stall_inject() fails rather than succeeding quietly against a driver
+without those parameters, so this case cannot mistake "knob absent" for "stall
+provoked".
 
 The race needs the tick inside jockey3_recover_urb_stream(), past detection and
 blocked on rate_mutex, when jockey3_suspend() takes it -- so the suspend is
@@ -107,8 +115,9 @@ def main():
     priv.printk_console(1)
 
     after_s = int(c.params.get("stall_after_s", 3))
-    window_ms = int(c.params.get("stall_window_ms", 3000))
-    ok, why = priv.stall_inject(after_s, window_ms)
+    window_ms = int(c.params.get("stall_window_ms", 300))
+    period_ms = int(c.params.get("stall_period_ms", 1200))
+    ok, why = priv.stall_inject(after_s, window_ms, period_ms)
     if not ok:
         c.blocked("no debug_stall_inject_* parameters, so no stall can be "
                   "provoked: this needs the driver built from "
@@ -125,18 +134,6 @@ def main():
     for i in range(1, iterations + 1):
         c.status(f"cycle {i}/{iterations}  suspending with playback open")
 
-        # Re-arm: the window latches once per probe(), and unbind/bind is a
-        # fresh probe() without a module reload or a password.
-        priv.unbind()
-        priv.bind()
-        time.sleep(1.0)
-        idx, _ = alsa.find_card()
-        if idx is None:
-            c.fail(f"iteration {i}: card did not come back after rebind")
-            break
-        card = idx
-        priv.stall_inject(after_s, window_ms)
-
         proc = playback(card, rate)
         time.sleep(settle_s)
         if proc.poll() is not None:
@@ -147,8 +144,8 @@ def main():
         mark = kmsg.Marker(f"{c.id}#cycle{i}")
         mark.write()
 
-        # Wait for the window to open and the watchdog to notice, so the tick
-        # is inside the recovery ladder when the suspend lands on it.
+        # Let the injection cycle a few times so recovery is reliably churning
+        # when the suspend lands, rather than betting on one window.
         time.sleep(max(0.0, after_s - settle_s) +
                    float(c.params.get("stall_lead_s", 0.5)))
 

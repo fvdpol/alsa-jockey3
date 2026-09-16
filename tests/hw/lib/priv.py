@@ -133,17 +133,21 @@ def dyndbg_pm(on=True, timeout=20):
     return rc == 0, (err or "").strip()
 
 
-def stall_inject(after_s, window_ms, timeout=20):
+def stall_inject(after_s, window_ms, period_ms=0, timeout=20):
     """TEST ONLY: arm the driver's mid-stream stall injection.
 
     Only works against the driver built from
     test/issue43-suspend-stall-injection, which carries the matching
     debug_stall_inject_* parameters. Fails against any other build rather than
     succeeding quietly, so a case cannot read "knob absent" as "stall
-    provoked". Arming is one-shot per probe(): re-arm with unbind + bind.
+    provoked".
+
+    period_ms repeats the drop window, which is what a case needs to race the
+    injection against something else; one-shot arms once per probe() and is
+    over in well under a second. In periodic mode there is nothing to re-arm.
     """
     rc, _out, err = call("stall-inject", str(after_s), str(window_ms),
-                         timeout=timeout)
+                         str(period_ms), timeout=timeout)
     return rc == 0, (err or "").strip()
 
 
