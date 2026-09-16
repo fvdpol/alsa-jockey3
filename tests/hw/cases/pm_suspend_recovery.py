@@ -178,8 +178,9 @@ def main():
         # device's lifetime regardless of whether anything has the PCM open.
         if proc.poll() is not None:
             proc.wait()
-            c.note(f"iteration {i}: playback exited before the suspend, as an "
-                   "injected stall makes it")
+            c.note(f"iteration {i}: playback exited, restarting it")
+            proc = playback(card, rate)
+            time.sleep(1.0)
 
         mark = kmsg.Marker(f"{c.id}#cycle{i}")
         mark.write()
@@ -191,9 +192,11 @@ def main():
         # after_s 0: fire on the next completion. The window is sized to end
         # well before the parked recovery wakes, so the reset it queues once it
         # does succeeds instead of being starved into a give-up.
-        lead = float(c.params.get("lead_s", 0.8))
-        priv.stall_inject(0, int(lead * 1000), 0)
-        time.sleep(lead)
+        # Long enough that the watchdog sees it even at its 1 s idle poll, and
+        # short enough to be over before the parked tick wakes, so the reset it
+        # queues then succeeds.
+        priv.stall_inject(0, int(float(c.params.get("stall_window_s", 1.5)) * 1000), 0)
+        time.sleep(float(c.params.get("lead_s", 1.2)))
 
         t0 = time.time()
         rc, _out, err = priv.rtcwake_mem(sleep_s)

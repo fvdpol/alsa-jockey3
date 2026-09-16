@@ -2677,12 +2677,25 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	 * likely enough to hit by timing a suspend from userspace -- five runs
 	 * against a driver with the bug restored all missed it.
 	 *
-	 * Parking here instead makes it deterministic: the case sets a delay
-	 * longer than it takes to reach jockey3_suspend(), so the gate is always
-	 * evaluated after the device has gone down.
+	 * Waits for the device to go down rather than for a fixed time. A plain
+	 * msleep() does not work here: jiffies do not advance across a system
+	 * suspend, so a tick parked for N ms wakes N ms after the RESUME, with
+	 * the flag already cleared, and the gate is evaluated outside the window
+	 * entirely. Polling the flag exits during the transition instead --
+	 * jockey3_suspend() sets it before the freeze -- which puts this tick at
+	 * the gate at exactly the moment the race is about, every time.
+	 *
+	 * The delay is the bound on that wait, so a run where no suspend arrives
+	 * still finishes.
 	 */
-	if (READ_ONCE(debug_race_delay_ms) > 0)
-		msleep(READ_ONCE(debug_race_delay_ms));
+	if (READ_ONCE(debug_race_delay_ms) > 0) {
+		unsigned long deadline = jiffies +
+			msecs_to_jiffies(READ_ONCE(debug_race_delay_ms));
+
+		while (!jockey3_is_suspended(chip) && !jockey3_is_disconnected(chip) &&
+		       time_before(jiffies, deadline))
+			msleep(20);
+	}
 
 	if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip)) {
 		dev_dbg(&chip->intf0->dev,
