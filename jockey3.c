@@ -3232,6 +3232,24 @@ static void jockey3_free_resources(struct jockey3_chip *chip)
 {
 	int i;
 
+	/*
+	 * The last fence on the watchdog, and it has to be here rather than only
+	 * in jockey3_disconnect(): that sync cancel does not serialize against a
+	 * jockey3_start_urbs() that is already past its own DISCONNECTED gate.
+	 * Such a call arms the watchdog unconditionally at its tail, and
+	 * jockey3_disconnect() holds no mutex that would exclude it, so the tick
+	 * can be queued after the cancel there has already returned -- onto a
+	 * chip this function is about to free.
+	 *
+	 * Here that cannot happen. card->private_free runs once the last file
+	 * descriptor on the card is closed, so every ALSA entry point that could
+	 * reach jockey3_start_urbs() has returned before this does. Sleeping is
+	 * fine on this path (mutex_destroy() and jockey3_devices_mutex below
+	 * already require it), and there is no self-deadlock: this runs in the
+	 * closing task's context, never on the system_long_wq the watchdog uses.
+	 */
+	cancel_delayed_work_sync(&chip->watchdog_work);
+
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		usb_free_urb(chip->playback.urbs[i]);
 		kfree(chip->playback.bufs[i]);
