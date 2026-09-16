@@ -2119,7 +2119,7 @@ cases:
       sleep_seconds: 8
       settle_seconds: 3
       stall_after_s: 3
-      stall_window_ms: 3000
+      stall_window_ms: 300
       stall_lead_s: 0.5
       rate: 48000
     metrics:
@@ -2133,15 +2133,18 @@ cases:
       down. A run where recovery was never entered is reported blocked, not
       passed: it did not reach the race.
     expect_dmesg:
-      # All of these are what the injection asks for. The stall it forces
-      # outlasts the recovery ladder by design, so the ladder runs to the end
-      # and says so -- including the power-cycling line, which is a driver_fail
-      # anywhere else and has to be, since it means recovery gave up.
+      # What the injection asks for. Dropping completions without resubmitting
+      # drains the ring, so recovery has real work to do and escalates -- which
+      # is the point, since the second half of the #43 fix lives in that
+      # escalation. stall_window_ms is kept short enough that the URBs the
+      # reset submits are no longer being dropped, so recovery succeeds: a
+      # window that outlasts the reset makes the driver give up and log
+      # "hardware may need power-cycling", which is a driver_fail everywhere
+      # and cannot be waived here -- rules.yaml's driver_fail is checked before
+      # a case's expect_dmesg, deliberately.
       - 'stream stalled \(watchdog\); restarting URBs to recover'
       - 'URB stream restarted after stalling for'
       - 'still stalled after URB restart; queuing full USB reset'
-      - 'still stalled after full USB reset; hardware may need power-cycling'
-      - 'Timeout waiting for reset completion'
     notes: >
       The predicate for issue #43. Requires the driver built from branch
       test/issue43-suspend-stall-injection; it is blocked against any other
