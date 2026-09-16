@@ -21,14 +21,20 @@ disconnects the device, and jockey3_recover_urb_stream() returns -ENODEV at its
 first check.
 
 So the stall is injected. The driver on branch
-test/issue43-suspend-stall-injection carries a debug_force_stall module
-parameter that makes every liveness sample report the stream as dead. With it
-set, the watchdog enters the recovery ladder and stays there, which is exactly
-the state the race needs: a tick inside jockey3_recover_urb_stream(), past
-detection, blocked on rate_mutex when jockey3_suspend() takes it.
+test/issue43-suspend-stall-injection reuses the mechanism from
+dev/jockey3-watchdog-stall-injection -- every completion for a direction is
+dropped for a window, producing genuine silence rather than a lie about
+liveness -- and makes its two timing constants module parameters so a case can
+line the window up with something else. Here that is a suspend.
 
-priv.force_stall() fails rather than succeeding quietly against a driver without
-that parameter, so this case cannot mistake "knob absent" for "stall provoked".
+Each iteration re-arms with unbind/bind, because the window latches once per
+probe(). priv.stall_inject() fails rather than succeeding quietly against a
+driver without those parameters, so this case cannot mistake "knob absent" for
+"stall provoked".
+
+The race needs the tick inside jockey3_recover_urb_stream(), past detection and
+blocked on rate_mutex, when jockey3_suspend() takes it -- so the suspend is
+issued once the window has opened and the watchdog has had a tick to notice.
 
 The discriminators are the two dev_warn lines only jockey3_start_urbs() can
 produce: "URB stream restarted after stalling", emitted by
@@ -85,11 +91,13 @@ def main():
     c.require_card()
     c.require_tools("aplay")
 
-    ok, why = priv.force_stall(True)[0] == 0, ""
+    after_s = int(c.params.get("stall_after_s", 3))
+    window_ms = int(c.params.get("stall_window_ms", 3000))
+    ok, why = priv.stall_inject(after_s, window_ms)
     if not ok:
-        priv.force_stall(False)
-        c.blocked("no debug_force_stall parameter: this needs the driver built "
-                  "from test/issue43-suspend-stall-injection")
+        c.blocked("no debug_stall_inject_* parameters, so no stall can be "
+                  "provoked: this needs the driver built from "
+                  f"test/issue43-suspend-stall-injection ({why})")
 
     iterations = int(c.params.get("iterations_per_run", 6))
     sleep_s = int(c.params.get("sleep_seconds", 8))
@@ -102,9 +110,18 @@ def main():
     for i in range(1, iterations + 1):
         c.status(f"cycle {i}/{iterations}  suspending with playback open")
 
-        # Streaming normally first: the forced stall must land on a ring that
-        # is genuinely running, or recovery has nothing to restart.
-        priv.force_stall(False)
+        # Re-arm: the window latches once per probe(), and unbind/bind is a
+        # fresh probe() without a module reload or a password.
+        priv.unbind()
+        priv.bind()
+        time.sleep(1.0)
+        idx, _ = alsa.find_card()
+        if idx is None:
+            c.fail(f"iteration {i}: card did not come back after rebind")
+            break
+        card = idx
+        priv.stall_inject(after_s, window_ms)
+
         proc = playback(card, rate)
         time.sleep(settle_s)
         if proc.poll() is not None:
@@ -115,10 +132,10 @@ def main():
         mark = kmsg.Marker(f"{c.id}#cycle{i}")
         mark.write()
 
-        # Recovery enters within about one watchdog tick; give it long enough to
-        # be inside the ladder, then suspend on top of it.
-        priv.force_stall(True)
-        time.sleep(float(c.params.get("stall_lead_s", 0.2)))
+        # Wait for the window to open and the watchdog to notice, so the tick
+        # is inside the recovery ladder when the suspend lands on it.
+        time.sleep(max(0.0, after_s - settle_s) +
+                   float(c.params.get("stall_lead_s", 0.5)))
 
         t0 = time.time()
         rc, _out, err = priv.rtcwake_mem(sleep_s)
@@ -128,8 +145,6 @@ def main():
         if rc != 0:
             c.fail(f"iteration {i}: rtcwake exited {rc}: {(err or '').strip()[:160]}")
             break
-
-        priv.force_stall(False)
 
         # The suspend killed the stream; the driver does not advertise
         # SNDRV_PCM_INFO_RESUME, so aplay dying here is correct (see JT-PM-002).
@@ -166,8 +181,6 @@ def main():
         c.progress(f"cycle {i}/{iterations}  recovery entered {n_entered}x, "
                    f"restarts {n_restarted}, resets {n_reset}, "
                    f"resume {round(time.time() - t0 - sleep_s, 1)}s")
-
-    priv.force_stall(False)
 
     c.metric("cycles", iterations)
     c.metric("recovery_entered", entered)

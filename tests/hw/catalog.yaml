@@ -2118,7 +2118,9 @@ cases:
       iterations_per_run: 6
       sleep_seconds: 8
       settle_seconds: 3
-      stall_lead_s: 0.2
+      stall_after_s: 3
+      stall_window_ms: 3000
+      stall_lead_s: 0.5
       rate: 48000
     metrics:
       - cycles
@@ -2146,11 +2148,15 @@ cases:
       device instead, and jockey3_recover_urb_stream() returns -ENODEV at its
       first check.
 
-      The injection branch adds a debug_force_stall module parameter that makes
-      every liveness sample report the stream as dead. The case starts playback,
-      sets it, waits about one watchdog tick so recovery is inside its ladder,
-      and suspends on top of that -- which is the state the race needs, a tick
-      blocked on rate_mutex when jockey3_suspend() takes it.
+      The injection branch reuses the mechanism from
+      dev/jockey3-watchdog-stall-injection -- every completion for a direction
+      is dropped for a window, so the silence is genuine rather than a lie about
+      liveness -- and turns its two timing constants into module parameters so a
+      case can line the window up with something else. Each iteration re-arms
+      with unbind/bind, since the window latches once per probe(), starts
+      playback, waits for the window to open and the watchdog to enter its
+      ladder, then suspends on top of that. That is the state the race needs: a
+      tick blocked on rate_mutex when jockey3_suspend() takes it.
 
       The discriminators are the two dev_warn lines only jockey3_start_urbs()
       can produce: "URB stream restarted after stalling", from

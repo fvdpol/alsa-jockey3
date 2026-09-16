@@ -331,20 +331,6 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * [JOCKEY3_GRACE_MS_MIN, JOCKEY3_GRACE_MS_MAX] so a bad write cannot drive the
  * grace down to or below the stall threshold.
  */
-/*
- * TEST INSTRUMENTATION -- branch test/issue43-suspend-stall-injection only.
- * Must never reach main. See the branch's commit message for why the race it
- * provokes cannot be reached any other way.
- *
- * While set, every liveness sample reports the stream as dead, so the watchdog
- * enters jockey3_recover_urb_stream() and stays in its ladder. That is what
- * puts a tick inside recovery, blocked on rate_mutex, for jockey3_suspend() to
- * race with -- the predicate for issue #43.
- */
-static bool debug_force_stall;
-module_param(debug_force_stall, bool, 0644);
-MODULE_PARM_DESC(debug_force_stall, "TEST ONLY: report every stream as stalled, to provoke watchdog recovery on demand.");
-
 static int cold_start_grace_ms = 200;
 static int warm_start_grace_ms = 150;
 module_param(cold_start_grace_ms, int, 0644);
@@ -529,6 +515,11 @@ struct jockey3_pcm_urb_stream {
  * @midi_consec_errors: consecutive MIDI IN URB errors; @midi_lock
  * @playback: playback streaming state
  * @capture: capture streaming state
+ * @debug_stall_window_end: TEMPORARY BENCH INSTRUMENTATION, never merged to
+ *	main -- see the block above jockey3_capture_callback(). Indexed by
+ *	SNDRV_PCM_STREAM_PLAYBACK/CAPTURE; chip-scope rather than module-scope
+ *	so that jockey3-testctl's unbind/bind cycle (a fresh probe(), no module
+ *	reload) is enough to re-arm the one-shot injection for the next test.
  */
 struct jockey3_chip {
 	struct snd_card *card;
@@ -564,6 +555,9 @@ struct jockey3_chip {
 	/* PCM urb streams */
 	struct jockey3_pcm_urb_stream playback;
 	struct jockey3_pcm_urb_stream capture;
+
+	/* TEMPORARY BENCH INSTRUMENTATION -- never merged to main */
+	atomic64_t debug_stall_window_end[2];
 };
 
 static struct usb_driver jockey3_driver;
@@ -1073,6 +1067,81 @@ static void jockey3_note_completion(struct jockey3_pcm_urb_stream *urb_stream)
 		atomic64_set(&urb_stream->first_callback_time, now);
 }
 
+/*
+ * ============================================================================
+ * TEMPORARY BENCH INSTRUMENTATION -- NEVER MERGE TO main.
+ *
+ * Stall injection for validating the watchdog-triggered recovery path added
+ * by "ALSA: jockey3: make the URB liveness watchdog self-healing": lives only
+ * on dev/jockey3-watchdog-stall-injection, to force the mid-stream stall
+ * JT-PCM-008-1 hit organically (docs/test_strategy.md) on demand, on the
+ * bench, instead of waiting for it to recur naturally. Per project
+ * convention, dev-time instrumentation like this is fine as long as it never
+ * reaches a shipped commit.
+ *
+ * debug_stall_inject_after_s after a direction's URBs (re)start
+ * (urbs_started_time), every completion for that direction is dropped --
+ * no last_callback_time update, no resubmit -- for
+ * debug_stall_inject_window_ms, which is long enough to drain the whole ring
+ * (JOCKEY3_N_URBS URBs at even the slowest packet interval). That reproduces
+ * genuine silence, the same way the organic stall looked to the watchdog.
+ *
+ * One-shot per chip instance, not per stream open: a first cut of this that
+ * recomputed the window from the current urbs_started_time on every
+ * completion re-armed itself every debug_stall_inject_after_s forever, since
+ * recovery restarts the ring and resets urbs_started_time. Latching the
+ * window's end time the first time it is computed, in
+ * chip->debug_stall_window_end[], makes the "now >= window_end" test
+ * permanently false afterward regardless of how many times the ring
+ * restarts.
+ *
+ * chip-scope rather than module-scope on purpose: chip is freshly allocated
+ * at every probe(), so `sudo -n jockey3-testctl unbind` followed by `bind`
+ * (a fresh probe(), no module reload, no password) is enough to re-arm this
+ * for another bench run -- much faster to iterate on than reloading the
+ * whole module for every test.
+ * ============================================================================
+ */
+/*
+ * Settable so a case can line the stall up with something else, which is what
+ * JT-PM-004 needs: the window has to be open, and recovery already inside its
+ * ladder, at the moment jockey3_suspend() takes rate_mutex. Defaults are the
+ * original bench values. Zero for the delay means "as soon as the ring starts",
+ * which with an unbind/bind is a usable on-demand trigger.
+ */
+static int debug_stall_inject_after_s = 10;
+static int debug_stall_inject_window_ms = 200;
+module_param(debug_stall_inject_after_s, int, 0644);
+MODULE_PARM_DESC(debug_stall_inject_after_s,
+		 "TEST ONLY: seconds after a ring (re)starts before completions are dropped.");
+module_param(debug_stall_inject_window_ms, int, 0644);
+MODULE_PARM_DESC(debug_stall_inject_window_ms,
+		 "TEST ONLY: how long completions are dropped for, in ms.");
+
+static bool debug_stall_inject_should_drop(struct jockey3_chip *chip,
+					   const struct jockey3_pcm_urb_stream *urb_stream,
+					   int direction)
+{
+	u64 started = atomic64_read(&urb_stream->urbs_started_time);
+	u64 now = ktime_get_mono_fast_ns();
+	u64 end = atomic64_read(&chip->debug_stall_window_end[direction]);
+	u64 after_ns = (u64)READ_ONCE(debug_stall_inject_after_s) * NSEC_PER_SEC;
+	u64 window_ns = (u64)READ_ONCE(debug_stall_inject_window_ms) * NSEC_PER_MSEC;
+
+	if (!end) {
+		if (!started || now - started < after_ns)
+			return false;
+		/* First completion past the threshold arms it; harmless if racing. */
+		atomic64_cmpxchg(&chip->debug_stall_window_end[direction], 0,
+				 now + window_ns);
+		end = atomic64_read(&chip->debug_stall_window_end[direction]);
+	}
+
+	return now < end;
+}
+
+/* ========================== end bench instrumentation ===================== */
+
 static void jockey3_capture_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
@@ -1086,6 +1155,11 @@ static void jockey3_capture_callback(struct urb *urb)
 	int sp, ret;
 
 	atomic_dec(&urb_stream->urbs_in_flight);
+
+	/* TEMPORARY BENCH INSTRUMENTATION -- see the block above jockey3_capture_callback() */
+	if (debug_stall_inject_should_drop(chip, urb_stream, SNDRV_PCM_STREAM_CAPTURE))
+		return;
+
 	jockey3_note_completion(urb_stream);
 
 	switch (jockey3_urb_check(urb)) {
@@ -1287,6 +1361,11 @@ static void jockey3_playback_callback(struct urb *urb)
 	int i, sp, ret;
 
 	atomic_dec(&urb_stream->urbs_in_flight);
+
+	/* TEMPORARY BENCH INSTRUMENTATION -- see the block above jockey3_playback_callback() */
+	if (debug_stall_inject_should_drop(chip, urb_stream, SNDRV_PCM_STREAM_PLAYBACK))
+		return;
+
 	jockey3_note_completion(urb_stream);
 
 	switch (jockey3_urb_check(urb)) {
@@ -1998,10 +2077,6 @@ static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *
 {
 	u64 last_time = atomic64_read(&urb_stream->last_callback_time);
 	u64 window_ns = JOCKEY3_LIVENESS_WINDOW_NS(urb_stream->n_shift);
-
-	/* TEST INSTRUMENTATION -- see debug_force_stall's comment. */
-	if (READ_ONCE(debug_force_stall))
-		return false;
 
 	if (!last_time)
 		return false;
