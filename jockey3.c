@@ -475,7 +475,11 @@ struct jockey3_pcm_urb_stream {
  * @pcm: the PCM device; read-only after probe
  * @rmidi: the rawmidi device; read-only after probe
  * @xfer_buf: bounce buffer for EP0 control transfers, USB_XFER_BUF_SIZE bytes.
- *	Serialized by @rate_mutex, which every caller holds.
+ *	Serialized by @rate_mutex once the card is live, which is every caller
+ *	except jockey3_initialize(). That one runs from jockey3_probe() only,
+ *	before the card is registered and before the watchdog is armed, so it is
+ *	the sole user in existence and the mutex it would take is uncontended by
+ *	construction.
  * @rate_mutex: serializes sample-rate changes and the URB stop/start that goes
  *	with them; process context only, outermost lock
  * @flags: JOCKEY3_FLAG_* bits, accessed with the atomic bitops.
@@ -1635,6 +1639,23 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 	 * completion handler of each URB has finished, so no callback can still
 	 * be in its safe zone once these return -- no separate drain is needed
 	 * here (jockey3_pcm_sync_stop() covers the ALSA buffer-teardown path).
+	 *
+	 * For the anchored form that is worth spelling out, because the obvious
+	 * reading of the USB core says the opposite and repeatedly gets this
+	 * flagged as a use-after-free. __usb_hcd_giveback_urb() really does
+	 * unanchor an URB before invoking urb->complete(), so a handler that is
+	 * already running is no longer on anchor->urb_list and the kill loop will
+	 * not find it to wait on. What covers it is anchor->suspend_wakeups: the
+	 * same function brackets the callback with usb_anchor_suspend_wakeups()
+	 * before the unanchor and usb_anchor_resume_wakeups() after complete()
+	 * returns, and usb_kill_anchored_urbs() repeats its drain until
+	 * usb_anchor_check_wakeup() reports an empty list *and* a zero counter.
+	 * An in-flight handler holds that counter above zero, so the kill spins
+	 * (cpu_relax()) rather than returning early. See drivers/usb/core/hcd.c
+	 * and drivers/usb/core/urb.c.
+	 *
+	 * Killing the fixed URB arrays element by element would work too, but the
+	 * anchored form is what the rest of sound/usb uses and it is no weaker.
 	 */
 	usb_kill_urb(chip->midi_in_urb);
 	usb_kill_anchored_urbs(&chip->playback.anchor);
