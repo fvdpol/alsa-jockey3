@@ -115,21 +115,19 @@ def main():
     # very timing being measured (docs/test_strategy.md).
     priv.printk_console(1)
 
-    # Widen the warm grace: it IS the window this case has to hit. A tick sits
-    # in it between restarting the ring and escalating to a reset, and the
-    # suspend has to land there. At the 150 ms default that is a few per cent of
-    # each injection period; at 1000 ms against a 2000 ms period it is about
-    # half, which is what makes the case converge in a handful of suspends
-    # rather than tens.
-    grace_ms = int(c.params.get("warm_grace_ms", 1000))
-    ok, why = priv.grace_ms(int(c.params.get("cold_grace_ms", 200)), grace_ms)
+    # The graces stay at their defaults. Widening the warm grace was tried and
+    # is counterproductive: the event that has to land in the PM transition is
+    # the escalation DECISION, and a longer grace makes the tick wait longer
+    # between escalations rather than giving it more chances.
+    ok, why = priv.grace_ms(int(c.params.get("cold_grace_ms", 200)),
+                            int(c.params.get("warm_grace_ms", 150)))
     if not ok:
         c.blocked(f"cannot set the start graces ({why})")
 
     after_s = int(c.params.get("stall_after_s", 2))
-    window_ms = int(c.params.get("stall_window_ms", 200))
-    period_ms = int(c.params.get("stall_period_ms", 2000))
-    ok, why = priv.stall_inject(after_s, window_ms, period_ms)
+    # Armed per iteration, because the window is sized from that iteration's
+    # lead. Value here only proves the knob exists.
+    ok, why = priv.stall_inject(after_s, 0, 0)
     if not ok:
         c.blocked("no debug_stall_inject_* parameters, so no stall can be "
                   "provoked: this needs the driver built from "
@@ -146,6 +144,20 @@ def main():
     for i in range(1, iterations + 1):
         c.status(f"cycle {i}/{iterations}  suspending with playback open")
 
+        # Size the drop window to end shortly after the suspend is issued. A
+        # window that outlives the suspend goes on dropping the URBs the
+        # escalated reset submits, so recovery gives up and logs "hardware may
+        # need power-cycling" -- a driver_fail that a case cannot waive. Ending
+        # it here lets any reset queued post-suspend succeed on resume.
+        priv.unbind()
+        priv.bind()
+        time.sleep(1.0)
+        idx, _ = alsa.find_card()
+        if idx is None:
+            c.fail(f"iteration {i}: card did not come back after rebind")
+            break
+        card = idx
+
         proc = playback(card, rate)
         time.sleep(settle_s)
         if proc.poll() is not None:
@@ -156,12 +168,14 @@ def main():
         mark = kmsg.Marker(f"{c.id}#cycle{i}")
         mark.write()
 
-        # Jitter across one injection period. A fixed offset samples the same
-        # phase every time, which is how an earlier version of this case missed
-        # the bug on every suspend: the vulnerable phase was always just outside
-        # where it looked.
-        time.sleep(max(0.0, after_s - settle_s) +
-                   random.uniform(0.0, period_ms / 1000.0))
+        # A persistent stall escalates roughly every 600 ms -- restart, warm
+        # grace, reset, cold grace -- and JOCKEY3_RECOVERY_MAX_ATTEMPTS caps it
+        # at three, so the exposure is about two seconds. Land the suspend
+        # somewhere in there.
+        lead = random.uniform(float(c.params.get("lead_min_s", 0.1)),
+                              float(c.params.get("lead_max_s", 1.8)))
+        priv.stall_inject(after_s, int((lead + 0.6) * 1000), 0)
+        time.sleep(max(0.0, after_s - settle_s) + lead)
 
         t0 = time.time()
         rc, _out, err = priv.rtcwake_mem(sleep_s)

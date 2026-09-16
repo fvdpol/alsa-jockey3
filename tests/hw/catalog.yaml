@@ -2119,9 +2119,9 @@ cases:
       sleep_seconds: 8
       settle_seconds: 3
       stall_after_s: 2
-      stall_window_ms: 200
-      stall_period_ms: 2000
-      warm_grace_ms: 1000
+      lead_min_s: 0.1
+      lead_max_s: 1.8
+      warm_grace_ms: 150
       cold_grace_ms: 200
       rate: 48000
     metrics:
