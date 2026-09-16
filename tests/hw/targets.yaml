@@ -59,6 +59,16 @@
 # and how each is settled. selftest.py checks it against capabilities.py, so
 # the two cannot drift.
 
+# timeout_scale
+#   How much slower than x86_64-prod one iteration of a case costs here. The
+#   per-iteration figures in catalog.yaml (`timeout_per_iteration`) are
+#   measured on x86_64-prod; the runner multiplies them by this. Measured from
+#   stored results: arm64-prod ~1.08x and i386-prod ~0.97x, armhf-prod a median
+#   2.58x and up to 17.5x on the probe cases, which are dominated by CPU and
+#   sysfs work rather than by the fixed waits the audio cases spend their time
+#   in. Values here are rounded well up -- the scaling can only ever raise a
+#   timeout, so being generous costs nothing and being tight truncates a run.
+
 version: 1
 
 capabilities:
@@ -100,6 +110,7 @@ capabilities:
 targets:
 
   x86_64-debug:
+    timeout_scale: 2.0   # KASAN and lockdep; measured up to ~3x prod on the probe cases
     arch: x86_64
     flavor: debug
     localversion: '-alsa-debug'
@@ -130,6 +141,7 @@ targets:
         it SOUNDS are void.
 
   x86_64-prod:
+    timeout_scale: 1.0   # the reference platform the catalog figures are measured on
     arch: x86_64
     flavor: prod
     localversion: '-alsa-prod'
@@ -142,6 +154,7 @@ targets:
       belong here, because KASAN distorts every number worth recording.
 
   arm64-debug:
+    timeout_scale: 2.5   # arm64 plus the debug-kernel cost; no long-run data yet, so generous
     arch: arm64
     flavor: debug
     localversion: '-alsa-debug'
@@ -158,6 +171,7 @@ targets:
         has less headroom to lose than the EliteDesk did.
 
   arm64-prod:
+    timeout_scale: 1.5   # measured ~1.08x x86_64 median, 1.31x worst
     arch: arm64
     flavor: prod
     localversion: '-alsa-prod'
@@ -171,6 +185,7 @@ targets:
       and on disconnect -- a behavioral difference, not a detail.
 
   armhf-prod:
+    timeout_scale: 6.0   # measured 2.58x x86_64 median and 17.5x on the probe cases
     arch: armhf
     flavor: prod
     localversion: '-alsa-prod'
@@ -214,6 +229,7 @@ targets:
       - No Mixxx, no benchmarking.
 
   i386-prod:
+    timeout_scale: 1.5   # measured ~0.97x x86_64; not faster, just a small sample
     arch: i386
     flavor: prod
     localversion: '-alsa-prod'

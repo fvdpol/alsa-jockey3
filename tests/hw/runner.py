@@ -456,6 +456,75 @@ def mark(status, style=None):
     return style(glyph, *MARK_STYLES.get(status, ()))
 
 
+# Setup, teardown and the log slicing around a case's own work. Added to every
+# computed timeout so a scaled one is never tighter than the fixed work.
+TIMEOUT_BASE_S = 300
+
+# How much slower than declared a case may run before the runner gives up on
+# it. The catalog figure is what the case takes on a healthy machine; a debug
+# kernel, a slow SD card or a device that needs retries can legitimately take
+# longer, and killing a long endurance run at its declared duration would
+# throw away hours of work over a few percent.
+TIMEOUT_MARGIN = 2.0
+
+
+def case_timeout(case, params, cli_timeout, target=None):
+    """How long this case is allowed to run, in seconds.
+
+    An explicit --timeout always wins. Otherwise a case that declares
+    `timeout_per_iteration` in catalog.yaml gets a budget that SCALES with the
+    iteration count it was actually given, rather than a fixed number that was
+    only ever right for the default.
+
+    That scaling is the point. A case whose catalog entry says 10 iterations
+    and whose timeout says 3600 is correct until someone runs it with
+    `--param iterations_per_run=1000`, at which point the run is silently
+    truncated partway through -- and a truncated endurance run does not look
+    truncated in the results, it looks like a case that failed. The per-cycle
+    cost is the stable, measurable property; the total is not.
+
+    The catalog figure is what one iteration costs on x86_64-prod, the
+    reference platform, and it is multiplied by the target's own
+    `timeout_scale` from targets.yaml -- per-iteration cost is a property of
+    the machine as much as of the case. armhf-prod runs a median 2.58x
+    x86_64 and up to 17.5x on the probe cases, which are dominated by CPU and
+    sysfs work rather than by the fixed waits the audio cases spend most of
+    their time in, so a single pooled figure would be either wrong for x86_64
+    or wrong for armhf.
+
+    Scaling can only ever RAISE the budget. The result is the largest of the
+    computed value, whatever fixed `timeout` the case declares, and the
+    historic one-hour default -- so adding `timeout_per_iteration` to a case
+    can never introduce a truncation that did not exist before, and the long
+    fixed allowances on the endurance cases keep their headroom on a slow
+    debug kernel. Anyone who genuinely wants a tighter bound passes --timeout.
+    """
+    if cli_timeout is not None:
+        return cli_timeout
+
+    floor = max(int(case.get("timeout") or 0), 3600)
+
+    per = case.get("timeout_per_iteration")
+    if not per:
+        return floor
+
+    # Only iterations_per_run is scaled on: it is the one parameter that means
+    # "do the whole thing again" across every case that has it.
+    n = params.get("iterations_per_run", 1)
+    try:
+        n = max(1, int(n))
+    except (TypeError, ValueError):
+        n = 1
+    try:
+        scale = float((target or {}).get("timeout_scale") or 1.0)
+    except (TypeError, ValueError):
+        scale = 1.0
+    scale = max(scale, 1.0)   # a scale below 1 could only ever truncate
+
+    budget = TIMEOUT_BASE_S + TIMEOUT_MARGIN * scale * float(per) * n
+    return max(floor, int(budget))
+
+
 def decide_outcome(ctx, case_results):
     """What the run as a whole says, given its cases and what the kernel said.
 
@@ -591,13 +660,7 @@ def run_case(case, iteration, params, ctx):
     # silent terminal while the case waits for an answer to a question they
     # were never shown -- a deadlock, not a cosmetic loss.
     show = not ctx.get("quiet") or case.get("mode") == "semi-automated"
-    # An explicit --timeout always wins. Otherwise a case that documents its
-    # own expected duration in catalog.yaml (an endurance run like
-    # JT-RATE-003) is trusted over the CLI's generic default, which exists
-    # for the common case of a case with no idea how long it takes.
-    timeout = ctx["timeout"]
-    if timeout is None:
-        timeout = case.get("timeout", 3600)
+    timeout = case_timeout(case, params, ctx["timeout"], ctx.get("target"))
     rc, out, err = stream_case(cmd, cenv, timeout,
                                ctx["printer"] if show else None)
 

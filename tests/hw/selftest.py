@@ -138,6 +138,70 @@ def test_classifier(rules):
           "suppressed-callback summaries are counted")
 
 
+def test_case_timeout(targets):
+    """A looping case's timeout has to scale with what it was actually given.
+
+    The failure this prevents is silent: a flat ceiling written for the
+    default iteration count truncates a longer run partway through, and a
+    truncated endurance run does not look truncated in the results -- it
+    looks like a case that failed.
+    """
+    print("\ncase timeout scaling")
+    import runner
+    T = targets["targets"]
+    x86 = T["x86_64-prod"]
+    armhf = T["armhf-prod"]
+
+    case = {"timeout_per_iteration": 12}          # JT-AUDIO-005, measured
+    small = runner.case_timeout(case, {"iterations_per_run": 10}, None, x86)
+    big = runner.case_timeout(case, {"iterations_per_run": 1000}, None, x86)
+
+    check(big > small, "more iterations buys more time", f"{small} -> {big}")
+    check(big >= 1000 * 12,
+          "and at least the work itself takes", f"{big} vs {1000*12}")
+
+    # Raise-only. Declaring the field must not be able to break a case that
+    # works today, which is what makes it safe to add in bulk.
+    check(small == 3600,
+          "a short run keeps the historic one-hour default", str(small))
+    check(runner.case_timeout({"timeout_per_iteration": 1, "timeout": 43200},
+                              {"iterations_per_run": 1000}, None, x86) == 43200,
+          "a case's own long fixed timeout is a floor, never lowered")
+    check(runner.case_timeout({}, {}, None, x86) == 3600,
+          "a case with no model is unaffected")
+
+    # --timeout is the only way to get a TIGHTER bound.
+    check(runner.case_timeout(case, {"iterations_per_run": 1000}, 99, armhf) == 99,
+          "an explicit --timeout wins over every computed value")
+
+    # Per-target. armhf is a median 2.58x x86_64 and up to 17.5x on the probe
+    # cases, so one pooled figure would be wrong for one of them.
+    slow = runner.case_timeout(case, {"iterations_per_run": 1000}, None, armhf)
+    check(slow > big, "a slower target gets a longer budget", f"{big} -> {slow}")
+
+    # The worst measured ratio must still fit: JT-PROBE-002 is declared at the
+    # x86 figure of 6 s but costs ~9.98 s/iteration on armhf.
+    probe = runner.case_timeout({"timeout_per_iteration": 6},
+                                {"iterations_per_run": 1000}, None, armhf)
+    check(probe >= 1000 * 9.98,
+          "and covers what that target actually costs, not what x86 costs",
+          f"{probe} vs {int(1000*9.98)}")
+
+    # A scale below 1 could only ever truncate, so it must not be honored.
+    check(runner.case_timeout(case, {"iterations_per_run": 1000}, None,
+                              {"timeout_scale": 0.1}) == big,
+          "a timeout_scale below 1 cannot shorten the budget")
+
+    # Every target must declare one, or the scaling silently does nothing.
+    missing = [n for n, t in T.items() if not t.get("timeout_scale")]
+    check(not missing, "every target declares a timeout_scale", str(missing))
+
+    # Nonsense in the catalog must not crash a run.
+    check(runner.case_timeout({"timeout_per_iteration": 12},
+                              {"iterations_per_run": "lots"}, None, x86) == 3600,
+          "an unparseable iteration count falls back to one iteration")
+
+
 def test_host_controller_death(rules):
     """The xHCI controller dying mid-run -- issue #40.
 
@@ -2166,6 +2230,7 @@ def main():
     test_classifier(rules)
     test_wedged_device(rules)
     test_host_controller_death(rules)
+    test_case_timeout(targets)
     test_watchdog(rules)
     test_recovery_giveup(rules)
     test_error_handling(rules)
