@@ -2521,6 +2521,33 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 		goto out;
 	}
 
+	/*
+	 * Tested here rather than only at the top of this function: the light
+	 * restart and the grace above take long enough for an unplug to land in
+	 * between, and resetting is the one step that goes badly when it does.
+	 * jockey3_queue_reset() opens with reinit_completion(&chip->reset_done),
+	 * which discards the complete_all() that jockey3_disconnect() issues
+	 * specifically to release waiters -- so the call below would wait out the
+	 * full timeout in jockey3_wait_for_reset_completion() for a reset of a
+	 * device that is already gone, while jockey3_disconnect() sits behind it
+	 * in cancel_delayed_work_sync(). Ahead of the budget so that an unplug
+	 * does not spend a recovery attempt that was never made.
+	 *
+	 * Unlocked, so racy by construction: an unplug immediately after the test
+	 * still reinitializes the completion. The window is bounded rather than
+	 * closed -- jockey3_wait_for_reset_completion() gives up after 1000 ms
+	 * and reports -ENODEV from its own DISCONNECTED test. Closing it would
+	 * mean serializing the reset against jockey3_disconnect(), which must not
+	 * be made to block on this driver's locks.
+	 */
+	if (jockey3_is_disconnected(chip)) {
+		dev_dbg(&chip->intf0->dev,
+			"%s stream still stalled after URB restart, but the device is gone; not resetting (%s)\n",
+			type, context);
+		ret = -ENODEV;
+		goto out;
+	}
+
 	if (!jockey3_recovery_budget_take(chip)) {
 		dev_err(&chip->intf0->dev,
 			"%s stream still stalled after URB restart; recovery budget exhausted, not resetting (%s)\n",
