@@ -124,6 +124,17 @@ def main():
     if not ok:
         c.blocked(f"cannot set the start graces ({why})")
 
+    # Park a recovery in its escalation window for longer than it takes to
+    # reach jockey3_suspend(), so the gate is always evaluated after the device
+    # has gone down. Without this the window is the warm grace, the escalation
+    # budget caps a persistent stall at three attempts, and timing a suspend
+    # into it from userspace does not work -- five runs against a driver with
+    # the bug restored all missed.
+    race_ms = int(c.params.get("race_delay_ms", 6000))
+    ok, why = priv.race_delay(race_ms)
+    if not ok:
+        c.blocked(f"cannot set the race delay ({why})")
+
     after_s = int(c.params.get("stall_after_s", 2))
     # Armed per iteration, because the window is sized from that iteration's
     # lead. Value here only proves the knob exists.
@@ -160,10 +171,15 @@ def main():
 
         proc = playback(card, rate)
         time.sleep(settle_s)
+        # aplay dying is not a failure here. The injected stall kills the
+        # stream, and the driver deliberately does not advertise
+        # SNDRV_PCM_INFO_RESUME, so an application giving up is the documented
+        # outcome (JT-PM-002). The URBs -- and so the watchdog -- run for the
+        # device's lifetime regardless of whether anything has the PCM open.
         if proc.poll() is not None:
             proc.wait()
-            c.fail(f"iteration {i}: playback exited before the suspend")
-            break
+            c.note(f"iteration {i}: playback exited before the suspend, as an "
+                   "injected stall makes it")
 
         mark = kmsg.Marker(f"{c.id}#cycle{i}")
         mark.write()
@@ -172,14 +188,12 @@ def main():
         # grace, reset, cold grace -- and JOCKEY3_RECOVERY_MAX_ATTEMPTS caps it
         # at three, so the exposure is about two seconds. Land the suspend
         # somewhere in there.
-        lead = random.uniform(float(c.params.get("lead_min_s", 0.1)),
-                              float(c.params.get("lead_max_s", 1.8)))
         # after_s 0: fire on the next completion. The window is sized to end
-        # about 600 ms after the suspend is issued, so a reset queued
-        # post-suspend succeeds on resume instead of being starved into a
-        # give-up.
-        priv.stall_inject(0, int((lead + 0.6) * 1000), 0)
-        time.sleep(max(0.0, after_s - settle_s) + lead)
+        # well before the parked recovery wakes, so the reset it queues once it
+        # does succeeds instead of being starved into a give-up.
+        lead = float(c.params.get("lead_s", 0.8))
+        priv.stall_inject(0, int(lead * 1000), 0)
+        time.sleep(lead)
 
         t0 = time.time()
         rc, _out, err = priv.rtcwake_mem(sleep_s)
@@ -247,6 +261,7 @@ def main():
 
     priv.dyndbg_pm(False)
     priv.stall_inject(after_s, 0, 0)
+    priv.race_delay(0)
     priv.grace_ms(200, 150)
 
     c.metric("cycles", iterations)

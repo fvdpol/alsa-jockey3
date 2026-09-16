@@ -1112,6 +1112,7 @@ static void jockey3_note_completion(struct jockey3_pcm_urb_stream *urb_stream)
 static int debug_stall_inject_after_s = 10;
 static int debug_stall_inject_window_ms = 200;
 static int debug_stall_inject_period_ms;
+static int debug_race_delay_ms;
 module_param(debug_stall_inject_after_s, int, 0644);
 MODULE_PARM_DESC(debug_stall_inject_after_s,
 		 "TEST ONLY: seconds after a ring (re)starts before completions are dropped.");
@@ -1121,6 +1122,9 @@ MODULE_PARM_DESC(debug_stall_inject_window_ms,
 module_param(debug_stall_inject_period_ms, int, 0644);
 MODULE_PARM_DESC(debug_stall_inject_period_ms,
 		 "TEST ONLY: repeat the drop window this often, in ms; 0 means one-shot.");
+module_param(debug_race_delay_ms, int, 0644);
+MODULE_PARM_DESC(debug_race_delay_ms,
+		 "TEST ONLY: park a recovery in its escalation window this long, in ms.");
 
 static bool debug_stall_inject_should_drop(struct jockey3_chip *chip,
 					   const struct jockey3_pcm_urb_stream *urb_stream,
@@ -2662,6 +2666,24 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	 * serializing against jockey3_disconnect(), which must not block on
 	 * driver locks.
 	 */
+	/*
+	 * TEST INSTRUMENTATION -- see debug_race_delay_ms.
+	 *
+	 * The window this test has to hit is between the restart above and the
+	 * check below: a tick parked here when jockey3_suspend() runs is one that
+	 * will evaluate this gate afterwards, which is the whole of the race.
+	 * Unwidened it is the warm grace, and the escalation budget caps a
+	 * persistent stall at three attempts, so no amount of injection makes it
+	 * likely enough to hit by timing a suspend from userspace -- five runs
+	 * against a driver with the bug restored all missed it.
+	 *
+	 * Parking here instead makes it deterministic: the case sets a delay
+	 * longer than it takes to reach jockey3_suspend(), so the gate is always
+	 * evaluated after the device has gone down.
+	 */
+	if (READ_ONCE(debug_race_delay_ms) > 0)
+		msleep(READ_ONCE(debug_race_delay_ms));
+
 	if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip)) {
 		dev_dbg(&chip->intf0->dev,
 			"%s stream still stalled after URB restart, but the device is down; not resetting (%s)\n",

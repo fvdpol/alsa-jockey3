@@ -133,6 +133,20 @@ def dyndbg_pm(on=True, timeout=20):
     return rc == 0, (err or "").strip()
 
 
+def race_delay(ms, timeout=20):
+    """TEST ONLY: park a recovery in its escalation window for ms.
+
+    The #43 race is the interval between a recovery restarting the ring and
+    evaluating whether to escalate to a reset. Unwidened that is the warm
+    grace, and the escalation budget caps a persistent stall at three attempts,
+    so timing a suspend into it from userspace does not work -- five runs
+    against a driver with the bug restored all missed. Parking there makes it
+    deterministic.
+    """
+    rc, _out, err = call("race-delay", str(ms), timeout=timeout)
+    return rc == 0, (err or "").strip()
+
+
 def grace_ms(cold_ms, warm_ms, timeout=20):
     """Set the driver's start-grace parameters.
 

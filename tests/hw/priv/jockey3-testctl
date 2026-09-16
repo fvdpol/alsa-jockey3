@@ -123,6 +123,7 @@ usage() {
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
 #   dyndbg-hwparams-n on|off enable/disable the hw_params() packets/URB (N) message
 #   dyndbg-pm on|off       TEST ONLY: the driver's suspend/resume messages
+#   race-delay <ms>        TEST ONLY: park a recovery in its escalation window
 #   grace-ms <cold_ms> <warm_ms>
 #                          set the driver's start-grace parameters
 #   stall-inject <after_s> <window_ms> <period_ms>
@@ -417,6 +418,17 @@ dyndbg-pm)
 		printf 'func %s %s\n' "$fn" "$flag" > "$DYNDBG" \
 			|| die "cannot write $DYNDBG"
 	done
+	exit 0
+	;;
+
+race-delay)
+	# TEST ONLY: park a recovery in its escalation window, so a suspend can be
+	# made to land there deterministically instead of by timing luck.
+	[ $# -eq 1 ] || die "race-delay needs <ms>"
+	[[ $1 =~ ^[0-9]+$ ]] || die "race-delay takes a non-negative integer"
+	param="/sys/module/${MODULE//-/_}/parameters/debug_race_delay_ms"
+	[ -w "$param" ] || die "no debug_race_delay_ms parameter: this driver is not the injection build"
+	echo "$1" > "$param" || die "cannot write $param"
 	exit 0
 	;;
 
