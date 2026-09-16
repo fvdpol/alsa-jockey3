@@ -980,6 +980,52 @@ static void jockey3_report_xrun(struct jockey3_pcm_urb_stream *urb_stream)
 }
 
 /**
+ * jockey3_err_device_gone() - is this error just the device having left?
+ * @err: an EP0 transfer's return value
+ *
+ * %-ENODEV and %-ESHUTDOWN are what every EP0 transfer returns once the device
+ * is in %USB_STATE_NOTATTACHED. On the rate-change path that is the ordinary
+ * outcome of an unplug, which the USB core has already logged, so repeating it
+ * at error level says nothing the reader can act on.
+ *
+ * Deliberately keyed on the error code rather than on
+ * jockey3_is_disconnected(): a failed reset also leaves the device
+ * NOTATTACHED, and it sets that same flag on its way to unbinding the
+ * interface. Testing the flag would quietly swallow it; testing the code keeps
+ * the error propagating to the caller either way, which is what
+ * jockey3_pcm_hw_params() returns to userspace.
+ *
+ * Return: true if @err means the device is gone rather than misbehaving.
+ */
+static bool jockey3_err_device_gone(int err)
+{
+	return err == -ENODEV || err == -ESHUTDOWN;
+}
+
+/*
+ * Report a failed resubmit from a URB completion handler at the severity it
+ * deserves, by the same rule the submit and rate paths use. When the device
+ * leaves, every one of the JOCKEY3_N_URBS in-flight URBs comes back and each
+ * one fails to resubmit, so this is the loudest -ENODEV source in the driver:
+ * an unplug during a test batch produced three hundred of these lines.
+ *
+ * Only the log level changes. Unlike a URB transport error, a resubmit failure
+ * carries no accounting -- @consec_errors is driven by jockey3_urb_error_give_up()
+ * from the completion status, not from here -- so nothing downstream reads this
+ * decision.
+ */
+static void jockey3_resubmit_failed(struct jockey3_chip *chip, int err, const char *what)
+{
+	if (jockey3_err_device_gone(err)) {
+		dev_dbg(&chip->intf0->dev,
+			"Not resubmitting the %s URB: device is gone (%d)\n", what, err);
+		return;
+	}
+
+	dev_err(&chip->intf0->dev, "Failed to resubmit %s URB: %d\n", what, err);
+}
+
+/**
  * jockey3_urb_error_give_up() - account for a URB transport error
  * @chip: driver state
  * @urb_stream: the affected direction
@@ -1170,7 +1216,7 @@ static void jockey3_capture_callback(struct urb *urb)
 		}
 	}
 	if (ret < 0)
-		dev_err(&chip->intf0->dev, "Failed to resubmit capture URB: %d\n", ret);
+		jockey3_resubmit_failed(chip, ret, "capture");
 }
 
 /**
@@ -1383,7 +1429,7 @@ static void jockey3_playback_callback(struct urb *urb)
 		}
 	}
 	if (ret < 0)
-		dev_err(&chip->intf0->dev, "Failed to resubmit playback URB: %d\n", ret);
+		jockey3_resubmit_failed(chip, ret, "playback");
 }
 
 static void jockey3_midi_in_callback(struct urb *urb)
@@ -1456,7 +1502,7 @@ static void jockey3_midi_in_callback(struct urb *urb)
 			ret = usb_submit_urb(urb, GFP_ATOMIC);
 	}
 	if (ret < 0)
-		dev_err(&chip->intf0->dev, "Failed to resubmit MIDI IN URB: %d\n", ret);
+		jockey3_resubmit_failed(chip, ret, "MIDI IN");
 }
 
 /*
@@ -1691,29 +1737,6 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 	if (atomic_read(&chip->capture.urbs_in_flight) != 0)
 		dev_err(&chip->intf0->dev, "Inconsistent URB in-flight count: capture=%d != 0\n",
 			atomic_read(&chip->capture.urbs_in_flight));
-}
-
-/**
- * jockey3_err_device_gone() - is this error just the device having left?
- * @err: an EP0 transfer's return value
- *
- * %-ENODEV and %-ESHUTDOWN are what every EP0 transfer returns once the device
- * is in %USB_STATE_NOTATTACHED. On the rate-change path that is the ordinary
- * outcome of an unplug, which the USB core has already logged, so repeating it
- * at error level says nothing the reader can act on.
- *
- * Deliberately keyed on the error code rather than on
- * jockey3_is_disconnected(): a failed reset also leaves the device
- * NOTATTACHED, and it sets that same flag on its way to unbinding the
- * interface. Testing the flag would quietly swallow it; testing the code keeps
- * the error propagating to the caller either way, which is what
- * jockey3_pcm_hw_params() returns to userspace.
- *
- * Return: true if @err means the device is gone rather than misbehaving.
- */
-static bool jockey3_err_device_gone(int err)
-{
-	return err == -ENODEV || err == -ESHUTDOWN;
 }
 
 /*
