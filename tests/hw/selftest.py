@@ -202,6 +202,58 @@ def test_case_timeout(targets):
           "an unparseable iteration count falls back to one iteration")
 
 
+def test_stop_file():
+    """A long run must be stoppable without losing what it measured.
+
+    Before this existed the only ways to end a multi-hour case were Ctrl-C,
+    which re-raises past results.write() and loses the whole batch, and
+    pulling the device's power, which stores the data but records a driver
+    failure that never happened.
+    """
+    print("\nstop file")
+    import importlib
+    from lib import case as case_mod
+
+    with tempfile.TemporaryDirectory() as d:
+        stop = os.path.join(d, "stop")
+        os.environ["JOCKEY3_STOP_FILE"] = stop
+        importlib.reload(case_mod)
+        try:
+            check(case_mod.STOP_FILE == stop,
+                  "the stop path is overridable for a machine or a test")
+            check(not case_mod.stop_requested_globally(),
+                  "no stop file means no stop")
+
+            c = case_mod.Case.__new__(case_mod.Case)
+            c.metrics, c._note, c._stopped = {}, [], False
+            check(not c.stop_requested(), "and a case agrees")
+
+            open(stop, "w").close()
+            check(case_mod.stop_requested_globally(),
+                  "the runner sees the file between cases")
+
+            import io, contextlib
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                first = c.stop_requested()
+                second = c.stop_requested()
+            check(first and second, "and a case sees it between iterations")
+            check(err.getvalue().count("stop requested") == 1,
+                  "announced once, not once per remaining iteration",
+                  err.getvalue())
+            check(c.metrics.get("stopped_early") is True,
+                  "and recorded, so a short run is never read as a full one")
+
+            # Removing it must not un-stop a case that already wound up: the
+            # iteration count is already short and the metric already set.
+            os.unlink(stop)
+            check(c.stop_requested(),
+                  "a case that has already wound up stays wound up")
+        finally:
+            os.environ.pop("JOCKEY3_STOP_FILE", None)
+            importlib.reload(case_mod)
+
+
 def test_host_controller_death(rules):
     """The xHCI controller dying mid-run -- issue #40.
 
@@ -2231,6 +2283,7 @@ def main():
     test_wedged_device(rules)
     test_host_controller_death(rules)
     test_case_timeout(targets)
+    test_stop_file()
     test_watchdog(rules)
     test_recovery_giveup(rules)
     test_error_handling(rules)

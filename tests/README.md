@@ -84,6 +84,27 @@ sudo priv/install.sh                      # once per machine; the only password
 ./selftest.py                             # check the framework itself
 ```
 
+### Stopping a long run without losing it
+
+A case given a large `iterations_per_run` can hold the runner for hours.
+`touch ~/.config/jockey3/stop` ends it cleanly: the case finishes the cycle it
+is on, stops starting new ones, and is then judged on the iterations it did
+complete — so a run stopped this way is a pass if what it managed passed. The
+runner also stops starting new cases. Remove the file before the next run; the
+runner prints the path and warns at startup if it is already there.
+`JOCKEY3_STOP_FILE` overrides the location.
+
+The two things it replaces were both lossy. Ctrl-C kills the case and re-raises
+past `results.write()`, so the whole batch is lost. Pulling the device's power
+stores the data but records a driver failure that never happened — and the
+coverage matrix keys on a case's *last* result, so that false failure is what
+`ledger.py` would show. A run that has produced hours of good cycles deserves
+better than either.
+
+A case only honors this if it checks `c.stop_requested()` at the top of its
+loop. `cases/audio_engine_start.py` is the worked example; add the check to any
+case expected to run long.
+
 `restart_timing.py` folds each prod-kernel run that had dynamic debug on into a
 growing histogram keyed by architecture, stream, start type and sample rate
 (`report --split rate` breaks it out; the default aggregates over rates):

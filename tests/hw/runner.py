@@ -49,7 +49,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from lib import (alsa, capabilities, env, kmsg, machineconf, priv,  # noqa: E402
+from lib import (alsa, capabilities, case as case_mod, env, kmsg,  # noqa: E402
+                 machineconf, priv,
                  results, term, yamlio)
 
 if not yamlio.available():
@@ -937,6 +938,13 @@ def main():
                                       for k, v in sorted(overrides.items()))
               + "   [--param, applied to every case in the plan]")
     print(f"card     {'hw:%d (%s)' % (card, cid) if card is not None else 'not found'}")
+    # Said up front, because the moment it is wanted is three hours in, when
+    # nobody is going to go looking for how to ask for it.
+    if case_mod.stop_requested_globally():
+        print(f"stop     {case_mod.STOP_FILE} EXISTS -- remove it or this run "
+              f"ends immediately")
+    else:
+        print(f"stop     touch {case_mod.STOP_FILE} to end cleanly, keeping results")
     print(f"have     {', '.join(sorted(caps)) or 'nothing detected'}"
           + ("   [--unattended: no human]" if args.unattended else ""))
     if problems:
@@ -1152,6 +1160,12 @@ def main():
             print(f"  {mark(r.status, style)} {tag:<16} "
                   f"{r.status.upper():<8} {r.duration_s:>6.1f}s{extra}")
             results.write(run, run_json)
+
+            if case_mod.stop_requested_globally():
+                aborted = True
+                print(f"  stop requested ({case_mod.STOP_FILE}) -- "
+                      f"ending the run after this case", flush=True)
+                break
 
             if ctx["host_fail"]:
                 # The bus is gone -- every remaining cycle would be switching

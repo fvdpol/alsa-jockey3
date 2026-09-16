@@ -490,6 +490,12 @@ def main():
         c.progress(f"    cycle {i}/{iterations}  {verdict:4}  {detail}")
 
     for i in range(1, iterations + 1):
+        # Checked before the cut, never in the middle of one: a cycle that has
+        # removed the device's power is half-finished, and the useful place to
+        # stop is on a boundary with the device up.
+        if c.stop_requested():
+            c.note(f"stopped early by request after {i - 1} of {iterations} cycles")
+            break
         c.status(f"    cycle {i}/{iterations}  ....  power cycling")
         mark = kmsg.Marker(f"{c.id}#cycle{i}")
         marks.append((i, mark))

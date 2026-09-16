@@ -22,6 +22,34 @@ import subprocess
 import sys
 import time
 
+# Where an operator asks a long run to wind up. Env var first, matching how
+# capabilities.py finds its own machine-local file.
+#
+# The problem it solves: a case given a large iterations_per_run can hold the
+# runner for hours, and there was no way to end it and keep what it had
+# measured. Ctrl-C kills the child and re-raises, so the run never reaches
+# results.write() and the whole batch is lost; the only alternative was to pull
+# the device's power and let the case fail, which stores the data but records a
+# driver failure that never happened. Neither is acceptable for a run that has
+# already produced hours of good cycles.
+STOP_FILE = os.environ.get("JOCKEY3_STOP_FILE",
+                           os.path.expanduser("~/.config/jockey3/stop"))
+
+def stop_requested_globally():
+    """Has the operator asked the run to wind up? For the runner's own loop.
+
+    The same signal Case.stop_requested() reads, without a Case instance --
+    the runner uses it to stop starting new cases, while a case uses the
+    method to stop starting new iterations. Both matter: a profile of many
+    short cases needs the first, and one case with a large
+    iterations_per_run needs the second.
+    """
+    try:
+        return os.path.exists(STOP_FILE)
+    except OSError:
+        return False
+
+
 EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_SKIP = 2
@@ -45,6 +73,7 @@ class Case:
         self.attended = os.environ.get("JT_ATTENDED") == "1"
         self.metrics = {}
         self._note = []
+        self._stopped = False
         self._failures = []
 
     # ------------------------------------------------------------- recording
@@ -57,6 +86,30 @@ class Case:
 
     def note(self, text):
         self._note.append(str(text))
+
+    def stop_requested(self):
+        """Has the operator asked this run to wind up early?
+
+        True once STOP_FILE exists. A case that loops should check this at the
+        top of each iteration and `break` -- not exit. Breaking runs the case's
+        normal verdict logic over the iterations it did complete, which is the
+        whole point: those cycles are real measurements and stay real. A run
+        stopped this way is a pass if what it managed passed.
+
+        Says so once, in the log and in the metrics, so a short run is never
+        mistaken later for a full one that happened to be configured small.
+        """
+        if self._stopped:
+            return True
+        try:
+            if not os.path.exists(STOP_FILE):
+                return False
+        except OSError:
+            return False
+        self._stopped = True
+        self.progress(f"    stop requested ({STOP_FILE}) -- winding up")
+        self.metric("stopped_early", True)
+        return True
 
     # ------------------------------------------------------- the operator
 
