@@ -187,6 +187,73 @@ environment ceiling, not a driver finding, and keep `JT-PROBE-005`'s
 `arm64-debug`) comfortably below where this run hit it — see the `soak`
 profile's per-target override in `tests/hw/profiles.yaml`.
 
+### Reloading the host controller costs the boot's lockdep too
+
+The same ceiling is reached a second way, and much faster. Reloading the USB
+host-controller driver — what `jockey3-testctl hcd-reset` does to recover from
+a dead controller, see issue 40 — tears down and re-creates every device on
+the bus in one go. On `x86_64-debug` a single `hcd-reset` was enough to print
+`BUG: MAX_LOCKDEP_CHAIN_HLOCKS too low!` and turn the validator off
+(2026-09-16, during the first live exercise of the verb; the `BUG:` landed
+microseconds ahead of `xhci_pci_stop`, so the removal is what provoked it).
+
+`MAX_LOCKDEP_CHAIN_HLOCKS` is the sibling of the table above: not the number of
+distinct lock chains but the total number of held-lock entries across them.
+One HCD reload re-registers a whole bus worth of devices, each with its own
+sysfs kobjects and per-device locks, which is a large number of long chains
+recorded at once rather than the slow accumulation an endurance run produces.
+
+The practical consequence is the one that matters for planning a campaign: on
+a `LOCKDEP` kernel, a single automatic recovery silently ends lock-correctness
+coverage for the rest of that boot, including every subsequent run. Nothing
+fails and nothing is tainted — the taint word was unchanged from its
+fresh-boot value — so there is no signal beyond the one `BUG:` line.
+
+So:
+
+- After any `hcd-reset` on a debug kernel, **reboot before trusting another
+  run's lock-ordering results**, exactly as after the endurance ceiling above.
+- Prefer running the issue 40 characterization batch on a `prod` kernel, which
+  is where the bug was observed anyway and where there is no lockdep coverage
+  to lose. A debug kernel is the wrong place to exercise a recovery whose
+  first act is to reload the bus.
+
+#### There is no way to re-arm lockdep short of a reboot
+
+Worth stating explicitly, because it is the obvious thing to reach for. Once
+`debug_locks` has been cleared, nothing in userspace can turn validation back
+on:
+
+- The only writable file lockdep exposes is `/proc/lock_stat`
+  (`kernel/locking/lockdep_proc.c`), and that is `CONFIG_LOCK_STAT`
+  contention statistics — not the dependency graph, and not `debug_locks`.
+  `/proc/lockdep`, `/proc/lockdep_chains` and `/proc/lockdep_stats` are all
+  read-only.
+- `lockdep_reset()` does exist and does set `debug_locks = 1`, but it is not
+  exported and its only in-tree caller is the boot-time locking self-test in
+  `lib/locking-selftest.c`. It also clears only the chain *hash* and the
+  per-context chain counters, not the `chain_hlocks[]` allocator that
+  actually ran out.
+- The `chain_hlocks` allocator is a bucketed free list, so space *is*
+  reclaimed when lock classes are zapped on module unload
+  (`free_chain_hlocks()`). That reclaims capacity but does not re-enable
+  validation, so it does not help here either.
+
+`debug_locks` itself is `EXPORT_SYMBOL_GPL`, so a module could technically
+write it back to 1. Do not: the chain that overflowed was silently dropped, so
+the dependency graph now has missing edges, and validation resumed on top of
+it can miss a real inversion while looking like it is working. A boot with
+lockdep disabled has no lock-correctness coverage, and the only honest way to
+get it back is to reboot.
+
+If this becomes a recurring obstacle rather than a one-off, the supported fix
+is to size the tables up: `CONFIG_LOCKDEP_CHAINS_BITS` is 16 in the debug
+configs and its Kconfig range runs to 21. `MAX_LOCKDEP_CHAIN_HLOCKS` is
+derived as `MAX_LOCKDEP_CHAINS * AVG_LOCKDEP_CHAIN_DEPTH` (5), so raising
+that one symbol raises both ceilings together — 16 gives ~327k held-lock
+entries, 17 gives ~655k. Regenerate the matching `-prod` config with
+`derive-prod.sh` afterward, per the config-pair policy.
+
 | Target | Typical machine | Role |
 |---|---|---|
 | `x86_64-debug` | HP EliteDesk 800 G2 (i5, 64 GB, NVMe) | Primary. Memory errors and lock inversions surface here or nowhere. |
