@@ -1893,6 +1893,45 @@ static void jockey3_start_urbs_failed(struct jockey3_chip *chip, int err, const 
 	dev_err(&chip->intf0->dev, "Failed to start URBs after %s: %d\n", context, err);
 }
 
+/**
+ * jockey3_err_device_gone() - is this error just the device having left?
+ * @err: an EP0 transfer's return value
+ *
+ * %-ENODEV and %-ESHUTDOWN are what every EP0 transfer returns once the device
+ * is in %USB_STATE_NOTATTACHED. On the rate-change path that is the ordinary
+ * outcome of an unplug, which the USB core has already logged, so repeating it
+ * at error level says nothing the reader can act on.
+ *
+ * Deliberately keyed on the error code rather than on
+ * jockey3_is_disconnected(): a failed reset also leaves the device
+ * NOTATTACHED, and it sets that same flag on its way to unbinding the
+ * interface. Testing the flag would quietly swallow it; testing the code keeps
+ * the error propagating to the caller either way, which is what
+ * jockey3_pcm_hw_params() returns to userspace.
+ *
+ * Return: true if @err means the device is gone rather than misbehaving.
+ */
+static bool jockey3_err_device_gone(int err)
+{
+	return err == -ENODEV || err == -ESHUTDOWN;
+}
+
+/*
+ * Log a failed step of a rate change at the severity it deserves. Mirrors the
+ * classification jockey3_start_urbs_failed() already applies on the URB path,
+ * so that one unplug does not produce dev_dbg() from one and dev_err() from the
+ * other for the very same cause.
+ */
+static void jockey3_rate_step_failed(struct jockey3_chip *chip, int err, const char *what)
+{
+	if (jockey3_err_device_gone(err)) {
+		dev_dbg(&chip->intf0->dev, "%s: device is gone (%d)\n", what, err);
+		return;
+	}
+
+	dev_err(&chip->intf0->dev, "%s: %d\n", what, err);
+}
+
 static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate, bool cold_init)
 {
 	int ret;
@@ -1905,15 +1944,14 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate, bool c
 
 	ret = ploytec_initialize_device(chip->intf0, chip->xfer_buf, !cold_init, NULL);
 	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to initialize device to change rate: %d\n",
-			ret);
+		jockey3_rate_step_failed(chip, ret, "Failed to initialize device to change rate");
 		return ret;
 	}
 
 	ret = ploytec_get_rate(chip->intf0, chip->xfer_buf, PLOYTEC_RATE_IDX_DEVICE,
 			       &current_hw_rate);
 	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to read current hardware rate: %d\n", ret);
+		jockey3_rate_step_failed(chip, ret, "Failed to read current hardware rate");
 		return ret;
 	}
 	dev_dbg(&chip->intf0->dev, "Current hardware rate: %u Hz\n", current_hw_rate);
@@ -1933,13 +1971,12 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate, bool c
 	dev_dbg(&chip->intf0->dev, "Setting hardware rate: %u Hz\n", rate);
 	ret = ploytec_set_rate(chip->intf0, chip->xfer_buf, rate, cold_init);
 	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to set rate: %d\n", ret);
+		jockey3_rate_step_failed(chip, ret, "Failed to set rate");
 		return ret;
 	}
 	ret = ploytec_start_streaming(chip->intf0, chip->xfer_buf);
 	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to start streaming after rate change: %d\n",
-			ret);
+		jockey3_rate_step_failed(chip, ret, "Failed to start streaming after rate change");
 		return ret;
 	}
 
@@ -3069,7 +3106,13 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 
 		ret = jockey3_set_rate(chip, rate, false);
 		if (ret != 0) {
-			dev_err(&chip->intf0->dev, "Rate change to %u failed: %d\n", rate, ret);
+			if (jockey3_err_device_gone(ret))
+				dev_dbg(&chip->intf0->dev,
+					"Rate change to %u abandoned; device is gone (%d)\n",
+					rate, ret);
+			else
+				dev_err(&chip->intf0->dev,
+					"Rate change to %u failed: %d\n", rate, ret);
 			/*
 			 * The rate change is what left the endpoints disabled if
 			 * they are, so this restart is the one most likely to
