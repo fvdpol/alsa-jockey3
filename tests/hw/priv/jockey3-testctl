@@ -123,6 +123,8 @@ usage() {
 #   dyndbg-firmware on|off enable/disable the firmware-revision probe message
 #   dyndbg-hwparams-n on|off enable/disable the hw_params() packets/URB (N) message
 #   dyndbg-pm on|off       TEST ONLY: the driver's suspend/resume messages
+#   grace-ms <cold_ms> <warm_ms>
+#                          set the driver's start-grace parameters
 #   stall-inject <after_s> <window_ms> <period_ms>
 #                          TEST ONLY (branch test/issue43-suspend-stall-injection):
 #                          drop every completion for a direction for window_ms,
@@ -415,6 +417,21 @@ dyndbg-pm)
 		printf 'func %s %s\n' "$fn" "$flag" > "$DYNDBG" \
 			|| die "cannot write $DYNDBG"
 	done
+	exit 0
+	;;
+
+grace-ms)
+	# TEST ONLY on this branch, though the parameters themselves are ordinary
+	# production tuning knobs. JT-PM-004 widens warm_start_grace_ms because
+	# that grace IS the window it has to hit: a watchdog tick sits in it
+	# between restarting the ring and escalating to a reset, and the suspend
+	# has to land there. At the 150 ms default the odds per suspend are poor.
+	[ $# -eq 2 ] || die "grace-ms needs <cold_ms> <warm_ms>"
+	[[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ ]] || die "grace-ms takes two non-negative integers"
+	base="/sys/module/${MODULE//-/_}/parameters"
+	[ -w "$base/warm_start_grace_ms" ] || die "cannot write $base/warm_start_grace_ms"
+	echo "$1" > "$base/cold_start_grace_ms" || die "cannot set cold_start_grace_ms"
+	echo "$2" > "$base/warm_start_grace_ms" || die "cannot set warm_start_grace_ms"
 	exit 0
 	;;
 

@@ -59,6 +59,7 @@ Like JT-PM-001, this suspends the machine it runs on.
 """
 
 import os
+import random
 import re
 import subprocess
 import sys
@@ -114,9 +115,20 @@ def main():
     # very timing being measured (docs/test_strategy.md).
     priv.printk_console(1)
 
-    after_s = int(c.params.get("stall_after_s", 3))
-    window_ms = int(c.params.get("stall_window_ms", 300))
-    period_ms = int(c.params.get("stall_period_ms", 1200))
+    # Widen the warm grace: it IS the window this case has to hit. A tick sits
+    # in it between restarting the ring and escalating to a reset, and the
+    # suspend has to land there. At the 150 ms default that is a few per cent of
+    # each injection period; at 1000 ms against a 2000 ms period it is about
+    # half, which is what makes the case converge in a handful of suspends
+    # rather than tens.
+    grace_ms = int(c.params.get("warm_grace_ms", 1000))
+    ok, why = priv.grace_ms(int(c.params.get("cold_grace_ms", 200)), grace_ms)
+    if not ok:
+        c.blocked(f"cannot set the start graces ({why})")
+
+    after_s = int(c.params.get("stall_after_s", 2))
+    window_ms = int(c.params.get("stall_window_ms", 200))
+    period_ms = int(c.params.get("stall_period_ms", 2000))
     ok, why = priv.stall_inject(after_s, window_ms, period_ms)
     if not ok:
         c.blocked("no debug_stall_inject_* parameters, so no stall can be "
@@ -144,10 +156,12 @@ def main():
         mark = kmsg.Marker(f"{c.id}#cycle{i}")
         mark.write()
 
-        # Let the injection cycle a few times so recovery is reliably churning
-        # when the suspend lands, rather than betting on one window.
+        # Jitter across one injection period. A fixed offset samples the same
+        # phase every time, which is how an earlier version of this case missed
+        # the bug on every suspend: the vulnerable phase was always just outside
+        # where it looked.
         time.sleep(max(0.0, after_s - settle_s) +
-                   float(c.params.get("stall_lead_s", 0.5)))
+                   random.uniform(0.0, period_ms / 1000.0))
 
         t0 = time.time()
         rc, _out, err = priv.rtcwake_mem(sleep_s)
@@ -214,6 +228,8 @@ def main():
                    f"resume {round(time.time() - t0 - sleep_s, 1)}s")
 
     priv.dyndbg_pm(False)
+    priv.stall_inject(after_s, 0, 0)
+    priv.grace_ms(200, 150)
 
     c.metric("cycles", iterations)
     c.metric("recovery_entered", entered)

@@ -133,6 +133,17 @@ def dyndbg_pm(on=True, timeout=20):
     return rc == 0, (err or "").strip()
 
 
+def grace_ms(cold_ms, warm_ms, timeout=20):
+    """Set the driver's start-grace parameters.
+
+    JT-PM-004 widens warm_start_grace_ms because that grace is the window it
+    must hit: a watchdog tick sits in it between restarting the ring and
+    escalating to a reset, and the suspend has to land there.
+    """
+    rc, _out, err = call("grace-ms", str(cold_ms), str(warm_ms), timeout=timeout)
+    return rc == 0, (err or "").strip()
+
+
 def stall_inject(after_s, window_ms, period_ms=0, timeout=20):
     """TEST ONLY: arm the driver's mid-stream stall injection.
 
