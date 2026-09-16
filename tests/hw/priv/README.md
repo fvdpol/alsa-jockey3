@@ -56,9 +56,17 @@ Every gate is a refusal rather than a warning:
   by its own USB ids *and* the driver must rebind it, within a timeout.
   Absence of errors is not treated as evidence.
 
-`hcd-reset check` runs the resolution and all the refusals without touching
+`hcd-reset check` runs the resolution and the refusals without touching
 anything, and is what `capabilities.py` probes so a machine that cannot do
 this reports the capability as absent rather than discovering it mid-recovery.
+
+One asymmetry to know about: `check` deliberately does not consult the rate
+limit, because the capability answers "could this machine recover a dead
+controller at all", not "would a recovery run right now". The rate-limit
+state lives in `/run` and so spans runs -- in a batch of short runs, a second
+controller death within `HCD_MIN_INTERVAL` is refused even though the
+capability still reads present. That refusal is the point: a controller dying
+twice in five minutes is a different problem and wants a human.
 
 ### `usb-power` takes an action, never a target
 

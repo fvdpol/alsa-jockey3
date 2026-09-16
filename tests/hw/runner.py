@@ -504,6 +504,11 @@ def recover_host(ctx, style):
     results from before and after a bus reset -- but to leave the machine
     usable, so the next run does not start against a bus that is still gone.
 
+    Called only after this run's dmesg has been sliced and written. The
+    modprobe cycle disconnects every device on the controller, and those
+    disconnects would otherwise be captured as part of the run and read as
+    the driver failing.
+
     Every outcome is recorded in ctx["host_recovery"] and printed with the
     run summary, because "the controller was reloaded" is something the
     operator has to know before reading anything else from this run.
@@ -1086,12 +1091,13 @@ def main():
             results.write(run, run_json)
 
             if ctx["host_fail"]:
-                # The bus is gone. Stop before anything else is recorded --
-                # every remaining cycle would be switching a hub that is no
-                # longer there -- then try to bring the controller back, so
-                # the operator finds a usable machine rather than a dead one.
+                # The bus is gone -- every remaining cycle would be switching
+                # a hub that is no longer there. Recovery is deliberately NOT
+                # attempted here: reloading the host controller emits its own
+                # burst of disconnects, and this is still inside the window
+                # this run's dmesg capture covers. It happens once the log has
+                # been sliced and written. See recover_host().
                 aborted = True
-                recover_host(ctx, style)
                 break
 
             if ctx["investigate"]:
@@ -1149,6 +1155,15 @@ def main():
             print(f"restart_timing: +{n} samples ({', '.join(sorted(record['hist']))})")
     except Exception as exc:  # noqa: BLE001 -- diagnostics only
         print(f"restart_timing: skipped ({exc})")
+
+    # Only now, with dmesg.txt written and restart_timing fed, is it safe to
+    # reload the host controller: the modprobe cycle disconnects every device
+    # on the bus, and doing it earlier would have written that teardown into
+    # this run's own evidence -- where the disconnects would be classified as
+    # the driver failing to submit URBs, which is precisely the
+    # misattribution the host_fail bucket exists to prevent.
+    if ctx["host_fail"]:
+        recover_host(ctx, style)
 
     counts = run.counts()
     print("\n" + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
