@@ -1694,6 +1694,60 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 }
 
 /**
+ * jockey3_err_device_gone() - is this error just the device having left?
+ * @err: an EP0 transfer's return value
+ *
+ * %-ENODEV and %-ESHUTDOWN are what every EP0 transfer returns once the device
+ * is in %USB_STATE_NOTATTACHED. On the rate-change path that is the ordinary
+ * outcome of an unplug, which the USB core has already logged, so repeating it
+ * at error level says nothing the reader can act on.
+ *
+ * Deliberately keyed on the error code rather than on
+ * jockey3_is_disconnected(): a failed reset also leaves the device
+ * NOTATTACHED, and it sets that same flag on its way to unbinding the
+ * interface. Testing the flag would quietly swallow it; testing the code keeps
+ * the error propagating to the caller either way, which is what
+ * jockey3_pcm_hw_params() returns to userspace.
+ *
+ * Return: true if @err means the device is gone rather than misbehaving.
+ */
+static bool jockey3_err_device_gone(int err)
+{
+	return err == -ENODEV || err == -ESHUTDOWN;
+}
+
+/*
+ * Report one failed usb_submit_urb() at the severity it deserves, by the same
+ * rule jockey3_rate_step_failed() and jockey3_start_urbs_failed() apply: an
+ * unplug is not this driver's doing and the USB core has already logged it,
+ * while anything else is worth a reader's attention. -%ENOENT in particular
+ * must stay loud -- it means the endpoints were disabled while the driver is
+ * still bound, which takes a device reset to undo.
+ *
+ * @index is the ring slot, or -1 for the single MIDI IN URB.
+ */
+static void jockey3_submit_failed(struct jockey3_chip *chip, int err,
+				  const char *what, int index)
+{
+	if (jockey3_err_device_gone(err)) {
+		if (index < 0)
+			dev_dbg(&chip->intf0->dev,
+				"Not submitting the %s URB: device is gone (%d)\n", what, err);
+		else
+			dev_dbg(&chip->intf0->dev,
+				"Not submitting %s URB %d: device is gone (%d)\n",
+				what, index, err);
+		return;
+	}
+
+	if (index < 0)
+		dev_err(&chip->intf0->dev, "Failed to submit the %s URB: %d\n", what, err);
+	else
+		dev_err(&chip->intf0->dev, "Failed to submit %s URB %d: %d\n",
+			what, index, err);
+}
+
+/**
  * jockey3_start_urbs() - submit all PCM and MIDI URBs
  * @chip: driver state
  * @warm: true only for the stall watchdog's own lightweight restart of a ring
@@ -1792,8 +1846,7 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
 		if (ret < 0) {
 			atomic_dec(&chip->playback.urbs_in_flight);
 			usb_unanchor_urb(chip->playback.urbs[i]);
-			dev_err(&chip->intf0->dev, "Failed to submit playback URB %d: %d\n",
-				i, ret);
+			jockey3_submit_failed(chip, ret, "playback", i);
 			if (!first_err)
 				first_err = ret;
 		} else {
@@ -1806,8 +1859,7 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
 		if (ret < 0) {
 			atomic_dec(&chip->capture.urbs_in_flight);
 			usb_unanchor_urb(chip->capture.urbs[i]);
-			dev_err(&chip->intf0->dev, "Failed to submit capture URB %d: %d\n",
-				i, ret);
+			jockey3_submit_failed(chip, ret, "capture", i);
 			if (!first_err)
 				first_err = ret;
 		} else {
@@ -1816,15 +1868,21 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
 	}
 	ret = usb_submit_urb(chip->midi_in_urb, GFP_KERNEL);
 	if (ret < 0) {
-		dev_err(&chip->intf0->dev, "Failed to submit MIDI IN URB: %d\n", ret);
+		jockey3_submit_failed(chip, ret, "MIDI IN", -1);
 		if (!first_err)
 			first_err = ret;
 	}
 
-	if (n_playback < JOCKEY3_N_URBS || n_capture < JOCKEY3_N_URBS)
-		dev_err(&chip->intf0->dev,
-			"Started only %d/%d playback and %d/%d capture URBs; ring will not refill\n",
-			n_playback, JOCKEY3_N_URBS, n_capture, JOCKEY3_N_URBS);
+	if (n_playback < JOCKEY3_N_URBS || n_capture < JOCKEY3_N_URBS) {
+		if (jockey3_err_device_gone(first_err))
+			dev_dbg(&chip->intf0->dev,
+				"Started only %d/%d playback and %d/%d capture URBs; device is gone\n",
+				n_playback, JOCKEY3_N_URBS, n_capture, JOCKEY3_N_URBS);
+		else
+			dev_err(&chip->intf0->dev,
+				"Started only %d/%d playback and %d/%d capture URBs; ring will not refill\n",
+				n_playback, JOCKEY3_N_URBS, n_capture, JOCKEY3_N_URBS);
+	}
 
 	/*
 	 * Arm regardless of first_err. A ring that came up short, or did not come
@@ -1891,29 +1949,6 @@ static void jockey3_start_urbs_failed(struct jockey3_chip *chip, int err, const 
 	}
 
 	dev_err(&chip->intf0->dev, "Failed to start URBs after %s: %d\n", context, err);
-}
-
-/**
- * jockey3_err_device_gone() - is this error just the device having left?
- * @err: an EP0 transfer's return value
- *
- * %-ENODEV and %-ESHUTDOWN are what every EP0 transfer returns once the device
- * is in %USB_STATE_NOTATTACHED. On the rate-change path that is the ordinary
- * outcome of an unplug, which the USB core has already logged, so repeating it
- * at error level says nothing the reader can act on.
- *
- * Deliberately keyed on the error code rather than on
- * jockey3_is_disconnected(): a failed reset also leaves the device
- * NOTATTACHED, and it sets that same flag on its way to unbinding the
- * interface. Testing the flag would quietly swallow it; testing the code keeps
- * the error propagating to the caller either way, which is what
- * jockey3_pcm_hw_params() returns to userspace.
- *
- * Return: true if @err means the device is gone rather than misbehaving.
- */
-static bool jockey3_err_device_gone(int err)
-{
-	return err == -ENODEV || err == -ESHUTDOWN;
 }
 
 /*
