@@ -2106,6 +2106,60 @@ cases:
       This is the case most likely to leave the machine wedged, so run it when
       the serial console is being captured.
 
+  - id: JT-PM-004
+    title: Suspend while the watchdog is recovering a stall
+    area: PM
+    level: L3
+    mode: automated
+    status: implemented
+    requires: [device, root, rtc-wake]
+    exec: cases/pm_suspend_recovery.py
+    params:
+      iterations_per_run: 6
+      sleep_seconds: 8
+      settle_seconds: 3
+      rate: 48000
+    metrics:
+      - cycles
+      - recovery_entered
+      - restarts_while_suspended
+      - resets_while_suspended
+    pass: >
+      The watchdog enters recovery during at least one suspend, and no suspend
+      shows the URB ring being rebuilt or the device being reset while it is
+      down. A run where recovery was never entered is reported blocked, not
+      passed: it did not reach the race.
+    expect_dmesg:
+      - 'stream stalled \(watchdog\); restarting URBs to recover'
+    notes: >
+      The predicate for issue #43. jockey3_suspend() holds rate_mutex across
+      jockey3_stop_urbs(), which disarms the watchdog with the non-sync cancel
+      and zeroes the liveness timestamps. A tick already running parks on the
+      mutex, wakes when suspend drops it, reads those zeroed timestamps as a
+      stall and -- before the fix -- rebuilds the ring on a suspended device,
+      then escalates to resetting it.
+
+      No stall is induced. Suspend manufactures the appearance of one, and
+      leaves the watchdog at its JOCKEY3_WATCHDOG_MIN_POLL_MS floor because both
+      directions are past their deadlines, so the next tick lands within about
+      10 ms. A PCM stream is held open only to keep the watchdog in that tight
+      cadence rather than the idle 1 s poll.
+
+      JT-PM-001 passes on a driver with this bug, because suspending while idle
+      never puts a tick inside jockey3_recover_urb_stream(). That is why this
+      case exists and why "recovery never entered" must not read as a pass.
+
+      The discriminators are the two dev_warn lines only jockey3_start_urbs()
+      can produce: "URB stream restarted after stalling", from
+      jockey3_watchdog_clear_stall() inside it, and the reset escalation behind
+      it. The dev_dbg pair that would show the restart directly is deliberately
+      not used -- enabling dynamic debug on the x86 host writes to a serial
+      console and perturbs the timing being measured.
+
+      Whether a tick lands in the suspend transition is not under the test's
+      control, so recovery_entered is recorded per run. Like JT-RATE-004, a run
+      of zeroes means nothing was provoked.
+
   # ---------------------------------------------------------------- HOTPLUG
 
   - id: JT-HOTPLUG-001
