@@ -72,8 +72,11 @@ HWPARAMS_N_MATCH='packet(s)/URB'
 # callbacks, the only exact bracket for "after jockey3_suspend() ran". The PM
 # core's "suspend entry"/"suspend exit" pair is far too wide -- entry is logged
 # before userspace is frozen, with the device still fully live.
-PM_MATCH='USB suspend, stopping URBs'
-PM_RESUME_MATCH='USB resume, restoring device'
+#
+# Matched by function, not by format. These messages are several words long and
+# the control file wants a multi-word format match quoted; matching the function
+# sidesteps that, and each of these carries exactly one dev_dbg anyway.
+PM_FUNCS='jockey3_suspend jockey3_resume jockey3_reset_resume'
 
 # The two URB completion handlers trace-callbacks profiles, for JT-PERF-001.
 # Fixed here for the same reason FW_MATCH is: the caller names an ACTION
@@ -397,8 +400,9 @@ dyndbg-hwparams-n)
 	;;
 
 dyndbg-pm)
-	# TEST ONLY: enable the driver's suspend/resume dev_dbg lines, matched by
-	# format string like the other dyndbg verbs so nothing else is enabled.
+	# TEST ONLY: enable the driver's suspend/resume dev_dbg lines. Matched by
+	# function rather than by format, so nothing else is enabled and the
+	# multi-word format strings do not have to be quoted for the control file.
 	[ $# -eq 1 ] || die "dyndbg-pm needs on or off"
 	case "$1" in
 	on)  flag='+p' ;;
@@ -406,10 +410,10 @@ dyndbg-pm)
 	*)   die "dyndbg-pm takes on or off" ;;
 	esac
 	[ -e "$DYNDBG" ] || die "debugfs dynamic_debug not available"
-	printf 'format %s %s\n' "$PM_MATCH" "$flag" > "$DYNDBG" \
-		|| die "cannot write $DYNDBG"
-	printf 'format %s %s\n' "$PM_RESUME_MATCH" "$flag" > "$DYNDBG" \
-		|| die "cannot write $DYNDBG"
+	for fn in $PM_FUNCS; do
+		printf 'func %s %s\n' "$fn" "$flag" > "$DYNDBG" \
+			|| die "cannot write $DYNDBG"
+	done
 	exit 0
 	;;
 
