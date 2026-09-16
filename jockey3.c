@@ -163,12 +163,11 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * jockey3_free_resources(), none of which holds a mutex.
  *
  * Because that disarm does not wait, a tick can be parked on rate_mutex while
- * the holder is taking the device down -- jockey3_suspend() and
- * jockey3_pre_reset() both stop the URBs from inside the mutex. Such a tick
- * wakes to timestamps they zeroed and would read the stream as stalled, so
+ * jockey3_suspend() or jockey3_pre_reset() takes the device down, then wake to
+ * the timestamps they zeroed and read the stream as stalled. So
  * jockey3_recover_urb_stream() re-tests DISCONNECTED, SUSPENDED and RESETTING
- * once it holds the mutex, and leaves the restart to whichever path is bringing
- * the device back.
+ * under the mutex and leaves the restart to whichever path is bringing the
+ * device back.
  *
  * jockey3_watchdog_work() itself may call jockey3_recover_urb_stream(),
  * which takes rate_mutex and calls jockey3_stop_urbs() -- i.e. the watchdog's
@@ -980,20 +979,12 @@ static void jockey3_report_xrun(struct jockey3_pcm_urb_stream *urb_stream)
 }
 
 /**
- * jockey3_err_device_gone() - is this error just the device having left?
- * @err: an EP0 transfer's return value
+ * jockey3_err_device_gone() - did the device simply leave?
+ * @err: a transfer's return value
  *
- * %-ENODEV and %-ESHUTDOWN are what every EP0 transfer returns once the device
- * is in %USB_STATE_NOTATTACHED. On the rate-change path that is the ordinary
- * outcome of an unplug, which the USB core has already logged, so repeating it
- * at error level says nothing the reader can act on.
- *
- * Deliberately keyed on the error code rather than on
- * jockey3_is_disconnected(): a failed reset also leaves the device
- * NOTATTACHED, and it sets that same flag on its way to unbinding the
- * interface. Testing the flag would quietly swallow it; testing the code keeps
- * the error propagating to the caller either way, which is what
- * jockey3_pcm_hw_params() returns to userspace.
+ * Keyed on the error code, not on jockey3_is_disconnected(): a failed reset
+ * also leaves the device %USB_STATE_NOTATTACHED and sets that flag on its way
+ * to unbinding, and that one is a fault worth logging.
  *
  * Return: true if @err means the device is gone rather than misbehaving.
  */
@@ -1003,16 +994,9 @@ static bool jockey3_err_device_gone(int err)
 }
 
 /*
- * Report a failed resubmit from a URB completion handler at the severity it
- * deserves, by the same rule the submit and rate paths use. When the device
- * leaves, every one of the JOCKEY3_N_URBS in-flight URBs comes back and each
- * one fails to resubmit, so this is the loudest -ENODEV source in the driver:
- * an unplug during a test batch produced three hundred of these lines.
- *
- * Only the log level changes. Unlike a URB transport error, a resubmit failure
- * carries no accounting -- @consec_errors is driven by jockey3_urb_error_give_up()
- * from the completion status, not from here -- so nothing downstream reads this
- * decision.
+ * An unplug fails every in-flight URB's resubmit at once, so demote that case
+ * as the submit and rate paths do. Log level only: @consec_errors comes from
+ * jockey3_urb_error_give_up() and the completion status, not from here.
  */
 static void jockey3_resubmit_failed(struct jockey3_chip *chip, int err, const char *what)
 {
@@ -1691,22 +1675,12 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 	 * be in its safe zone once these return -- no separate drain is needed
 	 * here (jockey3_pcm_sync_stop() covers the ALSA buffer-teardown path).
 	 *
-	 * For the anchored form that is worth spelling out, because the obvious
-	 * reading of the USB core says the opposite and repeatedly gets this
-	 * flagged as a use-after-free. __usb_hcd_giveback_urb() really does
-	 * unanchor an URB before invoking urb->complete(), so a handler that is
-	 * already running is no longer on anchor->urb_list and the kill loop will
-	 * not find it to wait on. What covers it is anchor->suspend_wakeups: the
-	 * same function brackets the callback with usb_anchor_suspend_wakeups()
-	 * before the unanchor and usb_anchor_resume_wakeups() after complete()
-	 * returns, and usb_kill_anchored_urbs() repeats its drain until
-	 * usb_anchor_check_wakeup() reports an empty list *and* a zero counter.
-	 * An in-flight handler holds that counter above zero, so the kill spins
-	 * (cpu_relax()) rather than returning early. See drivers/usb/core/hcd.c
-	 * and drivers/usb/core/urb.c.
-	 *
-	 * Killing the fixed URB arrays element by element would work too, but the
-	 * anchored form is what the rest of sound/usb uses and it is no weaker.
+	 * Worth spelling out for the anchored form, which keeps getting read as
+	 * a use-after-free: __usb_hcd_giveback_urb() does unanchor before
+	 * urb->complete(), so the kill loop cannot find a running handler on the
+	 * list. anchor->suspend_wakeups covers it -- raised before the unanchor
+	 * and dropped after complete() returns, and usb_kill_anchored_urbs()
+	 * drains until usb_anchor_check_wakeup() sees it zero.
 	 */
 	usb_kill_urb(chip->midi_in_urb);
 	usb_kill_anchored_urbs(&chip->playback.anchor);
@@ -1740,12 +1714,9 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 }
 
 /*
- * Report one failed usb_submit_urb() at the severity it deserves, by the same
- * rule jockey3_rate_step_failed() and jockey3_start_urbs_failed() apply: an
- * unplug is not this driver's doing and the USB core has already logged it,
- * while anything else is worth a reader's attention. -%ENOENT in particular
- * must stay loud -- it means the endpoints were disabled while the driver is
- * still bound, which takes a device reset to undo.
+ * Demote an unplug, as jockey3_start_urbs_failed() already does for the
+ * aggregate result. -%ENOENT stays loud: the endpoints were disabled while the
+ * driver is still bound, which takes a device reset to undo.
  *
  * @slot is the ring slot, or -1 for the single MIDI IN URB.
  */
@@ -1800,11 +1771,8 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
 		return -ENODEV;
 
 	/*
-	 * Belt and braces against submitting to a suspended device. The check
-	 * that actually prevents it is in jockey3_recover_urb_stream(), which
-	 * bails before it gets here; this one only catches a caller that has not
-	 * been thought about yet. jockey3_restore_device() clears the flag under
-	 * rate_mutex before its own restart, so the resume path is unaffected.
+	 * Belt and braces; jockey3_recover_urb_stream() is what actually bails.
+	 * jockey3_restore_device() clears the flag before its own restart.
 	 */
 	if (jockey3_is_suspended(chip))
 		return -ESHUTDOWN;
@@ -1975,10 +1943,8 @@ static void jockey3_start_urbs_failed(struct jockey3_chip *chip, int err, const 
 }
 
 /*
- * Log a failed step of a rate change at the severity it deserves. Mirrors the
- * classification jockey3_start_urbs_failed() already applies on the URB path,
- * so that one unplug does not produce dev_dbg() from one and dev_err() from the
- * other for the very same cause.
+ * Log a failed rate-change step at the severity it deserves, matching what
+ * jockey3_start_urbs_failed() applies on the URB path.
  */
 static void jockey3_rate_step_failed(struct jockey3_chip *chip, int err, const char *what)
 {
@@ -2422,11 +2388,9 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
 
 	while (time_before(jiffies, deadline)) {
 		/*
-		 * Suspended as well as disconnected: a device that went down
-		 * mid-wait will not complete a URB again until it is restored,
-		 * and spinning out the rest of the grace only delays the
-		 * caller's next decision -- which, in the recovery path, is
-		 * whether to escalate to a USB reset.
+		 * A device that went down mid-wait completes nothing until it is
+		 * restored; spinning out the grace only delays the caller's next
+		 * decision, which in the recovery path is whether to reset.
 		 */
 		if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip))
 			return false;
@@ -2596,25 +2560,15 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 		}
 
 		/*
-		 * The state checks belong here too, and for the same reason the
-		 * alive check above is repeated: everything sampled before the
-		 * mutex was taken is stale by the time it is held. A watchdog
-		 * tick that blocked here can have been waiting on
-		 * jockey3_suspend() or jockey3_pre_reset(), both of which hold
-		 * this mutex across jockey3_stop_urbs() and disarm the watchdog
-		 * with the non-sync cancel that cannot wait for a tick already
-		 * running. It wakes to a stream that looks dead only because
-		 * they zeroed the liveness timestamps on the way past.
+		 * Stale for the same reason the alive check above is repeated: a
+		 * tick that blocked here may have been waiting on
+		 * jockey3_suspend() or jockey3_pre_reset(), and wakes to a
+		 * stream that looks dead only because they zeroed the
+		 * timestamps. Restarting on that would submit URBs to a
+		 * suspended device, then escalate to resetting one.
 		 *
-		 * Restarting on that basis submits URBs to a device that is
-		 * suspended or in reset. Worse, it does not stop there: the
-		 * restart cannot show liveness, so the escalation ladder below
-		 * runs its full grace and ends at jockey3_queue_reset(),
-		 * resetting a suspended device over a stall that was never real.
-		 *
-		 * Bailing out loses nothing. Both paths restart the ring
-		 * themselves on the way back up -- jockey3_restore_device() and
-		 * jockey3_post_reset() -- and the watchdog re-arms from there.
+		 * Bailing loses nothing: both paths restart the ring themselves
+		 * on the way back up.
 		 */
 		if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip) ||
 		    jockey3_is_resetting(chip)) {
@@ -2643,23 +2597,15 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	}
 
 	/*
-	 * Tested here rather than only at the top of this function: the light
-	 * restart and the grace above take long enough for an unplug to land in
-	 * between, and resetting is the one step that goes badly when it does.
-	 * jockey3_queue_reset() opens with reinit_completion(&chip->reset_done),
-	 * which discards the complete_all() that jockey3_disconnect() issues
-	 * specifically to release waiters -- so the call below would wait out the
-	 * full timeout in jockey3_wait_for_reset_completion() for a reset of a
-	 * device that is already gone, while jockey3_disconnect() sits behind it
-	 * in cancel_delayed_work_sync(). Ahead of the budget so that an unplug
-	 * does not spend a recovery attempt that was never made.
+	 * Re-tested because the restart and grace above take long enough for an
+	 * unplug to land in between. jockey3_queue_reset() would then
+	 * reinit_completion() over the complete_all() that jockey3_disconnect()
+	 * issues to release waiters, and block the full timeout on a reset that
+	 * will never come. Ahead of the budget, so an unplug spends no attempt.
 	 *
-	 * Unlocked, so racy by construction: an unplug immediately after the test
-	 * still reinitializes the completion. The window is bounded rather than
-	 * closed -- jockey3_wait_for_reset_completion() gives up after 1000 ms
-	 * and reports -ENODEV from its own DISCONNECTED test. Closing it would
-	 * mean serializing the reset against jockey3_disconnect(), which must not
-	 * be made to block on this driver's locks.
+	 * Racy by construction -- an unplug just after the test still hits it.
+	 * The timeout bounds that; closing it properly would mean serializing
+	 * against jockey3_disconnect(), which must not block on driver locks.
 	 */
 	if (jockey3_is_disconnected(chip)) {
 		dev_dbg(&chip->intf0->dev,
@@ -3098,13 +3044,9 @@ static void jockey3_pcm_set_n(struct jockey3_chip *chip, struct snd_pcm_substrea
  * @rate: the requested rate in Hz
  * @changed: set true if the hardware was actually reprogrammed
  *
- * Split out of jockey3_pcm_hw_params() so that the USB device lock its caller
- * holds and the rate_mutex taken here sit in separate functions: nesting two
- * scoped_guard() blocks in one scope shadows the guard's own variable and trips
- * -Wshadow, which this driver builds clean at W=12.
- *
- * Must be called with the USB device lock held; the call site explains why that
- * lock is needed and why it cannot be taken further down.
+ * Split out of jockey3_pcm_hw_params() because nesting two scoped_guard()
+ * blocks in one scope shadows the guard's own variable and trips -Wshadow.
+ * Call with the USB device lock held; see the call site for why.
  *
  * Return: 0 on success or if the rate already matched (@changed stays false),
  * %-EBUSY if the other direction holds a different rate, %-ENODEV if the device
@@ -3220,39 +3162,19 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	jockey3_pcm_set_n(chip, substream, hw_params);
 
 	/*
-	 * The USB device lock, for the whole rate change and no longer.
+	 * Programming a rate calls usb_set_interface(), which the USB core
+	 * serializes against usb_disconnect() with the device lock and nothing
+	 * else; both reach remove_intf_ep_devs(), whose only guard is the
+	 * unlocked bitfield intf->ep_devs_created.
 	 *
-	 * Programming a rate runs usb_set_interface() (four times, in
-	 * ploytec_initialize_device()), and the USB core serializes altsetting
-	 * changes against disconnect by this lock and nothing else:
-	 * usb_disconnect() holds it across usb_disable_device(), and usbfs takes
-	 * it around its own SETINTERFACE ioctl. Without it usb_set_interface() and
-	 * usb_disable_device() can both reach remove_intf_ep_devs() for the same
-	 * interface -- guarded only by the unlocked bitfield intf->ep_devs_created
-	 * -- and the second device_del() lands on an endpoint device that has
-	 * already been deleted. That is a kernel oops, reproduced by unplugging the
-	 * device during a rate change.
+	 * Three constraints fix where it goes. It cannot move down into
+	 * ploytec_initialize_device(): probe, disconnect and the reset callbacks
+	 * already hold it and it is not recursive. It must be dropped before the
+	 * recovery below, which can queue a reset that needs this same lock. And
+	 * it goes outside rate_mutex, the order pre_reset()/post_reset() use.
 	 *
-	 * Taken here, in the ALSA entry point, and NOT inside
-	 * ploytec_initialize_device(): probe(), disconnect(), pre_reset() and
-	 * post_reset() are all called by the USB core with this lock already held,
-	 * and it is not recursive, so locking further down would self-deadlock the
-	 * reset path (post_reset() -> jockey3_set_rate() ->
-	 * ploytec_initialize_device()).
-	 *
-	 * Released before the recovery below, which is not optional: recovery can
-	 * reach jockey3_queue_reset(), and the reset it queues takes this same lock
-	 * in usb_reset_device(). Holding it across that wait would stall every
-	 * recovery until jockey3_wait_for_reset_completion() gave up.
-	 *
-	 * Outside rate_mutex, matching the order the core already establishes:
-	 * pre_reset() and post_reset() run holding the device lock and take
-	 * rate_mutex underneath it.
-	 *
-	 * The watchdog must never take this lock. jockey3_disconnect() runs with it
-	 * held and waits there in cancel_delayed_work_sync(), so a tick blocking on
-	 * it would deadlock. Nothing on the watchdog's path reaches
-	 * usb_set_interface() today; keep it that way.
+	 * The watchdog must never take it: jockey3_disconnect() holds it while
+	 * waiting in cancel_delayed_work_sync().
 	 */
 	scoped_guard(device, &chip->dev->dev)
 		ret = jockey3_pcm_change_rate(chip, substream, rate, &rate_changed);
@@ -3517,14 +3439,11 @@ static int jockey3_initialize(struct jockey3_chip *chip, int model)
  * card->private_free, i.e. after the last file descriptor on the card is
  * closed, which on an unplug is arbitrarily long after jockey3_disconnect().
  *
- *  - No USB *operation* may be attempted. The interfaces and the device are
- *    still allocated -- jockey3_probe() holds a reference on each, dropped at
- *    the end of this function -- but by this point they are unbound and
- *    detached, and the hardware may be physically gone. Reading them is safe;
- *    talking to them is not. The dev_dbg(&chip->intf0->dev, ...) idiom used
- *    everywhere else in this file is deliberately avoided here all the same:
- *    the interface is no longer bound to this driver, so the attribution the
- *    idiom exists to provide would be wrong.
+ *  - No USB *operation* may be attempted. The objects are still allocated,
+ *    since jockey3_probe() references each and this function drops them, but
+ *    they are unbound by now and the hardware may be gone. Reading is safe,
+ *    talking is not. The dev_dbg(&chip->intf0->dev, ...) idiom is avoided too:
+ *    the interface is no longer ours, so the attribution would be wrong.
  *  - The URBs must already be dead. jockey3_disconnect() kills them, and so
  *    does probe's error path, both before the card is released.
  */
@@ -3533,20 +3452,11 @@ static void jockey3_free_resources(struct jockey3_chip *chip)
 	int i;
 
 	/*
-	 * The last fence on the watchdog, and it has to be here rather than only
-	 * in jockey3_disconnect(): that sync cancel does not serialize against a
-	 * jockey3_start_urbs() that is already past its own DISCONNECTED gate.
-	 * Such a call arms the watchdog unconditionally at its tail, and
-	 * jockey3_disconnect() holds no mutex that would exclude it, so the tick
-	 * can be queued after the cancel there has already returned -- onto a
-	 * chip this function is about to free.
-	 *
-	 * Here that cannot happen. card->private_free runs once the last file
-	 * descriptor on the card is closed, so every ALSA entry point that could
-	 * reach jockey3_start_urbs() has returned before this does. Sleeping is
-	 * fine on this path (mutex_destroy() and jockey3_devices_mutex below
-	 * already require it), and there is no self-deadlock: this runs in the
-	 * closing task's context, never on the system_long_wq the watchdog uses.
+	 * The last fence on the watchdog. jockey3_disconnect()'s sync cancel is
+	 * not enough on its own: a jockey3_start_urbs() already past its
+	 * DISCONNECTED gate arms the watchdog at its tail, under no mutex that
+	 * would exclude the cancel. Here that cannot happen -- private_free runs
+	 * once the card is closed, so every such caller has returned.
 	 */
 	cancel_delayed_work_sync(&chip->watchdog_work);
 
@@ -3565,10 +3475,7 @@ static void jockey3_free_resources(struct jockey3_chip *chip)
 	scoped_guard(mutex, &jockey3_devices_mutex)
 		__clear_bit(chip->dev_idx, jockey3_devices_used);
 
-	/*
-	 * Last, and in the reverse of the order jockey3_probe() took them:
-	 * everything above may read these pointers, and nothing below does.
-	 */
+	/* Last, reversing jockey3_probe(): everything above may read these. */
 	usb_put_intf(chip->intf1);
 	usb_put_intf(chip->intf0);
 	usb_put_dev(chip->dev);
@@ -3834,24 +3741,14 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 
 	chip->card = card;
 	/*
-	 * Reference every USB object the chip keeps a pointer to. The card
-	 * outlives the unbind -- snd_card_free_when_closed() defers the release
-	 * until userspace closes the last file descriptor -- and an ALSA entry
-	 * point can still be running inside jockey3_set_rate() when
-	 * usb_disconnect() reaches usb_disable_device(), which device_unregister()s
-	 * each interface. Without a reference of our own that frees struct
-	 * usb_interface under a thread that is still reading it; KASAN caught
-	 * exactly that in ploytec_start_streaming() during a rate change raced
-	 * against an unplug.
+	 * The card outlives the unbind, so these pointers must too:
+	 * snd_card_free_when_closed() defers the release until userspace closes
+	 * the card, while usb_disconnect() device_unregister()s the interfaces
+	 * as soon as the device leaves.
 	 *
-	 * These references keep the memory valid. They do not keep the *device*
-	 * usable: after a disconnect the interfaces are unbound and detached from
-	 * the configuration, so the pointers stay safe to read while every
-	 * transfer through them fails. JOCKEY3_FLAG_DISCONNECTED remains what
-	 * tells the driver to stop, and is still the thing to test.
-	 *
-	 * @dev is referenced explicitly rather than leaning on the driver-model
-	 * parent reference that each interface already holds on it.
+	 * This keeps the memory valid, not the device usable -- the interfaces
+	 * are still unbound and every transfer through them fails.
+	 * JOCKEY3_FLAG_DISCONNECTED remains the thing to test.
 	 */
 	chip->dev = usb_get_dev(dev);
 	chip->intf0 = usb_get_intf(intf);
@@ -4129,11 +4026,9 @@ static int jockey3_suspend(struct usb_interface *intf, pm_message_t message)
 		dev_dbg(&intf->dev, "USB suspend, stopping URBs\n");
 
 		/*
-		 * Latch SUSPENDED before anything else, and in particular before
-		 * rate_mutex is taken below: a watchdog tick blocked on that
-		 * mutex resumes the moment this function drops it, and the flag
-		 * being set by then is what stops it restarting the ring behind
-		 * the PM core's back. See jockey3_recover_urb_stream().
+		 * Before rate_mutex below: a tick blocked on that mutex resumes
+		 * the moment this drops it, and the flag is what stops it
+		 * restarting the ring. See jockey3_recover_urb_stream().
 		 */
 		set_bit(JOCKEY3_FLAG_SUSPENDED, &chip->flags);
 
@@ -4159,11 +4054,9 @@ static int jockey3_restore_device(struct jockey3_chip *chip, bool reset)
 	guard(mutex)(&chip->rate_mutex);
 
 	/*
-	 * Clear SUSPENDED under the mutex and before the restart below, which is
-	 * the one jockey3_recover_urb_stream() is deliberately deferring to. A
-	 * watchdog tick cannot slip in between the clear and the restart: it
-	 * would have to take this same mutex to get as far as restarting
-	 * anything.
+	 * Cleared under the mutex, before the restart below that
+	 * jockey3_recover_urb_stream() defers to. A tick cannot slip in between:
+	 * it needs this same mutex to restart anything.
 	 */
 	clear_bit(JOCKEY3_FLAG_SUSPENDED, &chip->flags);
 
