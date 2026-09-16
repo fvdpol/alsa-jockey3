@@ -158,8 +158,16 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * from inside rate_mutex at four sites, so it disarms with the non-sync
  * cancel_delayed_work(), which is safe under any lock; a tick that is already
  * running when the cancel lands re-reads 'stopping' and does nothing. The sync
- * form appears only in jockey3_disconnect() and in probe's error path, neither
- * of which holds a mutex.
+ * form appears only in jockey3_disconnect(), in probe's error path and in
+ * jockey3_free_resources(), none of which holds a mutex.
+ *
+ * Because that disarm does not wait, a tick can be parked on rate_mutex while
+ * the holder is taking the device down -- jockey3_suspend() and
+ * jockey3_pre_reset() both stop the URBs from inside the mutex. Such a tick
+ * wakes to timestamps they zeroed and would read the stream as stalled, so
+ * jockey3_recover_urb_stream() re-tests DISCONNECTED, SUSPENDED and RESETTING
+ * once it holds the mutex, and leaves the restart to whichever path is bringing
+ * the device back.
  *
  * jockey3_watchdog_work() itself may call jockey3_recover_urb_stream(),
  * which takes rate_mutex and calls jockey3_stop_urbs() -- i.e. the watchdog's
@@ -470,7 +478,10 @@ struct jockey3_pcm_urb_stream {
  *	Serialized by @rate_mutex, which every caller holds.
  * @rate_mutex: serializes sample-rate changes and the URB stop/start that goes
  *	with them; process context only, outermost lock
- * @flags: JOCKEY3_FLAG_* bits, accessed with the atomic bitops
+ * @flags: JOCKEY3_FLAG_* bits, accessed with the atomic bitops.
+ *	JOCKEY3_FLAG_SUSPENDED is set by jockey3_suspend() before it takes
+ *	@rate_mutex and cleared by jockey3_restore_device() while holding it, so
+ *	a watchdog tick that was blocked on that mutex sees it on the way out.
  * @current_rate: sample rate the hardware is programmed to; @rate_mutex
  * @dev_idx: card slot held in jockey3_devices_used
  * @reset_done: completed by jockey3_post_reset(), and by jockey3_disconnect()
@@ -580,6 +591,7 @@ static enum ploytec_codec_variant jockey3_codec_variant;
 /* Chip flags */
 #define JOCKEY3_FLAG_DISCONNECTED	0
 #define JOCKEY3_FLAG_RESETTING		1
+#define JOCKEY3_FLAG_SUSPENDED		2
 
 static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
 {
@@ -589,6 +601,11 @@ static inline bool jockey3_is_disconnected(const struct jockey3_chip *chip)
 static inline bool jockey3_is_resetting(const struct jockey3_chip *chip)
 {
 	return test_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
+}
+
+static inline bool jockey3_is_suspended(const struct jockey3_chip *chip)
+{
+	return test_bit(JOCKEY3_FLAG_SUSPENDED, &chip->flags);
 }
 
 /*
@@ -1679,6 +1696,16 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
+	/*
+	 * Belt and braces against submitting to a suspended device. The check
+	 * that actually prevents it is in jockey3_recover_urb_stream(), which
+	 * bails before it gets here; this one only catches a caller that has not
+	 * been thought about yet. jockey3_restore_device() clears the flag under
+	 * rate_mutex before its own restart, so the resume path is unaffected.
+	 */
+	if (jockey3_is_suspended(chip))
+		return -ESHUTDOWN;
+
 	dev_dbg(&chip->intf0->dev, "Starting all URBs (%s start, grace %u ms)\n",
 		warm ? "warm" : "cold", jockey3_start_grace_ms(warm));
 
@@ -1819,6 +1846,13 @@ static void jockey3_start_urbs_failed(struct jockey3_chip *chip, int err, const 
 
 	if (err == -ENODEV || jockey3_is_disconnected(chip)) {
 		dev_dbg(&chip->intf0->dev, "Could not start URBs after %s: device is gone\n",
+			context);
+		return;
+	}
+
+	if (err == -ESHUTDOWN || jockey3_is_suspended(chip)) {
+		dev_dbg(&chip->intf0->dev,
+			"Could not start URBs after %s: device is suspended; the resume path will start them\n",
 			context);
 		return;
 	}
@@ -2266,7 +2300,14 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
 		timeout_ms, type, require_healthy ? "stream steadily" : "show liveness");
 
 	while (time_before(jiffies, deadline)) {
-		if (jockey3_is_disconnected(chip))
+		/*
+		 * Suspended as well as disconnected: a device that went down
+		 * mid-wait will not complete a URB again until it is restored,
+		 * and spinning out the rest of the grace only delays the
+		 * caller's next decision -- which, in the recovery path, is
+		 * whether to escalate to a USB reset.
+		 */
+		if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip))
 			return false;
 
 		if (require_healthy ? jockey3_stream_streaming_healthy(chip, urb_stream)
@@ -2429,6 +2470,35 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 		if (jockey3_check_urb_stream_alive(urb_stream)) {
 			dev_dbg(&chip->intf0->dev,
 				"%s stream came back under rate_mutex (%s); no restart needed\n",
+				type, context);
+			goto out;
+		}
+
+		/*
+		 * The state checks belong here too, and for the same reason the
+		 * alive check above is repeated: everything sampled before the
+		 * mutex was taken is stale by the time it is held. A watchdog
+		 * tick that blocked here can have been waiting on
+		 * jockey3_suspend() or jockey3_pre_reset(), both of which hold
+		 * this mutex across jockey3_stop_urbs() and disarm the watchdog
+		 * with the non-sync cancel that cannot wait for a tick already
+		 * running. It wakes to a stream that looks dead only because
+		 * they zeroed the liveness timestamps on the way past.
+		 *
+		 * Restarting on that basis submits URBs to a device that is
+		 * suspended or in reset. Worse, it does not stop there: the
+		 * restart cannot show liveness, so the escalation ladder below
+		 * runs its full grace and ends at jockey3_queue_reset(),
+		 * resetting a suspended device over a stall that was never real.
+		 *
+		 * Bailing out loses nothing. Both paths restart the ring
+		 * themselves on the way back up -- jockey3_restore_device() and
+		 * jockey3_post_reset() -- and the watchdog re-arms from there.
+		 */
+		if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip) ||
+		    jockey3_is_resetting(chip)) {
+			dev_dbg(&chip->intf0->dev,
+				"%s stream stalled (%s), but the device is being taken down; leaving the restart to the resume path\n",
 				type, context);
 			goto out;
 		}
@@ -3800,6 +3870,15 @@ static int jockey3_suspend(struct usb_interface *intf, pm_message_t message)
 	if (chip && intf == chip->intf0) {
 		dev_dbg(&intf->dev, "USB suspend, stopping URBs\n");
 
+		/*
+		 * Latch SUSPENDED before anything else, and in particular before
+		 * rate_mutex is taken below: a watchdog tick blocked on that
+		 * mutex resumes the moment this function drops it, and the flag
+		 * being set by then is what stops it restarting the ring behind
+		 * the PM core's back. See jockey3_recover_urb_stream().
+		 */
+		set_bit(JOCKEY3_FLAG_SUSPENDED, &chip->flags);
+
 		/* Notify ALSA core to transition state and unblock userspace */
 		if (chip->pcm)
 			snd_pcm_suspend_all(chip->pcm);
@@ -3820,6 +3899,15 @@ static int jockey3_restore_device(struct jockey3_chip *chip, bool reset)
 	int ret;
 
 	guard(mutex)(&chip->rate_mutex);
+
+	/*
+	 * Clear SUSPENDED under the mutex and before the restart below, which is
+	 * the one jockey3_recover_urb_stream() is deliberately deferring to. A
+	 * watchdog tick cannot slip in between the clear and the restart: it
+	 * would have to take this same mutex to get as far as restarting
+	 * anything.
+	 */
+	clear_bit(JOCKEY3_FLAG_SUSPENDED, &chip->flags);
 
 	if (reset) {
 		ret = jockey3_initialize_ploytec(chip, NULL);
