@@ -2132,33 +2132,33 @@ cases:
     expect_dmesg:
       - 'stream stalled \(watchdog\); restarting URBs to recover'
     notes: >
-      The predicate for issue #43. jockey3_suspend() holds rate_mutex across
-      jockey3_stop_urbs(), which disarms the watchdog with the non-sync cancel
-      and zeroes the liveness timestamps. A tick already running parks on the
-      mutex, wakes when suspend drops it, reads those zeroed timestamps as a
-      stall and -- before the fix -- rebuilds the ring on a suspended device,
-      then escalates to resetting it.
+      Intended as the predicate for issue #43, but it DOES NOT REACH THE RACE
+      yet -- see the module docstring. The first hardware run recorded
+      recovery_entered 0 across six suspends, because jockey3_stop_urbs() sets
+      urb_stream->stopping before zeroing the liveness timestamps and
+      jockey3_watchdog_check() returns early on that flag. Between
+      jockey3_suspend() and the resume path's jockey3_start_urbs() the watchdog
+      cannot report a stall at all, so suspend does not manufacture one.
 
-      No stall is induced. Suspend manufactures the appearance of one, and
-      leaves the watchdog at its JOCKEY3_WATCHDOG_MIN_POLL_MS floor because both
-      directions are past their deadlines, so the next tick lands within about
-      10 ms. A PCM stream is held open only to keep the watchdog in that tight
-      cadence rather than the idle 1 s poll.
+      The race needs a tick already inside jockey3_recover_urb_stream(), past
+      detection and blocked on rate_mutex, when suspend takes it -- which needs
+      a genuine mid-stream stall in flight. Nothing in the framework produces
+      one on demand: cutting USB power disconnects the device instead, and
+      jockey3_recover_urb_stream() returns -ENODEV at its first check. Reaching
+      it needs development-time fault injection, which is a driver change and a
+      decision about the no-test-hooks rule.
 
-      JT-PM-001 passes on a driver with this bug, because suspending while idle
-      never puts a tick inside jockey3_recover_urb_stream(). That is why this
-      case exists and why "recovery never entered" must not read as a pass.
+      Kept because it is still a useful no-regression check that suspending with
+      a stream open leaves no restart or reset behind, and because it reports
+      blocked rather than pass when recovery was not entered. JT-PM-001 passes
+      on a driver with this bug; this case at least says so out loud.
 
-      The discriminators are the two dev_warn lines only jockey3_start_urbs()
-      can produce: "URB stream restarted after stalling", from
-      jockey3_watchdog_clear_stall() inside it, and the reset escalation behind
-      it. The dev_dbg pair that would show the restart directly is deliberately
-      not used -- enabling dynamic debug on the x86 host writes to a serial
-      console and perturbs the timing being measured.
-
-      Whether a tick lands in the suspend transition is not under the test's
-      control, so recovery_entered is recorded per run. Like JT-RATE-004, a run
-      of zeroes means nothing was provoked.
+      The discriminators, once the race can be provoked, are the two dev_warn
+      lines only jockey3_start_urbs() can produce: "URB stream restarted after
+      stalling", from jockey3_watchdog_clear_stall() inside it, and the reset
+      escalation behind it. The dev_dbg pair that would show the restart
+      directly is deliberately not used -- enabling dynamic debug on the x86
+      host writes to a serial console and perturbs the timing being measured.
 
   # ---------------------------------------------------------------- HOTPLUG
 
