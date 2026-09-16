@@ -2133,7 +2133,15 @@ cases:
       down. A run where recovery was never entered is reported blocked, not
       passed: it did not reach the race.
     expect_dmesg:
+      # All of these are what the injection asks for. The stall it forces
+      # outlasts the recovery ladder by design, so the ladder runs to the end
+      # and says so -- including the power-cycling line, which is a driver_fail
+      # anywhere else and has to be, since it means recovery gave up.
       - 'stream stalled \(watchdog\); restarting URBs to recover'
+      - 'URB stream restarted after stalling for'
+      - 'still stalled after URB restart; queuing full USB reset'
+      - 'still stalled after full USB reset; hardware may need power-cycling'
+      - 'Timeout waiting for reset completion'
     notes: >
       The predicate for issue #43. Requires the driver built from branch
       test/issue43-suspend-stall-injection; it is blocked against any other
