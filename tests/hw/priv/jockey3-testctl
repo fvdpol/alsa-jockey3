@@ -93,6 +93,7 @@ JOCKEY3_USB_IDS='200c:1037 200c:1019'      # Remix, Master Edition
 USB_STATE_DIR=/run/jockey3-testctl
 USB_STATE=$USB_STATE_DIR/usb-port
 HCD_STATE=$USB_STATE_DIR/hcd-reset-last
+HCD_CTRL=$USB_STATE_DIR/hcd-controller
 
 # Host-controller drivers hcd-reset is allowed to reload. An allowlist and
 # not a lookup: reloading whatever module happens to drive the controller
@@ -263,6 +264,12 @@ hcd_resolve() {
 			mod=$(basename "$(readlink -f "$d/driver/module")")
 			for allowed in $HCD_MODULES; do
 				if [ "$mod" = "$allowed" ]; then
+					# Remembered while the device is still here,
+					# because by the time this is needed it will
+					# not be -- see hcd_recall().
+					mkdir -p "$USB_STATE_DIR" 2>/dev/null \
+						&& printf '%s %s\n' "$mod" "$(basename "$d")" \
+							> "$HCD_CTRL" 2>/dev/null
 					printf '%s %s\n' "$mod" "$(basename "$d")"
 					return 0
 				fi
@@ -271,6 +278,46 @@ hcd_resolve() {
 		d=$(dirname "$d")
 	done
 	return 1
+}
+
+# The controller this device was last seen behind, for when it cannot be
+# resolved from the bus any more.
+#
+# This is not an optimization, it is the main path for the case the verb
+# exists to handle. "HC died; cleaning up" is followed immediately by a USB
+# disconnect for every device on the controller -- see the cascade recorded on
+# issue 40 -- so by the time recovery runs the Jockey 3 is gone from sysfs and
+# there is nothing left to walk up from.
+#
+# Everything read back is re-validated against the hardware before it is used,
+# exactly as `usb-power on` does with the port it recorded: a recorded location
+# is a hint about the past, and reloading the driver of a device that is no
+# longer the one we resolved is the one thing this must never do.
+hcd_recall() {
+	local mod slot real cur allowed
+	[ -r "$HCD_CTRL" ] || return 1
+	read -r mod slot < "$HCD_CTRL" || return 1
+
+	# Shapes first, so a corrupt file cannot reach the checks below.
+	[[ $mod =~ ^[a-z0-9_]+$ ]] || return 1
+	[[ $slot =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$ ]] || return 1
+
+	# Still on the allowlist -- the file could predate a change to it.
+	for allowed in $HCD_MODULES; do
+		[ "$mod" = "$allowed" ] && break
+		allowed=""
+	done
+	[ -n "${allowed:-}" ] || return 1
+
+	# The slot must still exist and still be driven by that same module. A
+	# controller that has died is still bound to its driver; one that has
+	# been physically replaced, or rebound to something else, is not ours.
+	real=$(readlink -f "/sys/bus/pci/devices/$slot/driver/module" 2>/dev/null) || return 1
+	cur=$(basename "$real")
+	[ "$cur" = "$mod" ] || return 1
+
+	printf '%s %s\n' "$mod" "$slot"
+	return 0
 }
 
 # Is anything the machine depends on sitting behind USB? Prints what, and
@@ -715,10 +762,21 @@ hcd-reset)
 		|| die "hcd-reset takes 'check' or no argument"
 
 	# --- what would we be reloading? -----------------------------------
-	dev=$(hcd_usb_devpath) \
-		|| die "no Reloop Jockey 3 on the bus -- nothing to resolve a controller from"
-	resolved=$(hcd_resolve "$dev") \
-		|| die "the controller behind $dev is not a reloadable module (built-in, or not in HCD_MODULES)"
+	# Preferably resolved live, from the device's own position on the bus.
+	# But a dead controller has already disconnected every device on it, so
+	# in the case this verb exists for there is nothing left to walk up
+	# from, and the answer has to come from what was recorded while the
+	# device was still present. hcd_recall() re-validates it against sysfs.
+	origin=bus
+	if dev=$(hcd_usb_devpath); then
+		resolved=$(hcd_resolve "$dev") \
+			|| die "the controller behind $dev is not a reloadable module (built-in, or not in HCD_MODULES)"
+	else
+		dev="(absent)"
+		origin=recalled
+		resolved=$(hcd_recall) \
+			|| die "no Reloop Jockey 3 on the bus and no usable controller on record -- run 'hcd-reset check' while the device is present"
+	fi
 	read -r hcd_mod hcd_slot <<< "$resolved"
 
 	grep -q "^${hcd_mod} " /proc/modules \
@@ -734,7 +792,7 @@ hcd-reset)
 
 	if [ "$mode" = check ]; then
 		echo "hcd-reset ok"
-		echo "module=$hcd_mod slot=$hcd_slot device=$dev"
+		echo "module=$hcd_mod slot=$hcd_slot device=$dev origin=$origin"
 		exit 0
 	fi
 
@@ -754,6 +812,7 @@ hcd-reset)
 	# The module is removed and reloaded rather than the PCI device being
 	# unbound and rebound: a controller in this state has already failed to
 	# answer a command, and unbind runs the same teardown that is stuck.
+	echo "hcd-reset: reloading $hcd_mod at $hcd_slot (controller $origin)"
 	echo "hcd-reset: removing $hcd_mod"
 	modprobe -r "$hcd_mod" || die "modprobe -r $hcd_mod failed -- something still holds it"
 	sleep 2

@@ -43,6 +43,18 @@ the helper's own `HCD_MODULES` allowlist are eligible -- a built-in controller
 resolves to nothing and is refused, which is the right answer since it could
 not be reloaded anyway.
 
+A controller that has died has already disconnected every device on itself,
+so in the case this verb exists for there is nothing left on the bus to walk
+up from. The resolution is therefore recorded to `/run` whenever it succeeds
+while the device *is* present -- which `hcd-reset check` does, and which the
+capability probe does at the start of every run -- and the reset falls back to
+that record. It is re-validated against sysfs before use, the same discipline
+`usb-power on` applies to the port it recorded: the PCI slot must still exist,
+must still be bound to the same module, and that module must still be on the
+allowlist. `/run` is tmpfs, so after a reboot there is no record until
+something resolves the controller with the device attached; the refusal names
+that case.
+
 Every gate is a refusal rather than a warning:
 
 - refuses if root, any mounted filesystem, swap, or the default-route network
