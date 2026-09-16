@@ -116,7 +116,8 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * - jockey3_card_free(), reached through card->private_free once the last file
  *   descriptor is closed, frees the buffers and URBs, destroys rate_mutex and
  *   gives the card slot back. It runs arbitrarily long after the disconnect
- *   and must touch no USB object; see jockey3_free_resources().
+ *   and must attempt no USB operation, though the objects themselves stay
+ *   referenced until it returns; see jockey3_free_resources().
  *
  * struct jockey3_chip lives in card->private_data, so it is freed with the
  * card and outlives the USB binding -- which is what makes it safe for an ALSA
@@ -469,8 +470,12 @@ struct jockey3_pcm_urb_stream {
 /**
  * struct jockey3_chip - per-device driver state
  * @card: the ALSA card; read-only after probe
- * @dev: the USB device; read-only after probe
- * @intf0: interface 0, which the driver is bound to; read-only after probe
+ * @dev: the USB device; read-only after probe. Referenced with usb_get_dev()
+ *	for the chip's lifetime and released by jockey3_free_resources().
+ * @intf0: interface 0, which the driver is bound to; read-only after probe.
+ *	Referenced with usb_get_intf(), as @intf1 is: the card can outlive the
+ *	unbind, and usb_disconnect() would otherwise free both while an ALSA
+ *	entry point was still reading them.
  * @intf1: interface 1, claimed explicitly because it owns EP 0x86
  * @pcm: the PCM device; read-only after probe
  * @rmidi: the rawmidi device; read-only after probe
@@ -3338,11 +3343,14 @@ static int jockey3_initialize(struct jockey3_chip *chip, int model)
  * card->private_free, i.e. after the last file descriptor on the card is
  * closed, which on an unplug is arbitrarily long after jockey3_disconnect().
  *
- *  - No USB object may be touched. The driver holds no reference on the
- *    interfaces, so by this point usb_disconnect() may already have freed
- *    them. That includes @chip->intf0, @chip->intf1 and @chip->dev, and
- *    therefore also the dev_dbg(&chip->intf0->dev, ...) idiom used everywhere
- *    else in this file -- this function deliberately logs nothing.
+ *  - No USB *operation* may be attempted. The interfaces and the device are
+ *    still allocated -- jockey3_probe() holds a reference on each, dropped at
+ *    the end of this function -- but by this point they are unbound and
+ *    detached, and the hardware may be physically gone. Reading them is safe;
+ *    talking to them is not. The dev_dbg(&chip->intf0->dev, ...) idiom used
+ *    everywhere else in this file is deliberately avoided here all the same:
+ *    the interface is no longer bound to this driver, so the attribution the
+ *    idiom exists to provide would be wrong.
  *  - The URBs must already be dead. jockey3_disconnect() kills them, and so
  *    does probe's error path, both before the card is released.
  */
@@ -3382,6 +3390,14 @@ static void jockey3_free_resources(struct jockey3_chip *chip)
 
 	scoped_guard(mutex, &jockey3_devices_mutex)
 		__clear_bit(chip->dev_idx, jockey3_devices_used);
+
+	/*
+	 * Last, and in the reverse of the order jockey3_probe() took them:
+	 * everything above may read these pointers, and nothing below does.
+	 */
+	usb_put_intf(chip->intf1);
+	usb_put_intf(chip->intf0);
+	usb_put_dev(chip->dev);
 }
 
 static void jockey3_card_free(struct snd_card *card)
@@ -3643,9 +3659,29 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->dev_idx = dev_idx;
 
 	chip->card = card;
-	chip->dev = dev;
-	chip->intf0 = intf;
-	chip->intf1 = intf1;
+	/*
+	 * Reference every USB object the chip keeps a pointer to. The card
+	 * outlives the unbind -- snd_card_free_when_closed() defers the release
+	 * until userspace closes the last file descriptor -- and an ALSA entry
+	 * point can still be running inside jockey3_set_rate() when
+	 * usb_disconnect() reaches usb_disable_device(), which device_unregister()s
+	 * each interface. Without a reference of our own that frees struct
+	 * usb_interface under a thread that is still reading it; KASAN caught
+	 * exactly that in ploytec_start_streaming() during a rate change raced
+	 * against an unplug.
+	 *
+	 * These references keep the memory valid. They do not keep the *device*
+	 * usable: after a disconnect the interfaces are unbound and detached from
+	 * the configuration, so the pointers stay safe to read while every
+	 * transfer through them fails. JOCKEY3_FLAG_DISCONNECTED remains what
+	 * tells the driver to stop, and is still the thing to test.
+	 *
+	 * @dev is referenced explicitly rather than leaning on the driver-model
+	 * parent reference that each interface already holds on it.
+	 */
+	chip->dev = usb_get_dev(dev);
+	chip->intf0 = usb_get_intf(intf);
+	chip->intf1 = usb_get_intf(intf1);
 	chip->flags = 0;
 
 	spin_lock_init(&chip->midi_lock);
