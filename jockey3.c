@@ -266,9 +266,9 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * streaming yet" checks that run over the window from jockey3_start_urbs()
  * until the device is proven alive -- distinct from JOCKEY3_WATCHDOG_STALL_MS,
  * which governs silence between two completions on an already-established
- * stream. The grace duration itself is the runtime-tunable cold_start_grace_ms
- * / warm_start_grace_ms pair (see their comment near the top of the file);
- * these clamp a bad write and gate what counts as real streaming.
+ * stream. The grace duration itself is the runtime-tunable start_grace_ms
+ * (see its comment near the top of the file); these clamp a bad write and
+ * gate what counts as real streaming.
  *
  * JOCKEY3_GRACE_MS_MIN is deliberately well above JOCKEY3_WATCHDOG_STALL_MS: a
  * grace at the stall threshold escalates on scheduling jitter by construction.
@@ -305,48 +305,27 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_RECOVERY_WINDOW_MS	60000
 
 /*
- * Grace periods for a PCM direction to reach steady streaming after its URB
- * ring is (re)started, in milliseconds. Two values, because the two kinds of
- * start are physically different:
+ * Grace period for a PCM direction to reach steady streaming after its URB
+ * ring is (re)started, in milliseconds. Sized well above the worst measured
+ * restart latency rather than tuned close to it: the error cost is
+ * asymmetric, since too long only delays an escalation that was coming
+ * anyway, while too short kills a stream that was merely late.
  *
- *   cold -- first stream open, a sample-rate change, a USB reset, or a resume
- *	     from suspend. The device may have to spin its whole audio pipeline
- *	     up from idle; first-completion latency varies from under 1 ms to
- *	     several tens of ms across platforms and packets-per-URB.
- *   warm -- the stall watchdog's own lightweight URB stop/start of a ring that
- *	     was streaming a moment earlier. Only the first URB's wire time plus
- *	     firmware turnaround is needed, so this can be tighter -- but only a
- *	     little. A warm grace close to JOCKEY3_WATCHDOG_STALL_MS turns
- *	     ordinary scheduling jitter on the restart into a needless
- *	     escalation to a full USB reset. The error cost is asymmetric --
- *	     too long only delays an escalation that was coming
- *	     anyway, too short kills a stream that was merely late -- so keep
- *	     warm not far below cold.
- *
- * Both are writable at runtime (0644) and read through
- * jockey3_start_grace_ms(), which clamps to [JOCKEY3_GRACE_MS_MIN,
- * JOCKEY3_GRACE_MS_MAX] so a bad write cannot drive the grace down to or below
- * the stall threshold.
- *
- * TODO: the compiled defaults are placeholders. Size them from measured
- * restart timings, per target, before submission.
+ * Writable at runtime (0644) and read through jockey3_start_grace_ms(),
+ * which clamps to [JOCKEY3_GRACE_MS_MIN, JOCKEY3_GRACE_MS_MAX] so a bad write
+ * cannot drive the grace down to or below the stall threshold.
  */
-static int cold_start_grace_ms = 200;
-static int warm_start_grace_ms = 150;
-module_param(cold_start_grace_ms, int, 0644);
-MODULE_PARM_DESC(cold_start_grace_ms, "Grace (ms) to reach steady streaming after a cold URB start (first open, rate change, USB reset, resume).");
-module_param(warm_start_grace_ms, int, 0644);
-MODULE_PARM_DESC(warm_start_grace_ms, "Grace (ms) to resume streaming after the stall watchdog's warm URB-ring restart. Too low turns scheduling jitter into a needless device reset.");
+static int start_grace_ms = 200;
+module_param(start_grace_ms, int, 0644);
+MODULE_PARM_DESC(start_grace_ms, "Grace (ms) for PCM to reach steady streaming after its URB ring is (re)started.");
 
 /*
- * Current start-grace budget in ms: warm_start_grace_ms for the stall
- * watchdog's own lightweight URB restart, cold_start_grace_ms for every other
- * (re)start. Clamped here so a runtime write to either 0644 parameter cannot
- * drive the grace to or below the stall threshold.
+ * Current start-grace budget in ms, clamped so a runtime write cannot drive
+ * it to or below the stall threshold.
  */
-static unsigned int jockey3_start_grace_ms(bool warm)
+static unsigned int jockey3_start_grace_ms(void)
 {
-	int ms = warm ? READ_ONCE(warm_start_grace_ms) : READ_ONCE(cold_start_grace_ms);
+	int ms = READ_ONCE(start_grace_ms);
 
 	return clamp(ms, JOCKEY3_GRACE_MS_MIN, JOCKEY3_GRACE_MS_MAX);
 }
@@ -378,7 +357,7 @@ static unsigned int jockey3_start_grace_ms(bool warm)
  *	reading as "not alive" -- so the watchdog cannot reuse it without either
  *	reporting a stall at every start or breaking the post-rate-change check.
  *	It doubles as the watchdog's post-start grace baseline (the grace
- *	duration is cold_start_grace_ms / warm_start_grace_ms).
+ *	duration is start_grace_ms).
  * @lock: protects the fields marked "@lock" below; IRQ-safe leaf
  * @dma_off: byte offset into runtime->dma_area, i.e. the hardware pointer; @lock
  * @period_off: bytes accumulated towards the current period; @lock
@@ -494,11 +473,10 @@ struct jockey3_pcm_urb_stream {
  *	callers elsewhere poll rather than block on recovery finishing.
  * @warm_start: true if the current URB ring was last started by the stall
  *	watchdog's own lightweight restart, false for every other (re)start
- *	(first open, rate change, USB reset, resume, probe). Selects
- *	warm_start_grace_ms vs cold_start_grace_ms for the post-start grace.
- *	Chip-wide, not per-direction: jockey3_start_urbs() restarts the shared
- *	ring for both directions at once, so a warm restart triggered by one
- *	direction's stall puts both on the warm grace. Plain bool, written by
+ *	(first open, rate change, USB reset, resume, probe). Both kinds share
+ *	one start_grace_ms; this only labels which one is in effect, for
+ *	dev_dbg(). Chip-wide, not per-direction: jockey3_start_urbs() restarts
+ *	the shared ring for both directions at once. Plain bool, written by
  *	jockey3_start_urbs() and read unlocked by the watchdog via
  *	WRITE_ONCE()/READ_ONCE().
  * @midi_in_substream: open MIDI IN substream, or NULL; @midi_lock
@@ -533,7 +511,7 @@ struct jockey3_chip {
 	atomic_t recovery_attempts;
 	atomic64_t recovery_window_start;
 	atomic_t recovery_in_progress;
-	bool warm_start;	/* set by jockey3_start_urbs(): warm vs cold grace */
+	bool warm_start;	/* set by jockey3_start_urbs(): warm vs cold, for dev_dbg() only */
 
 	/* MIDI Path */
 	struct snd_rawmidi_substream *midi_in_substream;
@@ -1471,7 +1449,7 @@ static unsigned long jockey3_watchdog_next_delay_ms(struct jockey3_chip *chip,
 	u64 last = atomic64_read(&urb_stream->last_callback_time);
 	u64 started = atomic64_read(&urb_stream->urbs_started_time);
 	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
-	unsigned int grace_ms = jockey3_start_grace_ms(READ_ONCE(chip->warm_start));
+	unsigned int grace_ms = jockey3_start_grace_ms();
 	u64 now, remaining_ns;
 
 	if (!started)
@@ -1700,8 +1678,8 @@ static void jockey3_submit_failed(struct jockey3_chip *chip, int err,
  * @chip: driver state
  * @warm: true only for the stall watchdog's own lightweight restart of a ring
  *	that was streaming a moment earlier; false for a cold start (first open,
- *	rate change, USB reset, resume, probe). Selects warm_start_grace_ms vs
- *	cold_start_grace_ms for the post-start grace and is recorded chip-wide in
+ *	rate change, USB reset, resume, probe). Both share start_grace_ms; this
+ *	only labels the restart for dev_dbg() and is recorded chip-wide in
  *	@chip->warm_start.
  *
  * Clears the stop fences and error budgets, then submits the full URB ring for
@@ -1732,7 +1710,7 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
 		return -ESHUTDOWN;
 
 	dev_dbg(&chip->intf0->dev, "Starting all URBs (%s start, grace %u ms)\n",
-		warm ? "warm" : "cold", jockey3_start_grace_ms(warm));
+		warm ? "warm" : "cold", jockey3_start_grace_ms());
 
 	/*
 	 * Clear the error budget as well: a stream that was given up on must get
@@ -2127,7 +2105,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 	bool log_onset = false, log_recovery = false;
 	u64 now, last, started, age_ns, outage_ns = 0;
 	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
-	unsigned int grace_ms = jockey3_start_grace_ms(READ_ONCE(chip->warm_start));
+	unsigned int grace_ms = jockey3_start_grace_ms();
 	bool open = false, startup = false;
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
@@ -2493,13 +2471,13 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	}
 
 	/*
-	 * Warm grace, and the strict health gate: the light restart above was of
-	 * a ring that was streaming moments earlier, so a real resume shows a
-	 * proper completion cadence quickly, while a trickle of implausibly fast
-	 * FIFO-drain completions must NOT count -- passing on those escalates a
-	 * merely jittery restart to the USB reset below.
+	 * Start grace, and the strict health gate: the light restart above was
+	 * of a ring that was streaming moments earlier, so a real resume shows
+	 * a proper completion cadence quickly, while a trickle of implausibly
+	 * fast FIFO-drain completions must NOT count -- passing on those
+	 * escalates a merely jittery restart to the USB reset below.
 	 */
-	grace = jockey3_start_grace_ms(true);
+	grace = jockey3_start_grace_ms();
 	if (jockey3_wait_urb_stream_started(chip, direction, grace, true, true)) {
 		dev_dbg(&chip->intf0->dev,
 			"%s stream recovered via light URB restart (%s)\n", type, context);
@@ -2553,7 +2531,7 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	if (ret < 0)
 		goto out;
 
-	grace = jockey3_start_grace_ms(false);
+	grace = jockey3_start_grace_ms();
 	if (!jockey3_wait_urb_stream_started(chip, direction, grace, false, true))
 		dev_err(&chip->intf0->dev,
 			"%s stream still stalled after full USB reset; hardware may need power-cycling (%s)\n",
@@ -2803,12 +2781,12 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 	 * otherwise hold the mutex for a whole start grace, and recovery may
 	 * escalate to a queued USB reset, whose jockey3_pre_reset() and
 	 * jockey3_post_reset() need to acquire the mutex themselves to complete.
-	 * Cold grace and the plain alive check: this is a stream being (re)opened,
-	 * not a warm restart of one that was just running.
+	 * Start grace and the plain alive check: this is a stream being
+	 * (re)opened, not a warm restart of one that was just running.
 	 */
 	if (stalled)
 		stalled = !jockey3_wait_urb_stream_started(chip, substream->stream,
-							  jockey3_start_grace_ms(false), false,
+							  jockey3_start_grace_ms(), false,
 							  false);
 
 	if (stalled) {
@@ -3118,9 +3096,9 @@ static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
 	 * post_reset() to take it. Playback goes first: if both died, its
 	 * restart of the shared ring makes the capture call a no-op.
 	 *
-	 * Cold grace -- a rate change reprograms the endpoints over EP0.
+	 * Start grace -- a rate change reprograms the endpoints over EP0.
 	 */
-	grace = jockey3_start_grace_ms(false);
+	grace = jockey3_start_grace_ms();
 	playback_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_PLAYBACK,
 							 grace, false, true);
 	capture_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE,
