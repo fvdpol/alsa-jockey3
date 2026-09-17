@@ -148,7 +148,13 @@ def run(c, direction, device):
 
     c.metric("injections_requested", injections)
     c.metric("injections_confirmed", confirmed)
-    c.metric("xruns", watch.xruns)
+    # Named xruns_injected, not xruns: runner.py rebadges a PASS as PASS_XRUN
+    # whenever a case's "xruns" metric is nonzero, to flag an incidental
+    # hiccup worth a longitudinal look (see lib/results.py). Here the xrun
+    # count is the thing under test, not a side effect, so that rebadge would
+    # fire on every successful run. Any injection landing that this case did
+    # not itself request is still failed explicitly, below.
+    c.metric("xruns_injected", watch.xruns)
     c.metric("avail_max", watch.avail_max)
 
     tool = "aplay" if direction == "playback" else "arecord"
@@ -158,6 +164,9 @@ def run(c, direction, device):
     if confirmed < injections:
         c.fail(f"only {confirmed}/{injections} injections were confirmed "
                f"to land")
+    if watch.xruns > injections:
+        c.fail(f"{watch.xruns} xruns recorded for {injections} injections "
+               f"-- unexpected additional xrun(s)")
 
 
 def main():
