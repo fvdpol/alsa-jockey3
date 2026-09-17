@@ -14,14 +14,47 @@ The Reloop Jockey 3 Remix uses a proprietary USB 2.0 protocol for audio and MIDI
 ## Control Transfers (Initialization)
 The device follows the standard Ploytec handshake:
 1. **Wake-up**: 
-   - `c0 56 ...` (Request 0x56) -> Read 15 bytes (Firmware Version).
+   - `c0 56 ...` (Request 0x56) -> Firmware/hardware version.
    - `c0 49 ...` (Request 0x49) -> Read 1 byte (Status).
+   The version reply is **three bytes** regardless of what the host asks
+   for. The captures show all three hosts requesting a different `wLength`
+   and the device answering short every time: macOS asks for 8, Windows for
+   15, this driver for 3, and all of them get the same three bytes back.
+
+   | Byte | Observed | Meaning |
+   |---|---|---|
+   | 0 | `0x31` on every unit seen | suspected hardware model/revision -- an educated guess, not confirmed |
+   | 1 | `0x01` | firmware major |
+   | 2 | `0x03` or `0x06` | firmware minor (v1.0.3 and v1.0.6 units) |
+
+   The driver packs these into one `u32` as `(buf[0] << 16) | (buf[1] << 8) |
+   buf[2]` and reports it as `Firmware 0x31 v1.0.6`. Byte 0 is *not* a
+   reliable Remix vs Master Edition signal -- the USB product ID is; see
+   `re/jockey3_hardware.md`.
+
 2. **Set Alternate Setting**:
    - Interface 0 -> Alt 1
    - Interface 1 -> Alt 1
 3. **Sample Rate**:
    - `22 01 00 01 86 00 03 00` (SET_CUR on EP 0x86) -> 3-byte LE rate (e.g., `44 ac 00` for 44.1k).
    - `22 01 00 01 05 00 03 00` (SET_CUR on EP 0x05) -> 3-byte LE rate.
+   The rate can also be read back with Request 0x81
+   (`bmRequestType 0xA2`, `wValue 0x0100`), and there the `wIndex` selects
+   what is being asked about:
+
+   | `wIndex` | Addresses | Used for |
+   |---|---|---|
+   | `0x0000` | the device as a whole | reading the live rate before programming |
+   | `0x0086` | the capture endpoint | verifying the rate just programmed |
+   | `0x0005` | the playback endpoint | written to, never verified from |
+
+   The device answers all three. The vendor drivers read the live rate
+   device-wide and always verify against the capture endpoint, never against
+   the playback endpoint; the device-wide form tracks the programmed value
+   through 44100, 48000, 88200 and 96000 Hz. The endpoint the burst ends on
+   and verifies from turned out to matter -- see
+   `re/usb/init_timing_comparison.md`.
+
 4. **Confirm Status**:
    - Write back the status byte read in step 1 with bit 5 set (Request 0x49, bmRequestType 0x40).
    - The observed byte is `0x32`, so bits 1 and 4 are set as well and are not

@@ -54,6 +54,12 @@ identity for a loaded module here.
 
 ## Finding 1: the rate-write burst ends on the wrong endpoint
 
+> **Acted on; the "this driver" row below is historical.** The trailing
+> `0x05` write was dropped and `ploytec_get_rate()` gained an endpoint
+> argument, so the driver now ends the burst on `0x86` and verifies from it,
+> as the vendors do. The row is kept because the rest of the finding is the
+> evidence for that change.
+
 This is the hardest result in the data: an invariant that holds in all 58
 vendor sequences, at every rate, on both platforms, and which we violate.
 
