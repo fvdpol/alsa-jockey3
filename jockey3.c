@@ -227,10 +227,9 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * by that direction's own live N (struct jockey3_pcm_urb_stream's @n_shift):
  * the worst-case URB span scales linearly with N (N packet intervals instead
  * of one), so scaling the window the same way keeps the same margin against
- * it at any N instead of eating into a fixed margin as N grows (a fixed 1 ms
- * window left ~77% margin at N=1 but only ~9% at N=4). N is always a power
- * of two (jockey3_pcm_hw_params() only ever derives one), so this is a shift
- * rather than a multiply.
+ * it at any N instead of eating into a fixed margin as N grows. N is always a
+ * power of two (jockey3_pcm_hw_params() only ever derives one), so this is a
+ * shift rather than a multiply.
  */
 #define JOCKEY3_LIVENESS_WINDOW_NS(shift)	((u64)NSEC_PER_MSEC << (shift))
 
@@ -312,31 +311,32 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  *
  *   cold -- first stream open, a sample-rate change, a USB reset, or a resume
  *	     from suspend. The device may have to spin its whole audio pipeline
- *	     up from idle; first-completion latency was measured from under
- *	     1 ms to several tens of ms across platforms and packets-per-URB.
+ *	     up from idle; first-completion latency varies from under 1 ms to
+ *	     several tens of ms across platforms and packets-per-URB.
  *   warm -- the stall watchdog's own lightweight URB stop/start of a ring that
  *	     was streaming a moment earlier. Only the first URB's wire time plus
  *	     firmware turnaround is needed, so this can be tighter -- but only a
  *	     little. A warm grace close to JOCKEY3_WATCHDOG_STALL_MS turns
  *	     ordinary scheduling jitter on the restart into a needless
- *	     escalation to a full USB reset (observed: a warm restart finishing
- *	     ~1 ms past a 50 ms budget escalated for no reason). The error cost
- *	     is asymmetric -- too long only delays an escalation that was coming
+ *	     escalation to a full USB reset. The error cost is asymmetric --
+ *	     too long only delays an escalation that was coming
  *	     anyway, too short kills a stream that was merely late -- so keep
  *	     warm not far below cold.
  *
- * Both are writable at runtime (0644) so a hardware sweep can find good values
- * per target without a rebuild. The compiled defaults are placeholders, not
- * measured figures. Read through jockey3_start_grace_ms(), which clamps to
- * [JOCKEY3_GRACE_MS_MIN, JOCKEY3_GRACE_MS_MAX] so a bad write cannot drive the
- * grace down to or below the stall threshold.
+ * Both are writable at runtime (0644) and read through
+ * jockey3_start_grace_ms(), which clamps to [JOCKEY3_GRACE_MS_MIN,
+ * JOCKEY3_GRACE_MS_MAX] so a bad write cannot drive the grace down to or below
+ * the stall threshold.
+ *
+ * TODO: the compiled defaults are placeholders. Size them from measured
+ * restart timings, per target, before submission.
  */
 static int cold_start_grace_ms = 200;
 static int warm_start_grace_ms = 150;
 module_param(cold_start_grace_ms, int, 0644);
-MODULE_PARM_DESC(cold_start_grace_ms, "Grace (ms) to reach steady streaming after a cold URB start (first open, rate change, USB reset, resume). Placeholder default; tune per target.");
+MODULE_PARM_DESC(cold_start_grace_ms, "Grace (ms) to reach steady streaming after a cold URB start (first open, rate change, USB reset, resume).");
 module_param(warm_start_grace_ms, int, 0644);
-MODULE_PARM_DESC(warm_start_grace_ms, "Grace (ms) to resume streaming after the stall watchdog's warm URB-ring restart. Placeholder default; keep close to cold_start_grace_ms.");
+MODULE_PARM_DESC(warm_start_grace_ms, "Grace (ms) to resume streaming after the stall watchdog's warm URB-ring restart. Too low turns scheduling jitter into a needless device reset.");
 
 /*
  * Current start-grace budget in ms: warm_start_grace_ms for the stall
@@ -1939,10 +1939,9 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate, bool c
 	 * Program the rate even when the device already reports it. Skipping the
 	 * write on a match would silently elide it during probe every time,
 	 * since initialization always asks for 44100 Hz and that is also the
-	 * device's power-on default. Every macOS and Windows initialization
-	 * programs the rate unconditionally, to a device already reporting it,
-	 * and only then reads it back -- the write evidently does more than set
-	 * a frequency.
+	 * device's power-on default. The write evidently does more than set a
+	 * frequency; no vendor initialization omits it. See
+	 * re/usb/init_timing_comparison.md.
 	 *
 	 * Callers that want to avoid a redundant rate change already check
 	 * against chip->current_rate before getting here.
@@ -3276,15 +3275,11 @@ static int jockey3_initialize(struct jockey3_chip *chip, int model)
 	 * power-off does, because the device is self-powered and a VBUS cut is
 	 * merely a cable unplug to it.
 	 *
-	 * Bisected on hardware over 100 cold boots: the device needs between 144
-	 * and 156 ms after enumeration, sharply -- below it the engine fails to
-	 * start every time, above it never. 250 ms is chosen rather than the
-	 * smallest passing value because the ~124 ms this driver otherwise takes
-	 * to reach its first transfer is host-dependent (USB core enumeration
-	 * plus the card, PCM and MIDI registration above), so a value that only
-	 * tops that up would erode on a faster machine. 250 ms satisfies the
-	 * requirement on its own. For reference the vendor drivers wait far
-	 * longer still: Windows ~300 ms from SET_ADDRESS, macOS over a second.
+	 * The threshold is sharp: the device needs between 144 and 156 ms after
+	 * enumeration, below which the engine fails to start every time. 250 ms
+	 * rather than the smallest passing value, because the time this driver
+	 * otherwise takes to reach its first transfer is host-dependent, so a
+	 * value that only topped that up would erode on a faster machine.
 	 *
 	 * Placed here rather than in ploytec_initialize_device() because that
 	 * runs twice per probe -- once below, once via jockey3_set_rate() -- and
@@ -3898,14 +3893,8 @@ static int jockey3_post_reset(struct usb_interface *intf)
 			jockey3_initialize_ploytec(chip, NULL);
 
 			/*
-			 * Re-apply the rate unconditionally. Reading it first
-			 * and skipping on a match repeated the probe-time
-			 * mistake: a reset returns the device to 44100 Hz, so
-			 * whenever the stream was already at 44100 Hz the
-			 * comparison matched and nothing was reprogrammed. The
-			 * captures show the rate does not survive even a bus
-			 * re-enumeration, and no vendor sequence omits the
-			 * programming. The read stays as a diagnostic.
+			 * Re-apply the rate unconditionally, as the vendor
+			 * sequence does. The read below is a diagnostic only.
 			 */
 			if (ploytec_get_rate(chip->intf0, chip->xfer_buf,
 					     PLOYTEC_RATE_IDX_DEVICE, &hw_rate) == 0 &&
@@ -4049,12 +4038,8 @@ static struct usb_driver jockey3_driver = {
 };
 
 /*
- * The codec's bit-spread lookup tables are module-global and written without
- * any locking, so they are built exactly once here rather than from
- * jockey3_initialize_ploytec(). That runs at probe and again after every
- * device reset, and rate_mutex is per chip: with two Jockey 3s attached, one
- * resetting would rewrite the tables while the other's URB completion handlers
- * were reading them in softirq context.
+ * The codec's bit-spread lookup tables are module-global and unlocked, so they
+ * are built once per module rather than per device.
  */
 static int __init jockey3_module_init(void)
 {
