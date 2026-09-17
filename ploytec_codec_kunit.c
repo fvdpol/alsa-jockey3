@@ -154,10 +154,7 @@ static void ploytec_oracle_decode(u8 *dest, const u8 *src)
 	}
 }
 
-/*
- * xorshift64*, mirrored bit-for-bit by tests/codec/ploytec_model.py so the
- * kernel tests and the user-space bench see identical data.
- */
+/* xorshift64*, seeded per test; see the determinism note at the top of this file. */
 struct ploytec_test_rng {
 	u64 state;
 };

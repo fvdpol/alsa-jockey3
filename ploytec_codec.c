@@ -15,7 +15,7 @@
  *
  * The "bit-plane" layout implemented below is not an arbitrary scramble; it is
  * a direct image of how the hardware moves audio. On the Jockey 3 the USB
- * device controller (Philips ISP1583) runs in split-bus mode, and the serial
+ * device controller (NXP ISP1583) runs in split-bus mode, and the serial
  * data lines of the capture ADCs are wired straight onto the low bits of its
  * 16-bit DMA bus - one converter per bus bit. The controller samples the whole
  * bus once per bit clock and streams the result to the host, so every byte on
@@ -539,8 +539,7 @@ static inline void ploytec_decode_s24_3le_pack32(u8 *dest, const u8 *src)
 
 /*
  * Bind the build's chosen implementation to a single pair of names, so that
- * everything below is free of conditional compilation (see
- * Documentation/process/coding-style.rst, "Conditional Compilation").
+ * everything below is free of conditional compilation.
  */
 #if IS_ENABLED(CONFIG_SND_USB_JOCKEY3_REFERENCE_CODEC)
 

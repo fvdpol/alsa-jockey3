@@ -4,15 +4,17 @@
  *
  * GENERATED FILE - DO NOT EDIT.
  *
- * Produced by tests/codec/genvectors.py from tests/codec/ploytec_model.py, an
- * independent model of the wire format. Regenerate with:
+ * Produced by genvectors.py from ploytec_model.py, an independent model
+ * that derives the wire format structurally rather than from this driver's
+ * code, so the two cannot agree on a wrong answer. The same vectors drive a
+ * user-space bench, which is why they live in a header of their own.
  *
- *     cd tests/codec && ./genvectors.py
+ * Both generator and model belong to the driver's test tooling and are not
+ * part of the kernel tree. They live under tests/codec at
+ * https://github.com/fvdpol/alsa-jockey3, where ./genvectors.py regenerates
+ * this file.
  *
  * ploytec_model.py sha256: 09fdf2831f9de572ee3a0e06b20807ee6235fc67ac79481469d616e965e8f0f3
- *
- * Shared by the KUnit suite (ploytec_codec_kunit.c) and the user-space
- * test bench, so both are held to an identical definition of the format.
  *
  * Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
  */
