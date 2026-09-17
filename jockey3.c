@@ -1181,11 +1181,10 @@ static void jockey3_capture_callback(struct urb *urb)
  *
  * Every outgoing playback packet reserves one slot for MIDI. This returns the
  * byte for it, through a leaky-bucket limiter holding the stream to roughly
- * 2500 bytes/sec: sustained MIDI OUT above that was measured to make the
- * control surface stop responding to updates, well below the 31250 bps line
- * rate. The ceiling is conservative and still ample -- a full-panel update of
- * all 46 LEDs, rings and VU bars is about 138 bytes. The idle byte is returned
- * when there is nothing to send or no budget.
+ * 2500 bytes/sec. The hardware carries the full MIDI line rate of 3125
+ * bytes/sec, but sustained traffic at it makes the control surface stop
+ * responding to updates, so the limit sits below that. The idle byte is
+ * returned when there is nothing to send or no budget.
  *
  * midi_lock is held across snd_rawmidi_transmit() so
  * chip->midi_out_substream cannot change under us. The order is safe because
@@ -1206,7 +1205,7 @@ static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
 
 	/*
 	 * Rate limit MIDI to ~2500 bytes/sec -- see the kernel-doc above for why
-	 * this is well under the device's raw MIDI line rate.
+	 * this sits below the device's 3125 bytes/sec MIDI line rate.
 	 */
 	chip->midi_out_acc += 2500;
 	if (chip->midi_out_acc < chip->midi_rate_divisor)

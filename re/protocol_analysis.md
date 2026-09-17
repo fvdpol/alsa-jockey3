@@ -82,7 +82,16 @@ Each 512-byte sub-packet contains:
   - *Capture Analysis*: Filling this gap with `0xFD` spams the device's internal parser and causes buffer overflows/truncation.
 
 **MIDI Timing & Protocol Constraints**:
-- **Rate Limit**: While the official Windows driver uses a conservative ~500 bytes/sec, the hardware reliably supports up to **~3200 bytes/sec** (approximately one byte per USB sub-packet at 44.1/48kHz). Rates above 3500 bytes/sec cause erratic behavior and buffer overflows. The Linux driver settles on the standard MIDI rate of **3125 bytes/sec** for optimal responsiveness and stability.
+- **Rate Limit**: While the official Windows driver uses a conservative ~500 bytes/sec, the hardware reliably supports up to **~3200 bytes/sec** (approximately one byte per USB sub-packet at 44.1/48kHz). Rates above 3500 bytes/sec cause erratic behavior and buffer overflows.
+
+  The standard MIDI line rate of **3125 bytes/sec** sits just under that
+  ceiling, and a burst at it is fine. *Sustained* traffic at that rate is
+  not: the control surface starts to lock up temporarily, so the ceiling is
+  a limit on what the wire will carry rather than on what the firmware will
+  keep up with. The Linux driver was empirically backed off to
+  **2500 bytes/sec** (`jockey3_get_next_midi_out_byte()`), which stays clear
+  of the instability and is still ample -- a full-panel update of all 46
+  LEDs, rings and VU bars is about 138 bytes.
 - **Encapsulation**: Exactly one MIDI byte per 512-byte sub-packet.
 - **Running Status**: **NOT SUPPORTED** by hardware. Every MIDI message must include its status byte (e.g., `0x90`). The Linux driver implements a "Running Status Expander" to ensure compatibility with standard ALSA MIDI streams.
 
