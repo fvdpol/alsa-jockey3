@@ -71,9 +71,10 @@ int ploytec_get_firmware(struct usb_interface *intf, void *xfer_buf, u32 *fw_ver
 	if (ret < 0)
 		return ret;
 
-	// device with firmware v1.0.3  returns: 0x31, 0x01, 0x03
-	// device with firmware v1.0.6  returns: 0x31, 0x01, 0x06
-	// buf[0] = 0x31, educated guess this may be hardware model/revision
+	/*
+	 * Three-byte reply: a suspected hardware revision, then the firmware
+	 * major and minor. See re/protocol_analysis.md.
+	 */
 	if (fw_version)
 		*fw_version = (buf[0] << 16) | (buf[1] << 8) | buf[2];
 	return 0;
@@ -131,17 +132,17 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 	int ret;
 
 	/*
-	 * USB trace shows we need to read firmware version after power-up. The
-	 * value itself is unused, but this is the first EP0 transfer of the
-	 * sequence and therefore the last point at which the usb_set_interface()
-	 * calls below can still be avoided -- which is what makes its return
-	 * load-bearing. usb_set_interface() disables the interface's endpoints
-	 * before it sends SET_INTERFACE and does not re-enable them if that
-	 * request fails, so calling it on a device whose control endpoint has
-	 * already gone silent leaves every endpoint of interface 0 permanently
-	 * disabled, and usb_submit_urb() returns -ENOENT until the device is
-	 * reset. A device that merely refuses the request is fine; one that has
-	 * stopped answering is not.
+	 * The vendors read the firmware version after power-up and the value
+	 * is unused here, but this is the sequence's first EP0 transfer and so
+	 * the last point at which the usb_set_interface() calls below can
+	 * still be avoided -- which is what makes its return load-bearing.
+	 * usb_set_interface() disables the interface's endpoints before it
+	 * sends SET_INTERFACE and does not re-enable them if that request
+	 * fails, so calling it on a device whose control endpoint has already
+	 * gone silent leaves every endpoint of interface 0 permanently
+	 * disabled and usb_submit_urb() returning -ENOENT until the device is
+	 * reset. A device that merely refuses the request is fine; one that
+	 * has stopped answering is not.
 	 */
 	ret = ploytec_get_firmware(intf, xfer_buf, fw_version);
 	if (ret < 0) {
@@ -154,9 +155,8 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 	 * Deactivate the audio interfaces before reactivating them, but only
 	 * when the device is already running. On a device that has just been
 	 * enumerated the interfaces are at alt 0 anyway, and neither vendor
-	 * driver touches alt 0 there: all 29 captured cold initializations go
-	 * straight to alt 1. macOS does bounce on a rate change, and takes
-	 * interface 1 down first, which is the order used here.
+	 * driver touches alt 0 there. macOS does bounce on a rate change, and
+	 * takes interface 1 down first, which is the order used here.
 	 */
 	if (bounce_alt0) {
 		ret = usb_set_interface(dev, 1, 0);
@@ -200,23 +200,17 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 }
 
 /**
- * ploytec_start_streaming - Trigger the device to start streaming as observed in USB traces.
+ * ploytec_start_streaming - Trigger the device to start streaming
  * @intf: USB interface
  * @xfer_buf: Temporary transfer buffer
  *
  * Reads the status byte and writes it back with the STREAMING bit set. The
  * write is unconditional, which is the whole point: the device already
- * reports STREAMING set after a rate change, so a conditional write is never
- * issued there at all.
- *
- * Every macOS and Windows rate change ends with this write -- 115 of 115
- * across the OpenVizsla corpus, always the same value, always from a device
- * whose own status read in the same sequence had already returned it. This
- * driver instead ended a rate change with a second status *read*, and its
- * capture endpoint fails to restart after roughly one rate change in six
- * (against one in 58 on macOS and none in 56 on Windows). The write
- * evidently does more than set a bit, the same lesson the rate writes taught
- * in jockey3_set_rate(). See re/rate_change_stall.md.
+ * reports STREAMING set after a rate change, so a conditional write would
+ * never be issued there at all. Ending a rate change with a second status
+ * read instead left the capture endpoint failing to restart after roughly one
+ * rate change in six, so the write evidently does more than set a bit -- see
+ * re/rate_change_stall.md.
  *
  * The vendors do not read the status back afterwards, so neither do we.
  *
@@ -246,11 +240,9 @@ int ploytec_start_streaming(struct usb_interface *intf, void *xfer_buf)
  *	PLOYTEC_RATE_IDX_PCM_IN to verify afterwards
  * @rate: Pointer to store the rate
  *
- * The wIndex is not cosmetic. The vendor drivers always read the current rate
- * with a wIndex of zero and always verify with the capture endpoint, and the
- * captures show the device answering both. Reading the device-wide form
- * tracks the live rate: in capture_macos_rate_change it follows the
- * programmed value through 44100, 48000, 88200 and 96000 Hz.
+ * The wIndex is not cosmetic. The device answers both forms: the vendor
+ * drivers read the live rate device-wide and always verify against the
+ * capture endpoint.
  *
  * Return: 0 on success, negative errno on failure.
  */
@@ -278,23 +270,14 @@ int ploytec_get_rate(struct usb_interface *intf, void *xfer_buf, u16 index, u32 
  * @cold_init: true when this programs the rate as part of bringing the device
  *	up, false when it changes the rate of a device already running
  *
- * The vendor drivers use two shapes here, and the difference is not cosmetic
- * -- see re/usb/init_timing_comparison.md. Both end the burst on the capture
- * endpoint and verify from it, which is the invariant that holds across all
- * 58 captured vendor sequences on both platforms:
- *
- *	cold init:	          <14 ms>  86 05 86 05 86  read back <50 ms>
- *	rate change:	<50 ms> 86 <10 ms>  86 05 86 05 86  read back <50 ms>
- *
- * The write count itself is not load-bearing -- the captures show between
- * five and seven, varying within a single platform -- but no vendor sequence
- * ends the burst anywhere other than the capture endpoint, and none verifies
- * against the playback endpoint.
- *
- * The ~50 ms windows are periods in which the vendor host sends nothing at
- * all: the raw traces show no tokens, no NAKs and no retries in them, so the
- * driver is waiting rather than polling. Their width is stable to under 4%
- * across 58 sequences and does not vary with the sample rate.
+ * The vendor drivers use two shapes here, and the difference is not cosmetic.
+ * A cold init starts programming the rate after a short gap; a rate change
+ * waits longer, writes once, pauses, then repeats the burst. Both end the
+ * burst on the capture endpoint and verify from it, which is the invariant
+ * that holds across every captured vendor sequence on both platforms; the
+ * write count itself is not load-bearing. The sleeps below stand in for
+ * windows in which the vendor host sends nothing at all -- it is waiting, not
+ * polling. See re/usb/init_timing_comparison.md.
  *
  * Return: 0 on success (including when the post-write rate verification
  * detects a mismatch, which is only logged), negative errno if a control
@@ -323,18 +306,10 @@ int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate, bool 
 	buf[2] = (rate >> 16) & 0xFF;
 
 	if (cold_init) {
-		/*
-		 * macOS leaves ~14 ms between reading the rate and starting to
-		 * program it on a fresh device, and no separate first write.
-		 */
+		/* A fresh device gets a short gap and no separate first write. */
 		usleep_range(14000, 15000);
 	} else {
-		/*
-		 * A rate change waits before touching the rate at all. Measured
-		 * at 50.2-51.2 ms on macOS; Windows leaves the same window a
-		 * little earlier in its sequence. See the quiet-window note
-		 * above.
-		 */
+		/* A rate change waits before touching the rate at all. */
 		usleep_range(50000, 51000);
 
 		ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_TYPE,
@@ -345,10 +320,7 @@ int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate, bool 
 			return ret;
 		}
 
-		/*
-		 * A rate change writes once, pauses, then repeats the burst.
-		 * Observed at 10.5-11.2 ms on macOS and 6-23 ms on Windows.
-		 */
+		/* Write once, pause, then repeat the burst. */
 		usleep_range(10000, 11000);
 	}
 
@@ -372,10 +344,10 @@ int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate, bool 
 	}
 
 	/*
-	 * Every vendor sequence goes quiet for ~50 ms between verifying the rate
-	 * and programming the status byte, and the caller's next step is
-	 * ploytec_start_streaming(). Measured at 50.2-51.1 ms across both
-	 * platforms and independent of the rate, so there is nothing to scale.
+	 * Every vendor sequence goes quiet between verifying the rate and
+	 * programming the status byte, which is the caller's next step in
+	 * ploytec_start_streaming(). The window does not vary with the rate,
+	 * so there is nothing to scale.
 	 */
 	usleep_range(50000, 51000);
 

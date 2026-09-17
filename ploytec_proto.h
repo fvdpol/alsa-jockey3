@@ -39,9 +39,9 @@
 #define PLOYTEC_REQ_GET_RATE_TYPE	0xA2	// bmRequestType to get current sample rate
 
 /*
- * wIndex values for the rate requests. The vendor drivers read the current
- * rate with a wIndex of zero and read it back, after programming, from the
- * capture endpoint; both forms are needed.
+ * wIndex values for the rate requests: zero addresses the device as a whole,
+ * an endpoint address addresses one stream. Both forms are needed -- see
+ * re/protocol_analysis.md.
  */
 #define PLOYTEC_RATE_IDX_DEVICE		0x0000	// device-wide, used before programming
 #define PLOYTEC_RATE_IDX_PCM_IN		(PLOYTEC_EP_NUM_PCM_IN | USB_DIR_IN)	// 0x86
