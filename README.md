@@ -24,10 +24,12 @@ Unlike most modern DJ controllers, the Reloop Jockey 3 does not use a class-comp
 - Rate switching
 
 **Pending / In Progress**
-- Capture-endpoint restart reliability after sample-rate changes. Now measured
-  rather than anecdotal: on `x86_64-debug`, 20 rate changes produce 15–19
-  capture stalls, **all of which recover, with zero failures**. The mitigation
-  works; the stall rate itself is still unexplained.
+- Rate-change capture-restart reliability: root-caused and fixed (`5505b28`)
+  — 0 device resets validated over 20,000 rate changes on `x86_64-prod`,
+  4,000 on `arm64-prod`. Two narrower questions remain: whether the device
+  can wedge under back-to-back resets with no gap between them, and whether
+  an observed 48 kHz→96 kHz mid-stream stall is real or an artifact of
+  serial-console logging.
 - `PM: parent 1-13:1.0 should not be sleeping` — emitted for all four of this
   device's endpoints during suspend/resume, on a production kernel, in two
   separate runs. A `dev_warn` from the PM core meaning a child was resumed
@@ -39,7 +41,6 @@ Unlike most modern DJ controllers, the Reloop Jockey 3 does not use a class-comp
   (implemented) checks output presence and channel map via loopback, but the
   round trip is analog, so it cannot settle bit-exactness either; that stays
   open.
-- Long-term stability testing
 - Kernel tree integration (eventual goal)
 
 See [`docs/test_status.md`](docs/test_status.md) for hardware test coverage by
