@@ -14,6 +14,10 @@ Unlike most modern DJ controllers, the Reloop Jockey 3 does not use a class-comp
   - Playback: 4 channels
   - Capture: 6 channels
 - **Sample Rates**: Dynamic switching between 44.1 kHz, 48 kHz, 88.2 kHz, and 96 kHz
+- **USB packet coalescing**: multiple audio packets per USB transfer, tunable
+  to run at low latency with small buffers or reduced overhead with larger ones
+- **Stream watchdog**: detects a stalled URB stream and recovers it automatically,
+  escalating to a full USB reset only if a lighter restart doesn't resolve it
 - **Low-level USB protocol** reverse-engineered via OpenVizsla + Windows/macOS driver analysis
 
 ## Current Status
