@@ -777,7 +777,7 @@ cases:
     args: [playback]
     params:
       rate: 48000
-      seconds: 6
+      seconds: 10
       injections: 3
     metrics:
       - injections_requested
@@ -815,6 +815,25 @@ cases:
       also wants capture coverage overrides args: [capture] for its own
       entry, the same way JT-PCM-002/004 both point at cases/pcm.py with
       different args rather than being two separate exec files.
+
+      seconds: 10, not 6. The three injections land at run_start +
+      seconds*(i+1)/(injections+1), so the last one was only seconds/4 away
+      from the clip's natural end -- 1.5s of margin at seconds=6. That
+      margin has to absorb priv.xrun_inject()'s own call latency (it shells
+      out to jockey3-testctl under sudo), and on arm64-debug that call is
+      slow enough under KASAN's instrumentation to eat all of it: the third
+      injection lands after aplay/arecord has already moved on to DRAINING,
+      "xrun counter did not rise" (only 2/3 confirmed), every run.
+      Confirmed 2026-09-19 that seconds=10 (2.5s of margin) clears it
+      reliably. This is not the same bug pcm_xrun_recovery.py's run_start
+      comment describes -- that one was compounding drift across
+      iterations, already fixed by scheduling every target from run_start
+      instead of "now" -- this is a single injection's call latency
+      against too tight a margin, on every target, not just the slow one
+      that happened to surface it. What this case is testing is whether an
+      injected xrun is confirmed and recovered from, not how close to the
+      drain edge that can be cut, so the fix is more slack, not a
+      per-target override.
 
   - id: JT-PCM-010
     title: Packet/URB coalescing (N) validation sweep
@@ -901,7 +920,7 @@ cases:
     args: [capture]
     params:
       rate: 48000
-      seconds: 6
+      seconds: 10
       injections: 3
     metrics:
       - injections_requested
