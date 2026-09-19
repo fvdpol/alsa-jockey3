@@ -234,6 +234,9 @@ profiles:
       # this leaves USB on the controller dead until rmmod/modprobe xhci_pci,
       # so anything after it would report nonsense. Not in smoke.
       - {id: JT-HOTPLUG-005, iterations: 1}
+      - {id: JT-INTEROP-001, iterations: 1}
+      - {id: JT-INTEROP-002, iterations: 1}
+      - {id: JT-INTEROP-003, iterations: 1}      
     overrides:
       armhf-prod:
         # The Pi 1B does not get a regression pass. Use `functional`.
@@ -254,6 +257,14 @@ profiles:
         # `functional`.
         JT-PM-001:   {iterations: 0}
         JT-PM-002:   {iterations: 0}
+        
+        # exclude the application/interopability tests for the pi1
+        JT-INTEROP-001: {iterations: 0}
+        JT-INTEROP-002: {iterations: 0}
+        JT-INTEROP-003: {iterations: 0}
+        JT-INTEROP-004: {iterations: 0}
+
+        
       arm64-prod:
         # Same reasoning as armhf-prod above: the Pi 4B has no onboard RTC
         # and no suspend-to-RAM support.
@@ -270,6 +281,21 @@ profiles:
         JT-PM-001:   {iterations: 0}
         JT-PM-002:   {iterations: 0}
         JT-PM-004:   {iterations: 0}
+        
+      arm64-debug:
+        # exclude the application/interopability tests for the debug kernel
+        JT-INTEROP-001: {iterations: 0}
+        JT-INTEROP-002: {iterations: 0}
+        JT-INTEROP-003: {iterations: 0}
+        JT-INTEROP-004: {iterations: 0}
+
+      x86_64-debug:
+        # exclude the application/interopability tests for the debug kernel
+        JT-INTEROP-001: {iterations: 0}
+        JT-INTEROP-002: {iterations: 0}
+        JT-INTEROP-003: {iterations: 0}
+        JT-INTEROP-004: {iterations: 0}
+        
 
   soak:
     description: >
