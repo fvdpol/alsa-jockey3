@@ -49,11 +49,17 @@ TRACE_PATH = "/sys/kernel/debug/tracing/trace"
 KMSG_TS = re.compile(r"\[\s*(\d+\.\d+)\]")
 
 
-def reload_with(ko_path, settle_us):
+def reload_with(ko_path, settle_us, trace_enabled):
+    # trace_enabled off by default: a settle_us=0 sweep measured a far lower
+    # flap rate than the uninstrumented driver with tracing always on --
+    # trace_printk()'s own small per-call cost was apparently enough to
+    # shift the odds. Only pay that cost (and only get the detail) when
+    # --save-trace actually asked for it.
     subprocess.run(["sudo", "rmmod", MODULE], check=False,
                     capture_output=True)
     r = subprocess.run(
-        ["sudo", "insmod", ko_path, f"issue48_settle_us={settle_us}"])
+        ["sudo", "insmod", ko_path, f"issue48_settle_us={settle_us}",
+         f"issue48_trace_enabled={1 if trace_enabled else 0}"])
     if r.returncode != 0:
         sys.exit(f"insmod failed for issue48_settle_us={settle_us}")
 
@@ -123,7 +129,7 @@ def wait_for_settle(marker, timeout):
 
 
 def run_value(ko_path, settle_us, cycles, off_seconds, timeout, save_trace_dir):
-    reload_with(ko_path, settle_us)
+    reload_with(ko_path, settle_us, trace_enabled=bool(save_trace_dir))
     results = []
     for i in range(cycles):
         marker = kmsg.Marker(f"issue48-sweep-{settle_us}-{i}")
