@@ -32,6 +32,7 @@ the device or the network.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -45,6 +46,7 @@ MODULE = "snd_reloop_jockey3"
 FAIL_MARKER = "probe with driver snd-reloop-jockey3 failed with error"
 OK_MARKER = "Reloop Jockey 3 Remix Firmware"
 TRACE_PATH = "/sys/kernel/debug/tracing/trace"
+KMSG_TS = re.compile(r"\[\s*(\d+\.\d+)\]")
 
 
 def reload_with(ko_path, settle_us):
@@ -85,25 +87,39 @@ def lines_since(marker):
     return log  # marker never landed (see Marker.write()) -- fall back to all
 
 
+def kmsg_seconds(line):
+    m = KMSG_TS.search(line)
+    return float(m.group(1)) if m else None
+
+
 def wait_for_settle(marker, timeout):
-    """Count enumeration attempts until a clean firmware line or timeout.
+    """Count enumeration attempts until a clean firmware line, after a single
+    fixed sleep -- no polling during the window.
+
+    An earlier version of this polled kmsg every 100ms while waiting, each
+    poll forking a `dmesg` subprocess. On pi1test's single ARM11 core that
+    competes directly with the same CPU the probe's kworker runs on --
+    functionally the same masking effect as the dev_info()-to-serial-console
+    problem this whole experiment exists to route around, just via process
+    scheduling instead of UART blocking. Confirmed the hard way: the
+    settle_us=0 baseline, which should reproduce the original ~80% flap
+    rate, did not flap at all under the polling version. So: sleep for the
+    whole timeout, untouched, then read the log exactly once.
 
     Returns (attempts, settled, elapsed_s). attempts counts every
     "probe ... failed" line seen before the first OK_MARKER line, so a clean
     cycle is attempts=1 (the one that worked), matching how the manual
-    sessions in issue #48 were counted by hand.
+    sessions in issue #48 were counted by hand. elapsed_s comes from the
+    kernel's own monotonic timestamps in the captured lines, not wall clock,
+    per the project's own preference for kmsg-sourced timing.
     """
-    deadline = time.monotonic() + timeout
-    t0 = time.monotonic()
-    while time.monotonic() < deadline:
-        seen = lines_since(marker)
-        fails = sum(1 for l in seen if FAIL_MARKER in l)
-        if any(OK_MARKER in l for l in seen):
-            return fails + 1, True, time.monotonic() - t0
-        time.sleep(0.1)
+    time.sleep(timeout)
     seen = lines_since(marker)
     fails = sum(1 for l in seen if FAIL_MARKER in l)
-    return fails, False, timeout
+    settled = any(OK_MARKER in l for l in seen)
+    ts = [t for t in (kmsg_seconds(l) for l in seen) if t is not None]
+    elapsed = (ts[-1] - ts[0]) if len(ts) >= 2 else None
+    return (fails + 1 if settled else fails), settled, elapsed
 
 
 def run_value(ko_path, settle_us, cycles, off_seconds, timeout, save_trace_dir):
@@ -122,15 +138,16 @@ def run_value(ko_path, settle_us, cycles, off_seconds, timeout, save_trace_dir):
             continue
         attempts, settled, elapsed = wait_for_settle(marker, timeout)
         status = "settled" if settled else "TIMED OUT"
+        elapsed_str = f"{elapsed:.1f}s" if elapsed is not None else "?"
         print(f"  cycle {i + 1}/{cycles}: {attempts} attempt(s), "
-              f"{status} in {elapsed:.1f}s")
+              f"{status}, kernel-log span {elapsed_str}")
         entry = {"attempts": attempts, "settled": settled,
-                 "elapsed_s": round(elapsed, 1)}
+                 "elapsed_s": round(elapsed, 1) if elapsed is not None else None}
         if save_trace_dir:
-            # Written after wait_for_settle() returns, deliberately: reading
-            # the trace file has its own cost, and doing that WHILE still
-            # polling kmsg for this cycle's own outcome would be one more
-            # thing perturbing the very race this experiment measures.
+            # Written after wait_for_settle()'s single sleep, deliberately:
+            # reading the trace file has its own cost, and doing that before
+            # the sleep completes would be one more thing perturbing the
+            # very race this experiment measures.
             trace_dest = os.path.join(save_trace_dir,
                                        f"settle{settle_us}-cycle{i}.trace")
             save_trace(trace_dest)
