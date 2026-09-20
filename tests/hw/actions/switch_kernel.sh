@@ -150,6 +150,19 @@ FLAVOUR=${RELEASE##*-rpi-}
 	exit 2
 }
 
+# Same transform z50-raspi-firmware itself uses to name its destination file
+# (kernel_dst= line in /etc/kernel/postinst.d/z50-raspi-firmware): v6 ->
+# kernel.img, v7 -> kernel7.img, v8 -> kernel8.img, v8-rt -> kernel8_rt.img,
+# 2712 -> kernel_2712.img. Hardcoding kernel8.img instead would silently
+# check (or back up) the wrong file -- or one that does not exist at all --
+# on anything but a v8 (arm64) target. The matching initramfs filename
+# follows the same transform (observed on both v6 and v8, not documented
+# anywhere z50 itself owns it -- a separate /etc/initramfs/post-update.d
+# hook does that copy).
+kernel_dst_name=$(echo "$FLAVOUR" | sed 's/^v//;s/^6//;s/2712/_2712/;s/-/_/;')
+KERNEL_DST="/boot/firmware/kernel${kernel_dst_name}.img"
+INITRAMFS_DST="/boot/firmware/initramfs${kernel_dst_name}"
+
 # ------------------------------------------------- clear the competing sort
 echo "== other -rpi-$FLAVOUR kernels installed =="
 # -f='${Package} ${Status}\n' and the $NF check, not just -f='${Package}\n':
@@ -171,20 +184,32 @@ else
 	sudo apt remove -y "${OTHERS[@]}"
 fi
 
+# ------------------------------------------------------------------ backup
+# A Pi has no boot menu and no A/B fallback slot (unlike GRUB, there is
+# nowhere else for a bad kernel to leave a working one to boot from) -- and
+# the "clear the competing sort" step above just deleted the previous
+# release's vmlinuz from the root partition too, on top of the copy in
+# /boot/firmware this install is about to overwrite. Left as-is, a kernel
+# that fails to boot leaves the standard recovery (pull the SD card, mount
+# it on another machine, copy a known-good image over kernel.img) with
+# nothing known-good anywhere on the card to copy. One generation of backup,
+# overwritten every run, is enough to restore that recovery path without
+# relying on anyone remembering to keep their own copy -- a specific
+# "known good" snapshot beyond the immediately-previous kernel is still the
+# operator's own responsibility, same as always.
+if [ -e "$KERNEL_DST" ]; then
+	echo "backing up $KERNEL_DST -> $KERNEL_DST.previous..."
+	sudo cp -f "$KERNEL_DST" "$KERNEL_DST.previous"
+fi
+if [ -e "$INITRAMFS_DST" ]; then
+	sudo cp -f "$INITRAMFS_DST" "$INITRAMFS_DST.previous"
+fi
+
 # ------------------------------------------------------------------ install
 echo "installing $PKGNAME ($pkg_hash) (this is the step that needs a password)..."
 sudo apt install -y --reinstall "$DEB"
 
 # -------------------------------------------------------------------- verify
-# Same transform z50-raspi-firmware itself uses to name its destination file
-# (kernel_dst= line in /etc/kernel/postinst.d/z50-raspi-firmware): v6 ->
-# kernel.img, v7 -> kernel7.img, v8 -> kernel8.img, v8-rt -> kernel8_rt.img,
-# 2712 -> kernel_2712.img. Hardcoding kernel8.img here instead would silently
-# check the wrong file -- or one that does not exist at all -- on anything
-# but a v8 (arm64) target.
-kernel_dst_name=$(echo "$FLAVOUR" | sed 's/^v//;s/^6//;s/2712/_2712/;s/-/_/;')
-KERNEL_DST="/boot/firmware/kernel${kernel_dst_name}.img"
-
 have=$(sha256sum "$KERNEL_DST" 2>/dev/null | awk '{print $1}')
 want=$(sha256sum "/boot/vmlinuz-$RELEASE" 2>/dev/null | awk '{print $1}')
 if [ -z "$want" ]; then
