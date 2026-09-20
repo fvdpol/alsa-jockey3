@@ -152,7 +152,15 @@ FLAVOUR=${RELEASE##*-rpi-}
 
 # ------------------------------------------------- clear the competing sort
 echo "== other -rpi-$FLAVOUR kernels installed =="
-mapfile -t OTHERS < <(dpkg-query -W -f '${Package}\n' 'linux-image-*' 2>/dev/null \
+# -f='${Package} ${Status}\n' and the $NF check, not just -f='${Package}\n':
+# dpkg-query -W lists a package by name regardless of status, so an already
+# -removed one (Status "deinstall ok config-files", dpkg -l's "rc") matched
+# just as readily as an installed one ("install ok installed") -- every
+# rerun after the first re-"removed" the same already-gone packages, apt
+# correctly no-op'd each ("not installed, so not removed"), and nothing
+# about that was wrong, just noisy and pointless.
+mapfile -t OTHERS < <(dpkg-query -W -f='${Package} ${Status}\n' 'linux-image-*' 2>/dev/null \
+	| awk '$NF == "installed" {print $1}' \
 	| grep -E -- "-rpi-${FLAVOUR}\$" | grep -v -- "^${PKGNAME}\$" || true)
 if [ "${#OTHERS[@]}" -eq 0 ]; then
 	echo "  none"
