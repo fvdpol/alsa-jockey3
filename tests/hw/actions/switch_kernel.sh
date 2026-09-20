@@ -78,16 +78,22 @@ PY
 )"
 
 case "$ARCH" in
-arm64) HOST_ARCH=aarch64 ;;
-armhf) HOST_ARCH=armv7l  ;;
+arm64) DEBARCH=arm64 ;;
+armhf) DEBARCH=armhf ;;
 *)
 	echo "target '$TARGET' is $ARCH, which raspi-firmware does not package" \
 	     "this way -- switch_kernel.sh is for the Pi targets only." >&2
 	exit 2
 	;;
 esac
-[ "$(uname -m)" = "$HOST_ARCH" ] || {
-	echo "this machine is $(uname -m), target '$TARGET' wants $HOST_ARCH" >&2
+# dpkg's architecture, not `uname -m`: Raspberry Pi OS ships one armhf
+# userland across both armv6l hardware (Pi 1/Zero) and armv7l (Pi 2/3/4
+# 32-bit) -- keying off uname -m wrongly refused armhf-prod on pi1test,
+# which is armv6l. Debian architecture is what package compatibility
+# actually depends on.
+[ "$(dpkg --print-architecture)" = "$DEBARCH" ] || {
+	echo "this machine is $(dpkg --print-architecture), target '$TARGET'" \
+	     "wants $DEBARCH" >&2
 	exit 2
 }
 
