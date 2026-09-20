@@ -23,6 +23,18 @@ MODULE_PARM_DESC(issue48_settle_us,
 		  "issue48: microseconds to wait after activating alt setting 1, before the clear_halt loop");
 
 /*
+ * The +1000 width below was an arbitrary default for the first sweep, not a
+ * claim that a 1000us-wide range matters -- separated out so a tight range
+ * (e.g. issue48_settle_us=50 issue48_settle_range_us=50, i.e.
+ * usleep_range(50, 100)) can be tested directly rather than always getting
+ * a 1000us-wide hint window regardless of how small the minimum requested.
+ */
+static unsigned int issue48_settle_range_us = 1000;
+module_param(issue48_settle_range_us, uint, 0644);
+MODULE_PARM_DESC(issue48_settle_range_us,
+		  "issue48: usleep_range() width added on top of issue48_settle_us");
+
+/*
  * Off by default and gated separately from issue48_settle_us: at
  * settle_us=0 with tracing always on, a sweep still measured a far lower
  * flap rate than the uninstrumented driver -- trace_printk() is much
@@ -276,7 +288,7 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 		ISSUE48_TRACE(intf, "cond_resched done");
 	} else if (issue48_settle_us) {
 		ISSUE48_TRACE(intf, "settle %u us start", issue48_settle_us);
-		usleep_range(issue48_settle_us, issue48_settle_us + 1000);
+		usleep_range(issue48_settle_us, issue48_settle_us + issue48_settle_range_us);
 		ISSUE48_TRACE(intf, "settle done");
 	}
 

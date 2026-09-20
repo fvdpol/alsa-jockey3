@@ -49,7 +49,7 @@ TRACE_PATH = "/sys/kernel/debug/tracing/trace"
 KMSG_TS = re.compile(r"\[\s*(\d+\.\d+)\]")
 
 
-def reload_with(ko_path, value, trace_enabled):
+def reload_with(ko_path, value, range_us, trace_enabled):
     """value is an int (issue48_settle_us) or the literal string
     "cond_resched" (issue48_cond_resched=1, issue48_settle_us=0)."""
     # trace_enabled off by default: a settle_us=0 sweep measured a far lower
@@ -63,6 +63,7 @@ def reload_with(ko_path, value, trace_enabled):
                     capture_output=True)
     r = subprocess.run(
         ["sudo", "insmod", ko_path, f"issue48_settle_us={settle_us}",
+         f"issue48_settle_range_us={range_us}",
          f"issue48_cond_resched={cond_resched}",
          f"issue48_trace_enabled={1 if trace_enabled else 0}"])
     if r.returncode != 0:
@@ -167,10 +168,10 @@ def wait_for_settle(marker, timeout):
     return (fails + 1 if settled else fails), settled, elapsed
 
 
-def run_value(ko_path, value, cycles, off_seconds, timeout, save_trace_dir):
+def run_value(ko_path, value, range_us, cycles, off_seconds, timeout, save_trace_dir):
     """value is an int (issue48_settle_us) or the literal string
     "cond_resched"."""
-    reload_with(ko_path, value, trace_enabled=bool(save_trace_dir))
+    reload_with(ko_path, value, range_us, trace_enabled=bool(save_trace_dir))
     results = []
     for i in range(cycles):
         marker = kmsg.Marker(f"issue48-sweep-{value}-{i}")
@@ -239,6 +240,11 @@ def main():
                      help="comma-separated issue48_settle_us candidates, "
                           "plus the literal 'cond_resched' to test "
                           "issue48_cond_resched=1 instead")
+    ap.add_argument("--range-us", type=int, default=1000,
+                     help="issue48_settle_range_us: usleep_range() width "
+                          "added on top of each --values entry, e.g. "
+                          "--values 50 --range-us 50 tests "
+                          "usleep_range(50, 100)")
     ap.add_argument("--cycles", type=int, default=10)
     ap.add_argument("--off-seconds", type=float, default=power.DEFAULT_OFF_SECONDS)
     ap.add_argument("--timeout", type=float, default=30.0,
@@ -264,7 +270,7 @@ def main():
     for v in values:
         label = "issue48_cond_resched=1" if v == "cond_resched" else f"issue48_settle_us={v}"
         print(f"== {label} ==")
-        all_results[v] = run_value(args.ko_path, v, args.cycles,
+        all_results[v] = run_value(args.ko_path, v, args.range_us, args.cycles,
                                     args.off_seconds, args.timeout,
                                     args.save_trace)
         print()
