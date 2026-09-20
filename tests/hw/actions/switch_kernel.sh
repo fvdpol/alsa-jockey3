@@ -115,8 +115,21 @@ if [ -z "$DEB" ]; then
 fi
 [ -f "$DEB" ] || { echo "no such file: $DEB" >&2; exit 2; }
 
+# Pulls the git describe's short commit hash (the "-g<hash>" component
+# dpkg-buildpackage embeds) out of a Debian package Version, since that
+# hash -- not the full "7.3.0~rc1-00053-gHASH-7" version string -- is the
+# identifier actually used elsewhere for this. Falls back to the caller's
+# own default if a build was ever packaged without one (e.g. the stock
+# Raspberry Pi OS kernel packages this script also has to deal with).
+short_hash() {
+	local h
+	h=$(echo "$1" | grep -oE 'g[0-9a-f]{7,}' | head -1)
+	echo "${h:-$1}"
+}
+
 PKGNAME=$(dpkg-deb -f "$DEB" Package)
 PKGVERSION=$(dpkg-deb -f "$DEB" Version)
+pkg_hash=$(short_hash "$PKGVERSION")
 RELEASE=${PKGNAME#linux-image-}
 [ "$RELEASE" != "$PKGNAME" ] || {
 	echo "$DEB does not look like a linux-image package ($PKGNAME)" >&2
@@ -151,7 +164,7 @@ else
 fi
 
 # ------------------------------------------------------------------ install
-echo "installing $PKGNAME ($PKGVERSION) (this is the step that needs a password)..."
+echo "installing $PKGNAME ($pkg_hash) (this is the step that needs a password)..."
 sudo apt install -y --reinstall "$DEB"
 
 # -------------------------------------------------------------------- verify
@@ -181,13 +194,12 @@ fi
 # armhf-prod/arm64-prod/etc build shares one fixed LOCALVERSION by design
 # (see targets.yaml), so "currently booted" and "about to run" can print the
 # identical release string while being genuinely different kernels. The
-# package Version disambiguates -- it embeds the exact git describe (short
-# commit hash included) this driver was built from.
+# package Version's short commit hash (extracted above) disambiguates them.
 current_pkgver=$(dpkg-query -W -f='${Version}' "linux-image-$(uname -r)" 2>/dev/null) || true
 if [ -n "$current_pkgver" ]; then
-	current_desc="$current_pkgver"
+	current_desc=$(short_hash "$current_pkgver")
 else
 	current_desc="package no longer installed; $(uname -v)"
 fi
 echo "currently booted: $(uname -r)  ($current_desc)"
-echo "reboot now to actually run $RELEASE  ($PKGVERSION)."
+echo "reboot now to actually run $RELEASE  ($pkg_hash)."
