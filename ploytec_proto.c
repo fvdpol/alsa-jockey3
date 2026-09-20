@@ -118,6 +118,23 @@ int ploytec_get_status(struct usb_interface *intf, void *xfer_buf, u8 *status)
  *
  * Return: 0 on success, negative errno on failure.
  */
+/*
+ * issue48 instrumentation -- NEVER MERGE. Brackets every EP0 transfer in
+ * ploytec_initialize_device() with an unconditional dev_info() (not dev_dbg:
+ * this runs during an ad hoc manual power-toggle session with an OpenVizsla
+ * capture, not the automated suite, so it must not depend on remembering to
+ * flip a dyndbg toggle first) so each transfer's dmesg timestamp can be
+ * lined up against the wire trace. See github.com/fvdpol/alsa-jockey3/issues/48:
+ * on pi1test (armhf-prod), EP0 answers the first post-enumeration transfer
+ * (get_firmware) but has gone fully silent by the next one 1-2 internal
+ * retries later, and the only driver action in between is this function's
+ * usb_set_interface() pair. The question this instruments for: does EP0 die
+ * during/because of SET_INTERFACE, or is it already gone before the driver
+ * even gets there.
+ */
+#define ISSUE48_TRACE(intf, fmt, ...) \
+	dev_info(&(intf)->dev, "issue48: " fmt "\n", ##__VA_ARGS__)
+
 int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool bounce_alt0,
 			      u32 *fw_version)
 {
@@ -144,7 +161,9 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 	 * reset. A device that merely refuses the request is fine; one that
 	 * has stopped answering is not.
 	 */
+	ISSUE48_TRACE(intf, "get_firmware start");
 	ret = ploytec_get_firmware(intf, xfer_buf, fw_version);
+	ISSUE48_TRACE(intf, "get_firmware done ret=%d", ret);
 	if (ret < 0) {
 		dev_warn(&intf->dev, "Firmware version read failed: %d\n", ret);
 		if (ploytec_ctrl_ep_unresponsive(ret))
@@ -159,10 +178,14 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 	 * takes interface 1 down first, which is the order used here.
 	 */
 	if (bounce_alt0) {
+		ISSUE48_TRACE(intf, "set_interface(1,0) start");
 		ret = usb_set_interface(dev, 1, 0);
+		ISSUE48_TRACE(intf, "set_interface(1,0) done ret=%d", ret);
 		if (ret < 0)
 			return ret;
+		ISSUE48_TRACE(intf, "set_interface(0,0) start");
 		ret = usb_set_interface(dev, 0, 0);
+		ISSUE48_TRACE(intf, "set_interface(0,0) done ret=%d", ret);
 		if (ret < 0)
 			return ret;
 
@@ -171,10 +194,14 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 	}
 
 	// Select Alt Setting 1 to activate the audio interface
+	ISSUE48_TRACE(intf, "set_interface(0,1) start");
 	ret = usb_set_interface(dev, 0, 1);
+	ISSUE48_TRACE(intf, "set_interface(0,1) done ret=%d", ret);
 	if (ret < 0)
 		return ret;
+	ISSUE48_TRACE(intf, "set_interface(1,1) start");
 	ret = usb_set_interface(dev, 1, 1);
+	ISSUE48_TRACE(intf, "set_interface(1,1) done ret=%d", ret);
 	if (ret < 0)
 		return ret;
 
@@ -185,7 +212,9 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 	 * pipes once the first one has timed out.
 	 */
 	for (i = 0; i < ARRAY_SIZE(halt_pipes); i++) {
+		ISSUE48_TRACE(intf, "clear_halt(%u) start", i);
 		ret = usb_clear_halt(dev, halt_pipes[i]);
+		ISSUE48_TRACE(intf, "clear_halt(%u) done ret=%d", i, ret);
 		if (ret < 0) {
 			dev_warn(&intf->dev, "Failed to clear halt on EP 0x%02x: %d\n",
 				 usb_pipeendpoint(halt_pipes[i]) |
@@ -196,7 +225,10 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 		}
 	}
 
-	return ploytec_get_status(intf, xfer_buf, &status);
+	ISSUE48_TRACE(intf, "get_status start");
+	ret = ploytec_get_status(intf, xfer_buf, &status);
+	ISSUE48_TRACE(intf, "get_status done ret=%d", ret);
+	return ret;
 }
 
 /**
