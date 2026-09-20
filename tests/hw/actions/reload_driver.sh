@@ -3,10 +3,19 @@
 #
 # Install a freshly built module and reload it.
 #
-#   reload_driver.sh [path-to-ko]
+#   reload_driver.sh [--debug] [path-to-ko]
 #
 # With no argument, fetches from the build host over ssh. Set JT_BUILD_HOST
 # and JT_BUILD_PATH to point somewhere else, or pass a local path.
+#
+# --debug loads with dyndbg=+p, turning on every pr_debug()/dev_dbg() call
+# site in the module from the moment it loads -- including ones in
+# jockey3_module_init() itself, before any device exists, which a dyndbg
+# toggle written to /sys/kernel/debug/dynamic_debug/control after the fact
+# can never catch. jockey3-testctl's own "load" verb already passes its own
+# dyndbg= scoped to one format string; --debug bypasses that helper (it
+# takes no arguments) and modprobes directly instead, under the same
+# password this script already asks for to install the .ko.
 #
 # THIS SCRIPT ASKS FOR A PASSWORD, AND THAT IS DELIBERATE
 # ------------------------------------------------------
@@ -28,6 +37,12 @@
 # ../../scripts-alsa-dev.
 
 set -eu
+
+DEBUG=0
+if [ "${1:-}" = "--debug" ]; then
+	DEBUG=1
+	shift
+fi
 
 MODULE=snd-reloop-jockey3
 HELPER=/usr/local/sbin/jockey3-testctl
@@ -100,7 +115,21 @@ sudo cp -v "$KO" "$DEST/"
 sudo depmod
 
 echo "loading..."
-sudo -n "$HELPER" load || sudo "$HELPER" load
+if [ "$DEBUG" -eq 1 ]; then
+	# Bypasses the helper: its "load" verb takes no arguments, so a custom
+	# dyndbg= can't be threaded through it, and its own scoped dyndbg= is
+	# not what --debug is for. Needs a password here rather than the
+	# passwordless helper path -- same reasoning as installing the .ko
+	# above. Dependency modprobes mirror the helper's own "load" verb, so
+	# a missing soundcore module fails here with an obvious error instead
+	# of a confusing one from the jockey3 modprobe itself.
+	echo "  (--debug: dyndbg=+p, needs a password)"
+	sudo modprobe snd-pcm
+	sudo modprobe snd-rawmidi
+	sudo modprobe "$MODULE" 'dyndbg=+p'
+else
+	sudo -n "$HELPER" load || sudo "$HELPER" load
+fi
 
 bid=$(cat "/sys/module/${MODULE//-/_}/notes/.note.gnu.build-id" 2>/dev/null \
 	| od -An -tx1 | tr -d ' \n' | tail -c 40)
