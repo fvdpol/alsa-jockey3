@@ -153,6 +153,11 @@ echo "target       $TARGET  ($ARCH -> ARCH=$KARCH, deb $DEBARCH)"
 echo "config       $CONFIG_PATH"
 echo "source       $BUILD_TREE  (worktree of $KERNEL_SRC @ $BUILD_REF)"
 echo "output       $O"
+if [ "$RPI_LV" = "-rpi-v6" ]; then
+	echo "note         armhf here means ARMv6 (Pi 1B/Zero), NOT the armhf" \
+	     "Debian architecture in general -- this package will not boot" \
+	     "correctly on a Pi 2/3 (see github.com/fvdpol/alsa-jockey3/issues/47)"
+fi
 echo "jobs         $JOBS"
 echo
 
