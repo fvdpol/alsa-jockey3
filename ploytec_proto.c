@@ -179,6 +179,16 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 		return ret;
 
 	/*
+	 * The bulk endpoints just activated are not immediately ready for the
+	 * usb_clear_halt() calls below: without this pause, EP0 stops
+	 * answering anything at all until a full USB re-enumeration clears
+	 * it. Only ever reproduced on a single-core host (Pi 1B, armv6),
+	 * never on a multi-core one; bisected down to this range with real
+	 * device power cycles. See github.com/fvdpol/alsa-jockey3/issues/48.
+	 */
+	usleep_range(25, 35);
+
+	/*
 	 * Clear Feature (ENDPOINT_HALT). A failure here has never been fatal on
 	 * a device that is still answering, so only a silent EP0 aborts -- which
 	 * also avoids burning two more PLOYTEC_CTRL_TIMEOUT_MS on the remaining
