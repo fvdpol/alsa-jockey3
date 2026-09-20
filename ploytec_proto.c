@@ -120,20 +120,29 @@ int ploytec_get_status(struct usb_interface *intf, void *xfer_buf, u8 *status)
  */
 /*
  * issue48 instrumentation -- NEVER MERGE. Brackets every EP0 transfer in
- * ploytec_initialize_device() with an unconditional dev_info() (not dev_dbg:
- * this runs during an ad hoc manual power-toggle session with an OpenVizsla
- * capture, not the automated suite, so it must not depend on remembering to
- * flip a dyndbg toggle first) so each transfer's dmesg timestamp can be
- * lined up against the wire trace. See github.com/fvdpol/alsa-jockey3/issues/48:
- * on pi1test (armhf-prod), EP0 answers the first post-enumeration transfer
- * (get_firmware) but has gone fully silent by the next one 1-2 internal
- * retries later, and the only driver action in between is this function's
- * usb_set_interface() pair. The question this instruments for: does EP0 die
- * during/because of SET_INTERFACE, or is it already gone before the driver
- * even gets there.
+ * ploytec_initialize_device() so each transfer's timing can be lined up
+ * against a simultaneous OpenVizsla wire capture. See
+ * github.com/fvdpol/alsa-jockey3/issues/48: on pi1test (armhf-prod), EP0
+ * answers the first post-enumeration transfer (get_firmware) but has gone
+ * fully silent by the next one 1-2 internal retries later, and the only
+ * driver action in between is this function's usb_set_interface() pair.
+ * The question this instruments for: does EP0 die during/because of
+ * SET_INTERFACE, or is it already gone before the driver even gets there.
+ *
+ * trace_printk(), not dev_info(): the first cut of this used dev_info(),
+ * and the race stopped reproducing at all -- 0/10 flapping runs where the
+ * unbuilt driver flapped on roughly 4/5. pi1test runs with a live serial
+ * console (console=serial0,115200, serial-getty on ttyAMA0), and printk
+ * writes synchronously to every registered console; a ~70-character line at
+ * 115200 baud is ~6-8ms, and this path logs 14 of them per call against
+ * transfer gaps that were only a few hundred *microseconds* apart in a
+ * clean run -- easily enough added latency to mask a narrow race entirely.
+ * trace_printk() writes to ftrace's in-memory ring buffer instead of any
+ * console, so it does not pay that cost. Read back from
+ * /sys/kernel/debug/tracing/trace (or trace-cmd), not dmesg.
  */
 #define ISSUE48_TRACE(intf, fmt, ...) \
-	dev_info(&(intf)->dev, "issue48: " fmt "\n", ##__VA_ARGS__)
+	trace_printk("issue48 %s: " fmt "\n", dev_name(&(intf)->dev), ##__VA_ARGS__)
 
 int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool bounce_alt0,
 			      u32 *fw_version)
