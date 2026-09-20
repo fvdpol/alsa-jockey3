@@ -23,6 +23,23 @@ MODULE_PARM_DESC(issue48_settle_us,
 		  "issue48: microseconds to wait after activating alt setting 1, before the clear_halt loop");
 
 /*
+ * Off by default and gated separately from issue48_settle_us: at
+ * settle_us=0 with tracing always on, a sweep still measured a far lower
+ * flap rate than the uninstrumented driver -- trace_printk() is much
+ * cheaper than dev_info()-to-serial-console (no UART write) but is not
+ * literally free, and 13 calls per attempt was apparently enough to shift
+ * the odds without masking the race outright the way dev_info() did. A
+ * settle_us=0 sweep run needs this off to be a clean measurement of the
+ * delay alone; turn it on for a specific run when the detailed transfer
+ * trace is what is wanted, accepting that run's own reduced flap rate as
+ * the cost of that detail.
+ */
+static bool issue48_trace_enabled;
+module_param(issue48_trace_enabled, bool, 0644);
+MODULE_PARM_DESC(issue48_trace_enabled,
+		  "issue48: trace_printk() every EP0 transfer in ploytec_initialize_device()");
+
+/*
  * None of the helpers below validate @intf/@xfer_buf for NULL: callers own
  * the chip's usb_interface and control-transfer buffer for the entire time
  * the PCM/rawmidi devices can be open, so these arguments are always valid
@@ -155,7 +172,11 @@ int ploytec_get_status(struct usb_interface *intf, void *xfer_buf, u8 *status)
  * /sys/kernel/debug/tracing/trace (or trace-cmd), not dmesg.
  */
 #define ISSUE48_TRACE(intf, fmt, ...) \
-	trace_printk("issue48 %s: " fmt "\n", dev_name(&(intf)->dev), ##__VA_ARGS__)
+	do { \
+		if (issue48_trace_enabled) \
+			trace_printk("issue48 %s: " fmt "\n", \
+				     dev_name(&(intf)->dev), ##__VA_ARGS__); \
+	} while (0)
 
 int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool bounce_alt0,
 			      u32 *fw_version)
