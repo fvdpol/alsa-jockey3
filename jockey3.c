@@ -5,6 +5,8 @@
  *   Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/types.h>
 #include <linux/atomic.h>
 #include <linux/module.h>
@@ -539,12 +541,6 @@ static struct usb_driver jockey3_driver;
  */
 static DEFINE_MUTEX(jockey3_devices_mutex);
 static DECLARE_BITMAP(jockey3_devices_used, SNDRV_CARDS);
-
-/*
- * Which codec variant this build selected; set once by jockey3_module_init()
- * along with the lookup tables it reports on, and read-only afterwards.
- */
-static enum ploytec_codec_variant jockey3_codec_variant;
 
 /* Chip flags */
 #define JOCKEY3_FLAG_DISCONNECTED	0
@@ -2866,18 +2862,6 @@ static int jockey3_initialize_ploytec(struct jockey3_chip *chip, u32 *fw_version
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	switch (jockey3_codec_variant) {
-	case PLOYTEC_CODEC_PORTABLE:
-		dev_dbg(&chip->intf0->dev, "Using portable codec\n");
-		break;
-	case PLOYTEC_CODEC_OPTIMIZED_64BIT:
-		dev_dbg(&chip->intf0->dev, "Using 64-bit optimized codec\n");
-		break;
-	case PLOYTEC_CODEC_OPTIMIZED_32BIT:
-		dev_dbg(&chip->intf0->dev, "Using 32-bit optimized codec\n");
-		break;
-	}
-
 	ret = ploytec_initialize_device(chip->intf0, chip->xfer_buf, false, fw_version);
 	if (ret < 0) {
 		dev_err(&chip->intf0->dev, "Ploytec failed to initialize: %d\n", ret);
@@ -4020,7 +4004,20 @@ static struct usb_driver jockey3_driver = {
  */
 static int __init jockey3_module_init(void)
 {
-	jockey3_codec_variant = ploytec_initialize_codec();
+	enum ploytec_codec_variant codec_variant = ploytec_initialize_codec();
+
+	switch (codec_variant) {
+	case PLOYTEC_CODEC_PORTABLE:
+		pr_debug("using portable codec\n");
+		break;
+	case PLOYTEC_CODEC_OPTIMIZED_64BIT:
+		pr_debug("using 64-bit optimized codec\n");
+		break;
+	case PLOYTEC_CODEC_OPTIMIZED_32BIT:
+		pr_debug("using 32-bit optimized codec\n");
+		break;
+	}
+
 	return usb_register(&jockey3_driver);
 }
 module_init(jockey3_module_init);
