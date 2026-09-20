@@ -116,6 +116,7 @@ fi
 [ -f "$DEB" ] || { echo "no such file: $DEB" >&2; exit 2; }
 
 PKGNAME=$(dpkg-deb -f "$DEB" Package)
+PKGVERSION=$(dpkg-deb -f "$DEB" Version)
 RELEASE=${PKGNAME#linux-image-}
 [ "$RELEASE" != "$PKGNAME" ] || {
 	echo "$DEB does not look like a linux-image package ($PKGNAME)" >&2
@@ -150,7 +151,7 @@ else
 fi
 
 # ------------------------------------------------------------------ install
-echo "installing $PKGNAME (this is the step that needs a password)..."
+echo "installing $PKGNAME ($PKGVERSION) (this is the step that needs a password)..."
 sudo apt install -y --reinstall "$DEB"
 
 # -------------------------------------------------------------------- verify
@@ -176,5 +177,17 @@ else
 	echo "verified: $KERNEL_DST matches vmlinuz-$RELEASE"
 fi
 
-echo "currently booted: $(uname -r)"
-echo "reboot now to actually run $RELEASE."
+# uname -r alone cannot tell two builds of the same flavour apart: every
+# armhf-prod/arm64-prod/etc build shares one fixed LOCALVERSION by design
+# (see targets.yaml), so "currently booted" and "about to run" can print the
+# identical release string while being genuinely different kernels. The
+# package Version disambiguates -- it embeds the exact git describe (short
+# commit hash included) this driver was built from.
+current_pkgver=$(dpkg-query -W -f='${Version}' "linux-image-$(uname -r)" 2>/dev/null) || true
+if [ -n "$current_pkgver" ]; then
+	current_desc="$current_pkgver"
+else
+	current_desc="package no longer installed; $(uname -v)"
+fi
+echo "currently booted: $(uname -r)  ($current_desc)"
+echo "reboot now to actually run $RELEASE  ($PKGVERSION)."
