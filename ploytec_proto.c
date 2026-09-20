@@ -40,6 +40,28 @@ MODULE_PARM_DESC(issue48_trace_enabled,
 		  "issue48: trace_printk() every EP0 transfer in ploytec_initialize_device()");
 
 /*
+ * Alternative to issue48_settle_us: a bare cond_resched() instead of any
+ * timed sleep, to test whether this is really about physical hardware
+ * settle time at all. armhf-prod (pi1test) is the only target this has
+ * ever reproduced on, and it is also the only single-core target in the
+ * fleet -- on every multi-core target, whatever usb_set_interface()'s
+ * endpoint reconfiguration defers to a tasklet/softirq/workqueue can just
+ * run concurrently on another core while this thread continues, which
+ * would hide this race everywhere except here without anyone having done
+ * anything to prevent it. issue48_settle_us=1 already fixed it 10/10 with
+ * only ~20-40us of *actual* delay (usleep_range()'s range is a power
+ * -coalescing hint, not a precision guarantee -- it does not reliably
+ * produce anything close to the requested duration) -- consistent with
+ * "any scheduling point is enough" rather than "needs microseconds of
+ * settle time", which cond_resched() tests directly. Takes precedence
+ * over issue48_settle_us when set.
+ */
+static bool issue48_cond_resched;
+module_param(issue48_cond_resched, bool, 0644);
+MODULE_PARM_DESC(issue48_cond_resched,
+		  "issue48: cond_resched() instead of usleep_range(issue48_settle_us) before the clear_halt loop");
+
+/*
  * None of the helpers below validate @intf/@xfer_buf for NULL: callers own
  * the chip's usb_interface and control-transfer buffer for the entire time
  * the PCM/rawmidi devices can be open, so these arguments are always valid
@@ -248,7 +270,11 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 	if (ret < 0)
 		return ret;
 
-	if (issue48_settle_us) {
+	if (issue48_cond_resched) {
+		ISSUE48_TRACE(intf, "cond_resched start");
+		cond_resched();
+		ISSUE48_TRACE(intf, "cond_resched done");
+	} else if (issue48_settle_us) {
 		ISSUE48_TRACE(intf, "settle %u us start", issue48_settle_us);
 		usleep_range(issue48_settle_us, issue48_settle_us + 1000);
 		ISSUE48_TRACE(intf, "settle done");
