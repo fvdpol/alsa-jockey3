@@ -49,19 +49,24 @@ TRACE_PATH = "/sys/kernel/debug/tracing/trace"
 KMSG_TS = re.compile(r"\[\s*(\d+\.\d+)\]")
 
 
-def reload_with(ko_path, settle_us, trace_enabled):
+def reload_with(ko_path, value, trace_enabled):
+    """value is an int (issue48_settle_us) or the literal string
+    "cond_resched" (issue48_cond_resched=1, issue48_settle_us=0)."""
     # trace_enabled off by default: a settle_us=0 sweep measured a far lower
     # flap rate than the uninstrumented driver with tracing always on --
     # trace_printk()'s own small per-call cost was apparently enough to
     # shift the odds. Only pay that cost (and only get the detail) when
     # --save-trace actually asked for it.
+    settle_us = 0 if value == "cond_resched" else value
+    cond_resched = 1 if value == "cond_resched" else 0
     subprocess.run(["sudo", "rmmod", MODULE], check=False,
                     capture_output=True)
     r = subprocess.run(
         ["sudo", "insmod", ko_path, f"issue48_settle_us={settle_us}",
+         f"issue48_cond_resched={cond_resched}",
          f"issue48_trace_enabled={1 if trace_enabled else 0}"])
     if r.returncode != 0:
-        sys.exit(f"insmod failed for issue48_settle_us={settle_us}")
+        sys.exit(f"insmod failed for value={value}")
 
 
 def clear_trace():
@@ -92,18 +97,17 @@ def save_trace(dest):
 TRACE_LINE = re.compile(r"^\s*\S+\s+\[\d+\]\s+\S+\s+(\d+\.\d+):\s+\S+:\s+issue48\s+\S+:\s*(.*)$")
 
 
-def measure_settle_delays(trace_text, settle_us):
-    """Actual elapsed microseconds for each "settle N us start"/"settle done"
-    pair in a saved trace, versus the requested issue48_settle_us.
-
-    usleep_range()'s underlying hrtimer is precise regardless of CONFIG_HZ
-    (CONFIG_HIGH_RES_TIMERS=y on this target), but that only covers when the
-    timer fires -- not when the sleeping task actually gets the CPU back and
-    resumes. On a single core also servicing this same enumeration's dwc2
-    interrupts, real wakeup latency can run well past what was requested.
-    This measures what actually happened rather than trusting the request.
+def measure_delays(trace_text, start_msg, end_msg):
+    """Actual elapsed microseconds between each start_msg/end_msg pair in a
+    saved trace -- e.g. "settle N us start"/"settle done" (versus the
+    requested issue48_settle_us: usleep_range()'s underlying hrtimer is
+    precise regardless of CONFIG_HZ, CONFIG_HIGH_RES_TIMERS=y on this
+    target, but that only covers when the timer fires, not when the
+    sleeping task actually gets the CPU back; real wakeup latency can run
+    well past what was requested) or "cond_resched start"/"cond_resched
+    done" (where there is no requested duration to compare against at
+    all -- this just reports how long the reschedule actually took).
     """
-    want_start = f"settle {settle_us} us start"
     events = []
     for line in trace_text.splitlines():
         m = TRACE_LINE.match(line)
@@ -111,9 +115,9 @@ def measure_settle_delays(trace_text, settle_us):
             events.append((float(m.group(1)), m.group(2)))
     delays = []
     for i, (ts, msg) in enumerate(events):
-        if msg == want_start:
+        if msg == start_msg:
             for ts2, msg2 in events[i + 1:]:
-                if msg2 == "settle done":
+                if msg2 == end_msg:
                     delays.append(round((ts2 - ts) * 1_000_000))
                     break
     return delays
@@ -163,11 +167,13 @@ def wait_for_settle(marker, timeout):
     return (fails + 1 if settled else fails), settled, elapsed
 
 
-def run_value(ko_path, settle_us, cycles, off_seconds, timeout, save_trace_dir):
-    reload_with(ko_path, settle_us, trace_enabled=bool(save_trace_dir))
+def run_value(ko_path, value, cycles, off_seconds, timeout, save_trace_dir):
+    """value is an int (issue48_settle_us) or the literal string
+    "cond_resched"."""
+    reload_with(ko_path, value, trace_enabled=bool(save_trace_dir))
     results = []
     for i in range(cycles):
-        marker = kmsg.Marker(f"issue48-sweep-{settle_us}-{i}")
+        marker = kmsg.Marker(f"issue48-sweep-{value}-{i}")
         if save_trace_dir:
             clear_trace()
         marker.write()
@@ -190,27 +196,36 @@ def run_value(ko_path, settle_us, cycles, off_seconds, timeout, save_trace_dir):
             # the sleep completes would be one more thing perturbing the
             # very race this experiment measures.
             trace_dest = os.path.join(save_trace_dir,
-                                       f"settle{settle_us}-cycle{i}.trace")
+                                       f"settle{value}-cycle{i}.trace")
             trace_text = save_trace(trace_dest)
             entry["trace"] = trace_dest
-            if trace_text and settle_us:
-                actual = measure_settle_delays(trace_text, settle_us)
+            if trace_text:
+                if value == "cond_resched":
+                    actual = measure_delays(trace_text, "cond_resched start",
+                                             "cond_resched done")
+                    label = "cond_resched() actual duration"
+                elif value:
+                    actual = measure_delays(trace_text, f"settle {value} us start",
+                                             "settle done")
+                    label = "usleep_range wakeup latency"
+                else:
+                    actual = []
                 if actual:
-                    entry["actual_settle_us"] = actual
-                    print(f"    requested {settle_us}us, measured "
-                          f"{actual} (usleep_range wakeup latency)")
+                    entry["actual_us"] = actual
+                    print(f"    requested {value}, measured {actual} ({label})")
         results.append(entry)
     return results
 
 
-def summarize(settle_us, results):
+def summarize(value, results):
+    label = "issue48_cond_resched=1" if value == "cond_resched" else f"issue48_settle_us={value}"
     ok = [r for r in results if r["attempts"] is not None]
     if not ok:
-        return f"issue48_settle_us={settle_us}: no usable cycles"
+        return f"{label}: no usable cycles"
     attempts = [r["attempts"] for r in ok]
     flapped = sum(1 for a in attempts if a > 1)
     timed_out = sum(1 for r in ok if not r["settled"])
-    return (f"issue48_settle_us={settle_us}: "
+    return (f"{label}: "
             f"{flapped}/{len(ok)} cycles flapped, "
             f"attempts min={min(attempts)} max={max(attempts)}, "
             f"{timed_out} timed out")
@@ -221,7 +236,9 @@ def main():
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("ko_path")
     ap.add_argument("--values", default="0,2000,5000,7500,15000",
-                     help="comma-separated issue48_settle_us candidates")
+                     help="comma-separated issue48_settle_us candidates, "
+                          "plus the literal 'cond_resched' to test "
+                          "issue48_cond_resched=1 instead")
     ap.add_argument("--cycles", type=int, default=10)
     ap.add_argument("--off-seconds", type=float, default=power.DEFAULT_OFF_SECONDS)
     ap.add_argument("--timeout", type=float, default=30.0,
@@ -241,10 +258,12 @@ def main():
     if args.save_trace:
         os.makedirs(args.save_trace, exist_ok=True)
 
-    values = [int(v) for v in args.values.split(",")]
+    values = [v if v == "cond_resched" else int(v)
+              for v in args.values.split(",")]
     all_results = {}
     for v in values:
-        print(f"== issue48_settle_us={v} ==")
+        label = "issue48_cond_resched=1" if v == "cond_resched" else f"issue48_settle_us={v}"
+        print(f"== {label} ==")
         all_results[v] = run_value(args.ko_path, v, args.cycles,
                                     args.off_seconds, args.timeout,
                                     args.save_trace)
