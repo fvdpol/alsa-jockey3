@@ -116,6 +116,24 @@ CONFIG_PATH=$REPO/$CONFIG
 # hard error. RPI_LV supplies that exact trailing token; see below for how it
 # is applied without colliding with $LOCALVERSION, which already names this
 # script's own -alsa-debug/-alsa-prod target tag.
+#
+# A second z50 surprise, once the copy DOES happen: it does not install the
+# package that was just handed to it. It globs every vmlinuz-*-rpi-<flavour>
+# already in /boot and picks the "highest" by `sort -V`, falling back to
+# lexicographic comparison once the numeric part ties -- which it always does
+# for a debug/prod pair of the same commit, since they share one kernel
+# version by design (see targets.yaml's LOCALVERSION note) and differ only in
+# that trailing "-alsa-debug"/"-alsa-prod" text. 'p' > 'd', so prod always
+# wins the sort and gets copied to kernel8.img, no matter which flavour was
+# actually just installed or which one apt reports success for. Confirmed on
+# pi4test 2026-09-19: installing the debug .deb over an existing prod
+# install left kernel8.img checksum-identical to the prod vmlinuz.
+#
+# Not worth patching -- z50 is a vendor script that a `raspi-firmware`
+# package upgrade silently overwrites, and its newest-wins behaviour is the
+# right default for an ordinary Pi. tests/hw/actions/switch_kernel.sh works
+# around it on the target instead: never leave two -rpi-<flavour> kernel
+# packages installed on the same Pi at once.
 case "$ARCH" in
 x86_64) KARCH=x86    ; CROSS=          ; DEBARCH=amd64 ; RPI_LV=        ;;
 i386)   KARCH=x86    ; CROSS=          ; DEBARCH=i386  ; RPI_LV=        ;;
