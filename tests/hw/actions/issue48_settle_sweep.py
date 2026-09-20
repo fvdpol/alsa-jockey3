@@ -78,10 +78,45 @@ def clear_trace():
 
 
 def save_trace(dest):
+    """Returns the trace text (also written to `dest`), or None on failure."""
     r = subprocess.run(["sudo", "cat", TRACE_PATH], capture_output=True, text=True)
-    if r.returncode == 0:
-        with open(dest, "w", encoding="utf-8") as f:
-            f.write(r.stdout)
+    if r.returncode != 0:
+        return None
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(r.stdout)
+    return r.stdout
+
+
+# ftrace's own format, not kmsg's -- see the header comment on ISSUE48_TRACE:
+#      kworker/0:3-3831    [000] .....  8691.171423: ploytec_initialize_device: issue48 1-1.3.2:1.0: get_firmware start
+TRACE_LINE = re.compile(r"^\s*\S+\s+\[\d+\]\s+\S+\s+(\d+\.\d+):\s+\S+:\s+issue48\s+\S+:\s*(.*)$")
+
+
+def measure_settle_delays(trace_text, settle_us):
+    """Actual elapsed microseconds for each "settle N us start"/"settle done"
+    pair in a saved trace, versus the requested issue48_settle_us.
+
+    usleep_range()'s underlying hrtimer is precise regardless of CONFIG_HZ
+    (CONFIG_HIGH_RES_TIMERS=y on this target), but that only covers when the
+    timer fires -- not when the sleeping task actually gets the CPU back and
+    resumes. On a single core also servicing this same enumeration's dwc2
+    interrupts, real wakeup latency can run well past what was requested.
+    This measures what actually happened rather than trusting the request.
+    """
+    want_start = f"settle {settle_us} us start"
+    events = []
+    for line in trace_text.splitlines():
+        m = TRACE_LINE.match(line)
+        if m:
+            events.append((float(m.group(1)), m.group(2)))
+    delays = []
+    for i, (ts, msg) in enumerate(events):
+        if msg == want_start:
+            for ts2, msg2 in events[i + 1:]:
+                if msg2 == "settle done":
+                    delays.append(round((ts2 - ts) * 1_000_000))
+                    break
+    return delays
 
 
 def lines_since(marker):
@@ -156,8 +191,14 @@ def run_value(ko_path, settle_us, cycles, off_seconds, timeout, save_trace_dir):
             # very race this experiment measures.
             trace_dest = os.path.join(save_trace_dir,
                                        f"settle{settle_us}-cycle{i}.trace")
-            save_trace(trace_dest)
+            trace_text = save_trace(trace_dest)
             entry["trace"] = trace_dest
+            if trace_text and settle_us:
+                actual = measure_settle_delays(trace_text, settle_us)
+                if actual:
+                    entry["actual_settle_us"] = actual
+                    print(f"    requested {settle_us}us, measured "
+                          f"{actual} (usleep_range wakeup latency)")
         results.append(entry)
     return results
 
