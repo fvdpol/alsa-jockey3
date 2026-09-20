@@ -7,7 +7,20 @@
  */
 
 #include <linux/delay.h>
+#include <linux/moduleparam.h>
 #include "ploytec_proto.h"
+
+/*
+ * issue48 instrumentation -- NEVER MERGE. See the comment on ISSUE48_TRACE
+ * below. Sweepable at load time (insmod snd-reloop-jockey3.ko
+ * issue48_settle_us=N) rather than a guessed constant, since the minimum
+ * needed is exactly what this experiment is trying to find. 0 disables the
+ * delay, reproducing the unmodified sequence.
+ */
+static unsigned int issue48_settle_us;
+module_param(issue48_settle_us, uint, 0644);
+MODULE_PARM_DESC(issue48_settle_us,
+		  "issue48: microseconds to wait after activating alt setting 1, before the clear_halt loop");
 
 /*
  * None of the helpers below validate @intf/@xfer_buf for NULL: callers own
@@ -213,6 +226,12 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 	ISSUE48_TRACE(intf, "set_interface(1,1) done ret=%d", ret);
 	if (ret < 0)
 		return ret;
+
+	if (issue48_settle_us) {
+		ISSUE48_TRACE(intf, "settle %u us start", issue48_settle_us);
+		usleep_range(issue48_settle_us, issue48_settle_us + 1000);
+		ISSUE48_TRACE(intf, "settle done");
+	}
 
 	/*
 	 * Clear Feature (ENDPOINT_HALT). A failure here has never been fatal on
