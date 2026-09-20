@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""issue48 -- sweep ploytec_proto.c's issue48_settle_us module param against
+real device power cycles, to find the settle delay a post-enumeration
+usb_clear_halt() race actually needs.
+
+NEVER MERGE, NEVER RUN except on the test/issue48-ep0-set-interface-trace
+branch's instrumented build. See github.com/fvdpol/alsa-jockey3/issues/48.
+
+    issue48_settle_sweep.py <path-to-ko> [--values 0,2000,5000,7500,15000]
+                             [--cycles 10] [--off-seconds 5] [--timeout 30]
+                             [--out results.json] [--save-trace DIR]
+
+For each candidate value: reload the module with issue48_settle_us=<value>,
+then run --cycles real device power cycles (lib.power, same device-power
+actuator JT-AUDIO-005 uses), and for each cycle count how many enumeration
+attempts it took before a clean "Firmware ... vN.N.N" line -- 1 means no
+flapping at all, N>1 means N-1 failed probes before it settled. That is the
+same "how many re-enumerations to stabilize" question the manual power-toggle
+sessions in issue #48 answered by hand, just parameterized and repeated.
+
+THIS SCRIPT ASKS FOR A PASSWORD, REPEATEDLY, AND THAT IS DELIBERATE
+---------------------------------------------------------------------
+Changing a module's load-time parameter means unloading and reinserting it,
+which is arbitrary kernel code same as any other module install -- see
+reload_driver.sh's header for why that is never handed to a sudoers rule.
+This only reinserts the one .ko passed on the command line, at a parameter
+swept across a fixed, printed list of values, never something read back from
+the device or the network.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
+
+from lib import kmsg, power                # noqa: E402
+
+MODULE = "snd_reloop_jockey3"
+FAIL_MARKER = "probe with driver snd-reloop-jockey3 failed with error"
+OK_MARKER = "Reloop Jockey 3 Remix Firmware"
+TRACE_PATH = "/sys/kernel/debug/tracing/trace"
+
+
+def reload_with(ko_path, settle_us):
+    subprocess.run(["sudo", "rmmod", MODULE], check=False,
+                    capture_output=True)
+    r = subprocess.run(
+        ["sudo", "insmod", ko_path, f"issue48_settle_us={settle_us}"])
+    if r.returncode != 0:
+        sys.exit(f"insmod failed for issue48_settle_us={settle_us}")
+
+
+def clear_trace():
+    """Reset ftrace's ring buffer so each cycle's saved trace is just its own.
+
+    Same reasoning as run_marker.write() bounding a run's dmesg.txt elsewhere
+    in this suite: without this, a later cycle's saved trace also contains
+    every earlier cycle still sitting in the buffer.
+    """
+    subprocess.run(["sudo", "tee", TRACE_PATH], input="", text=True,
+                    capture_output=True, check=False)
+    subprocess.run(["sudo", "sh", "-c", f"echo 1 > {TRACE_PATH.rsplit('/', 1)[0]}/tracing_on"],
+                    check=False, capture_output=True)
+
+
+def save_trace(dest):
+    r = subprocess.run(["sudo", "cat", TRACE_PATH], capture_output=True, text=True)
+    if r.returncode == 0:
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(r.stdout)
+
+
+def lines_since(marker):
+    """Kernel log lines written after `marker` was written, marker excluded."""
+    log = kmsg.read_log()
+    for i, line in enumerate(log):
+        if marker.token in line:
+            return log[i + 1:]
+    return log  # marker never landed (see Marker.write()) -- fall back to all
+
+
+def wait_for_settle(marker, timeout):
+    """Count enumeration attempts until a clean firmware line or timeout.
+
+    Returns (attempts, settled, elapsed_s). attempts counts every
+    "probe ... failed" line seen before the first OK_MARKER line, so a clean
+    cycle is attempts=1 (the one that worked), matching how the manual
+    sessions in issue #48 were counted by hand.
+    """
+    deadline = time.monotonic() + timeout
+    t0 = time.monotonic()
+    while time.monotonic() < deadline:
+        seen = lines_since(marker)
+        fails = sum(1 for l in seen if FAIL_MARKER in l)
+        if any(OK_MARKER in l for l in seen):
+            return fails + 1, True, time.monotonic() - t0
+        time.sleep(0.1)
+    seen = lines_since(marker)
+    fails = sum(1 for l in seen if FAIL_MARKER in l)
+    return fails, False, timeout
+
+
+def run_value(ko_path, settle_us, cycles, off_seconds, timeout, save_trace_dir):
+    reload_with(ko_path, settle_us)
+    results = []
+    for i in range(cycles):
+        marker = kmsg.Marker(f"issue48-sweep-{settle_us}-{i}")
+        if save_trace_dir:
+            clear_trace()
+        marker.write()
+        ok, detail = power.cycle(off_seconds)
+        if not ok:
+            print(f"  cycle {i + 1}/{cycles}: power cycle failed: {detail}",
+                  file=sys.stderr)
+            results.append({"attempts": None, "settled": False})
+            continue
+        attempts, settled, elapsed = wait_for_settle(marker, timeout)
+        status = "settled" if settled else "TIMED OUT"
+        print(f"  cycle {i + 1}/{cycles}: {attempts} attempt(s), "
+              f"{status} in {elapsed:.1f}s")
+        entry = {"attempts": attempts, "settled": settled,
+                 "elapsed_s": round(elapsed, 1)}
+        if save_trace_dir:
+            # Written after wait_for_settle() returns, deliberately: reading
+            # the trace file has its own cost, and doing that WHILE still
+            # polling kmsg for this cycle's own outcome would be one more
+            # thing perturbing the very race this experiment measures.
+            trace_dest = os.path.join(save_trace_dir,
+                                       f"settle{settle_us}-cycle{i}.trace")
+            save_trace(trace_dest)
+            entry["trace"] = trace_dest
+        results.append(entry)
+    return results
+
+
+def summarize(settle_us, results):
+    ok = [r for r in results if r["attempts"] is not None]
+    if not ok:
+        return f"issue48_settle_us={settle_us}: no usable cycles"
+    attempts = [r["attempts"] for r in ok]
+    flapped = sum(1 for a in attempts if a > 1)
+    timed_out = sum(1 for r in ok if not r["settled"])
+    return (f"issue48_settle_us={settle_us}: "
+            f"{flapped}/{len(ok)} cycles flapped, "
+            f"attempts min={min(attempts)} max={max(attempts)}, "
+            f"{timed_out} timed out")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("ko_path")
+    ap.add_argument("--values", default="0,2000,5000,7500,15000",
+                     help="comma-separated issue48_settle_us candidates")
+    ap.add_argument("--cycles", type=int, default=10)
+    ap.add_argument("--off-seconds", type=float, default=power.DEFAULT_OFF_SECONDS)
+    ap.add_argument("--timeout", type=float, default=30.0,
+                     help="max seconds to wait for a cycle to settle")
+    ap.add_argument("--out", help="write full per-cycle results as JSON here")
+    ap.add_argument("--save-trace",
+                     help="directory to save each cycle's ftrace buffer "
+                          "(issue48: EP0-transfer trace) into, for cycles "
+                          "that still flap even at a given settle value")
+    args = ap.parse_args()
+
+    if not os.path.isfile(args.ko_path):
+        sys.exit(f"no such file: {args.ko_path}")
+    if not power.available():
+        sys.exit("no power switch configured/answering -- see lib/power/ "
+                  "(this needs real device power cycles, not a USB unplug)")
+    if args.save_trace:
+        os.makedirs(args.save_trace, exist_ok=True)
+
+    values = [int(v) for v in args.values.split(",")]
+    all_results = {}
+    for v in values:
+        print(f"== issue48_settle_us={v} ==")
+        all_results[v] = run_value(args.ko_path, v, args.cycles,
+                                    args.off_seconds, args.timeout,
+                                    args.save_trace)
+        print()
+
+    print("== summary ==")
+    for v in values:
+        print(summarize(v, all_results[v]))
+
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(all_results, f, indent=2)
+        print(f"\nfull results written to {args.out}")
+
+
+if __name__ == "__main__":
+    main()
