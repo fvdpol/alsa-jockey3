@@ -154,17 +154,26 @@ echo "installing $PKGNAME (this is the step that needs a password)..."
 sudo apt install -y --reinstall "$DEB"
 
 # -------------------------------------------------------------------- verify
-have=$(sha256sum /boot/firmware/kernel8.img 2>/dev/null | awk '{print $1}')
+# Same transform z50-raspi-firmware itself uses to name its destination file
+# (kernel_dst= line in /etc/kernel/postinst.d/z50-raspi-firmware): v6 ->
+# kernel.img, v7 -> kernel7.img, v8 -> kernel8.img, v8-rt -> kernel8_rt.img,
+# 2712 -> kernel_2712.img. Hardcoding kernel8.img here instead would silently
+# check the wrong file -- or one that does not exist at all -- on anything
+# but a v8 (arm64) target.
+kernel_dst_name=$(echo "$FLAVOUR" | sed 's/^v//;s/^6//;s/2712/_2712/;s/-/_/;')
+KERNEL_DST="/boot/firmware/kernel${kernel_dst_name}.img"
+
+have=$(sha256sum "$KERNEL_DST" 2>/dev/null | awk '{print $1}')
 want=$(sha256sum "/boot/vmlinuz-$RELEASE" 2>/dev/null | awk '{print $1}')
 if [ -z "$want" ]; then
 	echo "warning: /boot/vmlinuz-$RELEASE not found to verify against" >&2
 elif [ "$have" != "$want" ]; then
-	echo "kernel8.img does NOT match vmlinuz-$RELEASE after install -- z50" >&2
+	echo "$KERNEL_DST does NOT match vmlinuz-$RELEASE after install -- z50" >&2
 	echo "still picked something else. Check for another -rpi-$FLAVOUR" >&2
 	echo "kernel this script missed (dpkg -l | grep linux-image)." >&2
 	exit 1
 else
-	echo "verified: /boot/firmware/kernel8.img matches vmlinuz-$RELEASE"
+	echo "verified: $KERNEL_DST matches vmlinuz-$RELEASE"
 fi
 
 echo "currently booted: $(uname -r)"
