@@ -122,7 +122,6 @@ profiles:
         # newly-appeared card's control node can outlive load on this
         # single-core board, making rmmod fail with "Module ... is in use".
         JT-PROBE-001: {params: {settle_delay_s: 3}}
-        JT-PROBE-002: {iterations: 0}
         # Power-cycling is slow on a Pi 1B and re-enumeration is the slowest
         # part of it. Three cycles still catches a slot leak, which increments
         # every cycle; ten would only catch it three times over.
