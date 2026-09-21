@@ -5,6 +5,7 @@
     ./ledger.py                        coverage table
     ./ledger.py --target x86_64-debug  one target, and drop the target column
     ./ledger.py --metrics              metric trends per target
+    ./ledger.py --nometrics            coverage only, skip metric trends
     ./ledger.py --xrun-trend           xrun anomaly check, per target/case bucket
     ./ledger.py --markdown             as markdown for publishing
     ./ledger.py --matrix               one-glance pass/fail pivot, all targets
@@ -642,6 +643,7 @@ def main():
     ap = argparse.ArgumentParser(description="Coverage and metric trends.")
     ap.add_argument("--results-dir")
     ap.add_argument("--metrics", action="store_true", help="metric trends only")
+    ap.add_argument("--nometrics", action="store_true", help="coverage only, skip metric trends")
     ap.add_argument("--xrun-trend", action="store_true",
                      help="xrun anomaly check per target/case, against each "
                           "bucket's own history (see PASS_XRUN)")
@@ -650,6 +652,8 @@ def main():
                      help="pass/fail pivot, all targets, for publishing")
     ap.add_argument("--target", "-t", help="limit to one target")
     args = ap.parse_args()
+    if args.metrics and args.nometrics:
+        ap.error("--metrics and --nometrics are mutually exclusive")
 
     catalog = load("catalog.yaml")
     targets_yaml = load("targets.yaml")
@@ -704,9 +708,10 @@ def main():
                        single_target=bool(args.target)))
         print()
 
-    if args.markdown:
-        print("## Metric trends\n")
-    print(metric_trends(runs, args.markdown))
+    if not args.nometrics:
+        if args.markdown:
+            print("## Metric trends\n")
+        print(metric_trends(runs, args.markdown))
     return 0
 
 
