@@ -134,7 +134,7 @@ cases:
     area: BUILD
     level: L1
     mode: automated
-    status: planned
+    status: idea
     requires: [kernel-tree, cross-toolchains]
     metrics: [arches_built]
     pass: The module builds for x86_64, i386, arm64 and armhf.

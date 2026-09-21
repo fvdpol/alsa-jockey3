@@ -28,7 +28,6 @@ profiles:
       - {id: JT-BUILD-002, iterations: 1}
       - {id: JT-BUILD-003, iterations: 1}
       - {id: JT-BUILD-004, iterations: 1}
-      - {id: JT-BUILD-005, iterations: 1}
       - {id: JT-CODEC-001, iterations: 1}
       - {id: JT-CODEC-002, iterations: 1}
       - {id: JT-CODEC-003, iterations: 1}
@@ -132,8 +131,7 @@ profiles:
         JT-PCM-005:   {params: {rates: [44100]}}
         JT-PCM-008:   {params: {hours: 2, rate: 44100}}
         JT-RATE-001:  {params: {rates: [44100, 48000], iterations_per_run: 25, sweep_order=random}}
-        JT-RATE-002:  {iterations: 1}
-        JT-RATE-003:  {params: {rates: [44100, 48000], iterations_per_run: 500}}
+        JT-RATE-002:  {iterations: 1}        
         JT-AUDIO-001: {params: {rates: [44100, 48000]}}
         JT-AUDIO-002: {params: {rates: [44100, 48000]}}
         # No onboard RTC and the kernel advertises no suspend-to-RAM support
@@ -187,7 +185,6 @@ profiles:
       - {id: JT-BUILD-002, iterations: 1}
       - {id: JT-BUILD-003, iterations: 1}
       - {id: JT-BUILD-004, iterations: 1}
-      - {id: JT-BUILD-005, iterations: 1}
       - {id: JT-BUILD-006, iterations: 1}
       - {id: JT-CODEC-001, iterations: 1}
       - {id: JT-CODEC-002, iterations: 1}
@@ -247,7 +244,6 @@ profiles:
         JT-PCM-001:  	{iterations: 0}
         JT-PROBE-002: 	{iterations: 0}
         JT-PCM-008:   	{params: {hours: 2, rate: 44100}}
-        JT-RATE-003:    {params: {rates: [44100, 48000], iterations_per_run: 500}}
 
         # See re/pi1test_platform_notes.md: an 88200 Hz capture wedged an
         # arecord process for ~46 minutes during a smoke run.
@@ -256,24 +252,21 @@ profiles:
         # `functional`.
         JT-PM-001:   {iterations: 0}
         JT-PM-002:   {iterations: 0}
-        
+        JT-PM-004:   {iterations: 0}
+
         # exclude the application/interopability tests for the pi1
         JT-INTEROP-001: {iterations: 0}
         JT-INTEROP-002: {iterations: 0}
         JT-INTEROP-003: {iterations: 0}
         JT-INTEROP-004: {iterations: 0}
 
-        
       arm64-prod:
         # Same reasoning as armhf-prod above: the Pi 4B has no onboard RTC
         # and no suspend-to-RAM support.
         JT-PM-001:   {iterations: 0}
         JT-PM-002:   {iterations: 0}
         JT-PM-004:   {iterations: 0}
-      x86_64-debug:
-        # See the note under `functional`: quality verdicts are void here.
-        JT-AUDIO-003: {iterations: 0}
-        JT-AUDIO-004: {iterations: 0}
+
       arm64-debug:
         JT-AUDIO-003: {iterations: 0}
         JT-AUDIO-004: {iterations: 0}
@@ -281,7 +274,6 @@ profiles:
         JT-PM-002:   {iterations: 0}
         JT-PM-004:   {iterations: 0}
         
-      arm64-debug:
         # exclude the application/interopability tests for the debug kernel
         JT-INTEROP-001: {iterations: 0}
         JT-INTEROP-002: {iterations: 0}
@@ -289,12 +281,15 @@ profiles:
         JT-INTEROP-004: {iterations: 0}
 
       x86_64-debug:
+        # See the note under `functional`: quality verdicts are void here.
+        JT-AUDIO-003: {iterations: 0}
+        JT-AUDIO-004: {iterations: 0}
+
         # exclude the application/interopability tests for the debug kernel
         JT-INTEROP-001: {iterations: 0}
         JT-INTEROP-002: {iterations: 0}
         JT-INTEROP-003: {iterations: 0}
         JT-INTEROP-004: {iterations: 0}
-        
 
   soak:
     description: >
@@ -326,7 +321,7 @@ profiles:
         # single-core board, making rmmod fail with "Module ... is in use".
         JT-PROBE-001: {params: {settle_delay_s: 3}}
         JT-PCM-008: {params: {hours: 2, rate: 44100}}
-        JT-RATE-003: {params: {iterations_per_run: 500}}
+        JT-RATE-003:  {params: {rates: [44100, 48000], iterations_per_run: 500}}
         JT-PROBE-005: {iterations: 0}
         JT-MIDI-007: {params: {duration_seconds: 3600}}
         JT-INTEROP-004: {iterations: 0}
