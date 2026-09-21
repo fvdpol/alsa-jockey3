@@ -101,12 +101,19 @@ esac
 if [ -z "$DEB" ]; then
 	BUILD_HOST=$(python3 "$CONF" get paths.build_host JT_BUILD_HOST alsa-dev)
 	echo "looking for a $TARGET kernel package on $BUILD_HOST..."
+	# Constrained to _$DEBARCH.deb, not just _*.deb: armhf-prod and
+	# arm64-prod share one LOCALVERSION by design (see targets.yaml), so an
+	# arch-unqualified glob plus `ls -t | head -1` hands back whichever of
+	# the two was built most recently on the build host -- not necessarily
+	# the one this target can even install. Found on pi4test (arm64-prod)
+	# 2026-09-21: it fetched and installed an armhf .deb.
 	remote_path=$(ssh "$BUILD_HOST" \
-		"ls -t ~/kbuild/linux-image-*'$LOCALVERSION'-rpi-*_*.deb 2>/dev/null | head -1")
+		"ls -t ~/kbuild/linux-image-*'$LOCALVERSION'-rpi-*_${DEBARCH}.deb 2>/dev/null | head -1")
 	[ -n "$remote_path" ] || {
-		echo "no linux-image-*${LOCALVERSION}-rpi-*_*.deb under ~/kbuild on" \
-		     "$BUILD_HOST -- build one with build_kernel.sh $TARGET --package," \
-		     "or pass a local .deb path as the second argument." >&2
+		echo "no linux-image-*${LOCALVERSION}-rpi-*_${DEBARCH}.deb under" \
+		     "~/kbuild on $BUILD_HOST -- build one with build_kernel.sh" \
+		     "$TARGET --package, or pass a local .deb path as the second" \
+		     "argument." >&2
 		exit 2
 	}
 	DEB=$(mktemp -d)/$(basename "$remote_path")
