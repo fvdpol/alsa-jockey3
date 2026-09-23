@@ -341,14 +341,19 @@ int ploytec_start_streaming(struct usb_interface *intf, void *xfer_buf)
 	u8 status;
 	int ret;
 
+	ISSUE48_TRACE(intf, "start_streaming get_status start");
 	ret = ploytec_get_status(intf, xfer_buf, &status);
+	ISSUE48_TRACE(intf, "start_streaming get_status done ret=%d", ret);
 	if (ret < 0)
 		return ret;
 	dev_dbg(&intf->dev, "Start Streaming: Status: 0x%02x\n", status);
 
-	return usb_control_msg_send(dev, 0, PLOYTEC_SET_STATUS, PLOYTEC_SET_STATUS_TYPE,
-				    status | PLOYTEC_STATUS_STREAMING,
-				    0, NULL, 0, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
+	ISSUE48_TRACE(intf, "start_streaming set_status start");
+	ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_STATUS, PLOYTEC_SET_STATUS_TYPE,
+				   status | PLOYTEC_STATUS_STREAMING,
+				   0, NULL, 0, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
+	ISSUE48_TRACE(intf, "start_streaming set_status done ret=%d", ret);
+	return ret;
 }
 
 /**
@@ -371,9 +376,11 @@ int ploytec_get_rate(struct usb_interface *intf, void *xfer_buf, u16 index, u32 
 	u8 *buf = xfer_buf;
 	int ret;
 
+	ISSUE48_TRACE(intf, "get_rate(idx=%u) start", index);
 	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_GET_RATE, PLOYTEC_REQ_GET_RATE_TYPE,
 				   0x0100, index,
 				   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
+	ISSUE48_TRACE(intf, "get_rate(idx=%u) done ret=%d", index, ret);
 	if (ret < 0)
 		return ret;
 
@@ -431,9 +438,11 @@ int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate, bool 
 		/* A rate change waits before touching the rate at all. */
 		usleep_range(50000, 51000);
 
+		ISSUE48_TRACE(intf, "set_rate single-write(0x86) start");
 		ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_TYPE,
 					   0x0100, PLOYTEC_RATE_IDX_PCM_IN,
 					   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
+		ISSUE48_TRACE(intf, "set_rate single-write(0x86) done ret=%d", ret);
 		if (ret < 0) {
 			dev_err(&intf->dev, "Failed to set rate on EP 0x86: %d\n", ret);
 			return ret;
@@ -444,9 +453,11 @@ int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate, bool 
 	}
 
 	for (i = 0; i < ARRAY_SIZE(burst_index); i++) {
+		ISSUE48_TRACE(intf, "set_rate burst(%u) start", i);
 		ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_TYPE,
 					   0x0100, burst_index[i],
 					   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
+		ISSUE48_TRACE(intf, "set_rate burst(%u) done ret=%d", i, ret);
 		if (ret < 0) {
 			dev_err(&intf->dev, "Failed to set rate on EP 0x%02x: %d\n",
 				burst_index[i], ret);
