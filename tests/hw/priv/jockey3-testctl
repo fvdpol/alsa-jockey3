@@ -75,14 +75,27 @@ HWPARAMS_N_MATCH='packet(s)/URB'
 # would let the suite point kernel tracing at anything.
 TRACE_FUNCS='jockey3_playback_callback jockey3_capture_callback'
 
-# xhci-trace's fixed event list, for issue #49: does the host controller's
-# own event-ring completion for a control transfer match the ~42ms stall
+# xhci-trace's fixed event, for issue #49: does the host controller's own
+# completion status for a control transfer match the ~42ms stall
 # ISSUE48_TRACE() and an OpenVizsla wire capture already measured
-# independently? Fixed here for the same reason TRACE_FUNCS is: the caller
-# names an action, never an event, so this cannot be pointed at anything
-# ftrace's xhci-hcd subsystem exposes beyond URB submit/complete and the
-# raw hardware transfer-completion event.
-XHCI_TRACE_EVENTS='xhci_urb_enqueue xhci_urb_giveback xhci_handle_transfer'
+# independently? xhci_urb_giveback is the one xhci-hcd tracepoint whose
+# format carries an actual completion status (checked against this
+# kernel's own events/xhci-hcd/xhci_urb_giveback/format) -- the others
+# considered (xhci_handle_transfer, xhci_handle_event) decode TRB/event-ring
+# structure, not a status, and fire on every routine bulk transfer besides.
+# Fixed here for the same reason TRACE_FUNCS is: the caller names an
+# action, never an event or a filter.
+XHCI_TRACE_EVENTS='xhci_urb_giveback'
+
+# Kept to non-success control-transfer completions only (type 0 is
+# xhci_urb_giveback's own encoding for "control", per its print_symbolic
+# table) -- this is what isolates the one failing SET_RATE completion by
+# construction, since print_fmt does not render the numeric status field
+# even though it is captured (dmesg already gives the value, -71; this
+# gives its timestamp on xhci_hcd's own clock, correlatable against
+# ISSUE48_TRACE()). Fixed, not caller-supplied, for the same reason the
+# event name is.
+XHCI_TRACE_FILTER='status != 0 && type == 0'
 
 # The Jockey 3's own USB ids, for per-port power switching. Fixed here for the
 # same reason FW_MATCH is: the caller names an ACTION, never a target. A verb
@@ -151,9 +164,8 @@ usage() {
 #   trace-callbacks stop  reset tracing state without printing anything
 #                          (cleanup path for a case that errored before
 #                          collect)
-#   xhci-trace start      begin event tracing of xhci_hcd's own URB
-#                          submit/complete and raw transfer-completion
-#                          events (issue #49)
+#   xhci-trace start      begin event tracing of xhci_hcd's own non-success
+#                          control-transfer completions (issue #49)
 #   xhci-trace collect    stop tracing, print the trace buffer, reset
 #                          tracing state
 #   xhci-trace stop       reset tracing state without printing anything
@@ -721,6 +733,7 @@ xhci-trace)
 		echo 0 > "$tdir/tracing_on" || die "cannot stop tracing to reset it"
 		: > "$tdir/trace" || die "cannot clear trace buffer"
 		for ev in $XHCI_TRACE_EVENTS; do
+			echo "$XHCI_TRACE_FILTER" > "$edir/$ev/filter" || die "cannot filter $ev"
 			echo 1 > "$edir/$ev/enable" || die "cannot enable $ev"
 		done
 		# Best-effort: see trace-callbacks' identical rationale above.
@@ -733,6 +746,7 @@ xhci-trace)
 		cat "$tdir/trace" || die "cannot read trace buffer"
 		for ev in $XHCI_TRACE_EVENTS; do
 			echo 0 > "$edir/$ev/enable" 2>/dev/null || true
+			: > "$edir/$ev/filter" 2>/dev/null || true
 		done
 		: > "$tdir/trace" 2>/dev/null || true
 		exit 0
@@ -744,6 +758,7 @@ xhci-trace)
 		echo 0 > "$tdir/tracing_on" 2>/dev/null || true
 		for ev in $XHCI_TRACE_EVENTS; do
 			echo 0 > "$edir/$ev/enable" 2>/dev/null || true
+			: > "$edir/$ev/filter" 2>/dev/null || true
 		done
 		: > "$tdir/trace" 2>/dev/null || true
 		exit 0
