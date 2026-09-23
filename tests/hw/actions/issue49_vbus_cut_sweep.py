@@ -55,13 +55,18 @@ off_seconds, settle timeout, race jitter window, rates. Only the "idle" vs
 (issue48_trace_enabled=1, the ISSUE48_TRACE() call sites already covering
 every EP0 transfer inside ploytec_initialize_device(): get_firmware,
 set_interface x4, the settle delay, clear_halt x3, get_status). Note it does
-NOT cover ploytec_set_rate() (a separate function, called after
-ploytec_initialize_device() returns) -- "Failed to set rate on EP 0x86" is
-the single most common failure shape seen on i386-prod so far and is
-invisible to this trace. If the captured traces come back clean on cycles
-that dmesg says failed there, that gap is why, and instrumenting
-ploytec_set_rate() the same way is the next thing to add, not evidence
-nothing happened.
+NOT cover ploytec_get_rate(), ploytec_set_rate() or ploytec_start_streaming()
+(all separate functions, called after ploytec_initialize_device() returns,
+from both jockey3_initialize_ploytec()'s probe-time retry loop and
+jockey3_set_rate()) -- "Failed to set rate on EP 0x86" (set_rate_ep) and
+"Ploytec failed to start streaming"/"Failed to start streaming after rate
+change" (start_streaming) are both real, observed failure shapes on
+i386-prod and are invisible to this trace. If a captured trace comes back
+completely clean (every step ret=0) on a cycle dmesg says failed with one
+of those two shapes, that gap is why -- it means ploytec_initialize_device()
+itself genuinely succeeded and the failure is in whichever untraced
+function's message follows -- not evidence nothing happened. Instrumenting
+those three functions the same way is the next thing to add.
 
 The module must already be loaded with issue48_trace_enabled=1 (this script
 does not reload it -- see issue48_settle_sweep.py's reload_with() for how).
@@ -103,8 +108,16 @@ FAILURE_SHAPE_PATTERNS = [
     ("firmware_read", re.compile(r"Firmware version read failed")),
     ("clear_halt", re.compile(r"Failed to clear halt on EP")),
     ("set_rate_ep", re.compile(r"Failed to set rate on EP")),
-    ("get_status_or_other", re.compile(r"Failed to (?:initialize device to change rate|"
-                                        r"read current hardware rate|start streaming)")),
+    # start_streaming is its own step (ploytec_start_streaming(), called right
+    # after ploytec_initialize_device() succeeds, from both
+    # jockey3_initialize_ploytec()'s probe-time retry loop and
+    # jockey3_set_rate()) -- split out from the old catch-all bucket after
+    # finding "Ploytec failed to start streaming" as a cycle's first failure,
+    # with ploytec_initialize_device() having silently succeeded just before.
+    ("start_streaming", re.compile(r"(?:Ploytec failed to start streaming|"
+                                    r"Failed to start streaming after rate change)")),
+    ("get_status_or_get_rate", re.compile(r"Failed to (?:initialize device to change rate|"
+                                           r"read current hardware rate)")),
 ]
 
 
