@@ -49,6 +49,22 @@ off_seconds, settle timeout, race jitter window, rates. Only the "idle" vs
     issue49_vbus_cut_sweep.py --arm idle|active [--cycles 30]
         [--off-seconds 2] [--timeout 15] [--race-ms-min 20]
         [--race-ms-max 120] [--rates 44100,48000,96000] [--out results.json]
+        [--save-trace DIR]
+
+--save-trace reuses #48's own trace_printk() instrumentation
+(issue48_trace_enabled=1, the ISSUE48_TRACE() call sites already covering
+every EP0 transfer inside ploytec_initialize_device(): get_firmware,
+set_interface x4, the settle delay, clear_halt x3, get_status). Note it does
+NOT cover ploytec_set_rate() (a separate function, called after
+ploytec_initialize_device() returns) -- "Failed to set rate on EP 0x86" is
+the single most common failure shape seen on i386-prod so far and is
+invisible to this trace. If the captured traces come back clean on cycles
+that dmesg says failed there, that gap is why, and instrumenting
+ploytec_set_rate() the same way is the next thing to add, not evidence
+nothing happened.
+
+The module must already be loaded with issue48_trace_enabled=1 (this script
+does not reload it -- see issue48_settle_sweep.py's reload_with() for how).
 """
 
 import argparse
@@ -69,6 +85,45 @@ FAIL_MARKER = "probe with driver snd-reloop-jockey3 failed with error"
 OK_MARKER = "Reloop Jockey 3 Remix Firmware"
 CHANNELS = 4
 FORMAT = "S24_3LE"
+TRACE_PATH = "/sys/kernel/debug/tracing/trace"
+
+# Classifies which step the *first* failure in a cycle's window came from,
+# from the same dev_warn/dev_err lines catalogued across i386-prod's
+# captured failures -- ordered so more specific patterns are tried first.
+FAILURE_SHAPE_PATTERNS = [
+    ("firmware_read", re.compile(r"Firmware version read failed")),
+    ("clear_halt", re.compile(r"Failed to clear halt on EP")),
+    ("set_rate_ep", re.compile(r"Failed to set rate on EP")),
+    ("get_status_or_other", re.compile(r"Failed to (?:initialize device to change rate|"
+                                        r"read current hardware rate|start streaming)")),
+]
+
+
+def classify_failure_shape(seen_lines):
+    for label, pattern in FAILURE_SHAPE_PATTERNS:
+        for line in seen_lines:
+            if pattern.search(line):
+                return label
+    return "unclassified" if any(FAIL_MARKER in l for l in seen_lines) else None
+
+
+def clear_trace():
+    """Reset ftrace's ring buffer so each cycle's saved trace is just its
+    own -- same reasoning and same commands as issue48_settle_sweep.py's
+    clear_trace()."""
+    subprocess.run(["sudo", "tee", TRACE_PATH], input="", text=True,
+                    capture_output=True, check=False)
+    subprocess.run(["sudo", "sh", "-c", f"echo 1 > {TRACE_PATH.rsplit('/', 1)[0]}/tracing_on"],
+                    check=False, capture_output=True)
+
+
+def save_trace(dest):
+    r = subprocess.run(["sudo", "cat", TRACE_PATH], capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(r.stdout)
+    return r.stdout
 
 
 def start_playback(device, rate, seconds=2.0):
@@ -153,7 +208,8 @@ def race_reopen_until_gone(idx, rates, seed, race_lo, race_hi, deadline_s=30):
 def wait_for_settle(marker, timeout):
     """Same shape as issue48_settle_sweep.py's wait_for_settle(): one sleep,
     then read the log once -- no polling during the window (see that
-    script's docstring for why polling itself perturbs this measurement)."""
+    script's docstring for why polling itself perturbs this measurement).
+    Also classifies the first failure's shape, per FAILURE_SHAPE_PATTERNS."""
     time.sleep(timeout)
     log = kmsg.read_log()
     idx = None
@@ -163,13 +219,17 @@ def wait_for_settle(marker, timeout):
     seen = log[idx + 1:] if idx is not None else log
     fails = sum(1 for l in seen if FAIL_MARKER in l)
     settled = any(OK_MARKER in l for l in seen)
-    return (fails + 1 if settled else fails), settled
+    shape = classify_failure_shape(seen) if fails else None
+    return (fails + 1 if settled else fails), settled, shape
 
 
-def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi):
+def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi, trace_dir):
     idx, _ = alsa.find_card()
     if idx is None:
         return {"attempts": None, "settled": False, "error": "no card at cycle start"}
+
+    if trace_dir:
+        clear_trace()
 
     marker = kmsg.Marker(f"issue49-{arm}-{i}")
 
@@ -200,8 +260,18 @@ def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi):
         return {"attempts": None, "settled": False,
                 "error": f"usb-power on failed: {(err or '').strip()[:120]}"}
 
-    attempts, settled = wait_for_settle(marker, timeout)
-    return {"attempts": attempts, "settled": settled}
+    attempts, settled, shape = wait_for_settle(marker, timeout)
+
+    result = {"attempts": attempts, "settled": settled, "shape": shape}
+    if trace_dir:
+        # Saved after wait_for_settle()'s sleep completes, deliberately --
+        # see issue48_settle_sweep.py's run_value() for why reading the
+        # trace file before that would itself perturb the measurement.
+        outcome_tag = "ok" if (settled and attempts == 1) else (shape or "unknown")
+        dest = os.path.join(trace_dir, f"{arm}-cycle{i}-{outcome_tag}.trace")
+        save_trace(dest)
+        result["trace"] = dest
+    return result
 
 
 def main():
@@ -215,6 +285,10 @@ def main():
     ap.add_argument("--race-ms-max", type=float, default=120)
     ap.add_argument("--rates", default="44100,48000,96000")
     ap.add_argument("--out")
+    ap.add_argument("--save-trace",
+                     help="directory to save each cycle's ftrace buffer into "
+                          "(reuses #48's issue48_trace_enabled instrumentation "
+                          "-- module must already be loaded with it set to 1)")
     args = ap.parse_args()
 
     ok, why = priv.available()
@@ -222,6 +296,9 @@ def main():
         sys.exit(f"cannot use the privileged helper: {why}")
     if not priv.usb_power_available():
         sys.exit("no Jockey 3 behind a ppps-capable hub port")
+
+    if args.save_trace:
+        os.makedirs(args.save_trace, exist_ok=True)
 
     rates = [int(r) for r in args.rates.split(",")]
     race_lo = args.race_ms_min / 1000.0
@@ -232,25 +309,34 @@ def main():
     results = []
     for i in range(args.cycles):
         r = run_cycle(i, args.arm, rates, args.off_seconds, args.timeout,
-                       race_lo, race_hi)
+                       race_lo, race_hi, args.save_trace)
         results.append(r)
         if r.get("error"):
             print(f"  cycle {i + 1}/{args.cycles}: ERROR: {r['error']}",
                   file=sys.stderr)
         else:
             status = "settled" if r["settled"] else "TIMED OUT"
-            print(f"  cycle {i + 1}/{args.cycles}: {r['attempts']} attempt(s), {status}")
+            shape = f" shape={r['shape']}" if r.get("shape") else ""
+            print(f"  cycle {i + 1}/{args.cycles}: {r['attempts']} attempt(s), "
+                  f"{status}{shape}")
 
     ok_results = [r for r in results if r.get("attempts") is not None]
     if ok_results:
         attempts = [r["attempts"] for r in ok_results]
         flapped = sum(1 for a in attempts if a > 1)
         timed_out = sum(1 for r in ok_results if not r["settled"])
+        shapes = {}
+        for r in ok_results:
+            if r.get("shape"):
+                shapes[r["shape"]] = shapes.get(r["shape"], 0) + 1
         print(f"\n== summary ==")
         print(f"arm={args.arm}: {flapped}/{len(ok_results)} cycles flapped, "
               f"attempts min={min(attempts)} max={max(attempts)}, "
               f"{timed_out} timed out, "
               f"{len(results) - len(ok_results)} errored")
+        if shapes:
+            print("failure shapes (first failure per cycle): "
+                  + ", ".join(f"{k}={v}" for k, v in sorted(shapes.items())))
     else:
         print("\nno usable cycles", file=sys.stderr)
 
