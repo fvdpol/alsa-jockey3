@@ -109,12 +109,20 @@ def classify_failure_shape(seen_lines):
 
 def clear_trace():
     """Reset ftrace's ring buffer so each cycle's saved trace is just its
-    own -- same reasoning and same commands as issue48_settle_sweep.py's
-    clear_trace()."""
+    own -- same reasoning as issue48_settle_sweep.py's clear_trace(), but
+    using tee for tracing_on too instead of `sh -c "echo 1 > ..."`: the
+    sh -c form didn't match the sudoers NOPASSWD rule it was given (fell
+    back to a password prompt, failed silently under check=False) -- every
+    trace saved with that form came back with entries-in-buffer/written:
+    0/0. tee is the same pattern already proven to work for TRACE_PATH
+    itself."""
     subprocess.run(["sudo", "tee", TRACE_PATH], input="", text=True,
                     capture_output=True, check=False)
-    subprocess.run(["sudo", "sh", "-c", f"echo 1 > {TRACE_PATH.rsplit('/', 1)[0]}/tracing_on"],
-                    check=False, capture_output=True)
+    r = subprocess.run(["sudo", "tee", f"{TRACE_PATH.rsplit('/', 1)[0]}/tracing_on"],
+                        input="1", text=True, capture_output=True, check=False)
+    if r.returncode != 0:
+        print(f"warning: could not enable tracing_on: {r.stderr.strip()}",
+              file=sys.stderr)
 
 
 def save_trace(dest):
