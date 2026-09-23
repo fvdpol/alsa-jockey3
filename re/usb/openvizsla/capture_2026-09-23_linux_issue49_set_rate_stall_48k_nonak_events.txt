@@ -1,0 +1,156 @@
+# Control-plane events: parsed2.txt
+#
+# t(ms) is relative to the first transfer of the event.
+# gap(ms) is from the completion of the previous transfer.
+# stream is bulk packets seen on EP 0x05/0x86 since the previous transfer.
+
+================================================================================================
+EVENT 1  [enumeration]  at 1511.403218 s, 44 transfers, span 646.022 ms
+================================================================================================
+     t(ms) |   gap(ms) |  dur(us) | stream | Request
+------------------------------------------------------------------------------------------------
+     0.000 |           |     72.0 |      0 | bRequest=0x00 len=2 -> 03 00
+     0.232 |     0.160 |    128.0 |      0 | bRequest=0x01 wValue=0x0001
+     0.612 |     0.252 |    204.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 00 00 00
+     1.017 |     0.201 |    201.0 |      0 | bRequest=0x00 wIndex=0x0002 len=4 -> 00 01 00 00
+     1.371 |     0.153 |    198.0 |      0 | bRequest=0x00 wIndex=0x0003 len=4 -> 00 01 00 00
+     1.727 |     0.158 |    198.0 |      0 | bRequest=0x00 wIndex=0x0004 len=4 -> 00 01 00 00
+     2.162 |     0.237 |    198.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 00 00 00
+     2.562 |     0.202 |    197.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 00 00 00
+     2.921 |     0.162 |    198.0 |      0 | bRequest=0x00 wIndex=0x0002 len=4 -> 00 01 00 00
+     3.318 |     0.199 |    199.0 |      0 | bRequest=0x00 wIndex=0x0003 len=4 -> 00 01 00 00
+     3.727 |     0.210 |    198.0 |      0 | bRequest=0x00 wIndex=0x0004 len=4 -> 00 01 00 00
+     4.298 |     0.373 |    128.0 |      0 | bRequest=0x03 wValue=0x0001
+   148.002 |   143.576 |     75.0 |      0 | bRequest=0x00 len=2 -> 03 00
+   148.228 |     0.151 |    112.0 |      0 | bRequest=0x01 wValue=0x0001
+   148.576 |     0.236 |    202.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 00 00 00
+   148.964 |     0.186 |    198.0 |      0 | bRequest=0x00 wIndex=0x0002 len=4 -> 00 01 00 00
+   149.315 |     0.153 |    200.0 |      0 | bRequest=0x00 wIndex=0x0003 len=4 -> 00 01 00 00
+   149.668 |     0.153 |    201.0 |      0 | bRequest=0x00 wIndex=0x0004 len=4 -> 00 01 00 00
+   150.090 |     0.221 |    198.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 00 00 00
+   150.552 |     0.264 |    212.0 |      0 | bRequest=0x03 wValue=0x0008 wIndex=0x0001
+   352.051 |   201.287 |    207.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 01 01 01 00
+   352.431 |     0.173 |    174.0 |      0 | bRequest=0x01 wValue=0x0010 wIndex=0x0001
+   352.735 |     0.130 |    212.0 |      0 | bRequest=0x03 wValue=0x0016 wIndex=0x0001
+   353.052 |     0.105 |    198.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 01 01 00 00
+   384.008 |    30.758 |    197.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 01 01 00 00
+   416.010 |    31.805 |    198.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 01 01 00 00
+   448.013 |    31.805 |    198.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 01 01 00 00
+   480.019 |    31.808 |    198.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 01 01 00 00
+   480.457 |     0.240 |    213.0 |      0 | bRequest=0x03 wValue=0x0004 wIndex=0x0001
+   495.854 |    15.184 |    200.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 03 05 10 00
+   496.179 |     0.125 |    173.0 |      0 | bRequest=0x01 wValue=0x0014 wIndex=0x0001
+   552.080 |    55.728 |     72.0 |      0 | GET_DESCRIPTOR wValue=0x0100 len=64 -> 12 01 00 02 ff ff ff 40 0c 20 37 10 00 01 01 02 03 01
+   552.260 |     0.108 |    215.0 |      0 | bRequest=0x03 wValue=0x0004 wIndex=0x0001
+   567.842 |    15.367 |    200.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 03 05 10 00
+   568.209 |     0.167 |    170.0 |      0 | bRequest=0x01 wValue=0x0014 wIndex=0x0001
+   628.035 |    59.656 |     22.0 |      0 | SET_ADDRESS wValue=0x0031
+   644.019 |    15.962 |     94.0 |      0 | GET_DESCRIPTOR wValue=0x0100 len=18 -> 12 01 00 02 ff ff ff 40 0c 20 37 10 00 01 01 02 03 01
+   644.316 |     0.203 |     71.0 |      0 | GET_DESCRIPTOR wValue=0x0200 len=9 -> 09 02 49 00 02 01 00 c0 00
+   644.583 |     0.196 |    221.0 |      0 | GET_DESCRIPTOR wValue=0x0200 len=73 -> 09 02 49 00 02 01 00 c0 00 09 04 00 00 00 ff 00 00 00 09 04 00 01 03 ff 00 00 00 07 05 02 05 04 00 01 07 05 83 02 00 02 01 07 05 05 02 00 02 01 09 04 01 00 00 ff 00 00 00 09 04 01 01 01 ff 00
+   644.984 |     0.180 |     72.0 |      0 | GET_DESCRIPTOR wValue=0x0300 len=255 -> 04 03 09 04
+   645.114 |     0.058 |     92.0 |      0 | GET_DESCRIPTOR wValue=0x0302 wIndex=0x0409 len=255 -> 1e 03 4a 00 6f 00 63 00 6b 00 65 00 79 00 20 00 33 00 20 00 52 00 65 00 6d 00 69 00 78 00
+   645.286 |     0.080 |     77.0 |      0 | GET_DESCRIPTOR wValue=0x0301 wIndex=0x0409 len=255 -> 0e 03 72 00 65 00 6c 00 6f 00 6f 00 70 00
+   645.423 |     0.060 |    113.0 |      0 | GET_DESCRIPTOR wValue=0x0303 wIndex=0x0409 len=255 -> 22 03 6e 00 6f 00 20 00 73 00 65 00 72 00 69 00 61 00 6c 00 20 00 6e 00 75 00 6d 00 62 00 65 00 72 00
+   645.999 |     0.463 |     23.0 |      0 | SET_CONFIGURATION wValue=0x0001
+
+================================================================================================
+EVENT 2  [init+rate]  at 1512.307270 s, 32 transfers, span 206.341 ms
+================================================================================================
+     t(ms) |   gap(ms) |  dur(us) | stream | Request
+------------------------------------------------------------------------------------------------
+     0.000 |           |     32.0 |      0 | GET_FIRMWARE len=3 -> 31 01 06
+     0.635 |     0.603 |     24.0 |      0 | SET_INTERFACE intf=0 alt=1
+     2.211 |     1.552 |     24.0 |      0 | SET_INTERFACE intf=1 alt=1
+     2.921 |     0.686 |     24.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x86
+     3.519 |     0.574 |     24.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x05
+     4.068 |     0.525 |     24.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x83
+     4.661 |     0.569 |     30.0 |      0 | GET_STATUS len=1 -> 32
+     4.785 |     0.094 |     30.0 |      0 | GET_STATUS len=1 -> 32
+     4.910 |     0.095 |    213.0 |      0 | SET_STATUS wValue=0x0032
+     5.271 |     0.148 |     30.0 |      0 | GET_FIRMWARE len=3 -> 31 01 06
+     5.948 |     0.647 |     23.0 |      0 | SET_INTERFACE intf=0 alt=1
+     7.346 |     1.375 |     24.0 |      0 | SET_INTERFACE intf=1 alt=1
+     7.991 |     0.621 |     23.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x86
+     8.460 |     0.446 |     23.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x05
+     8.890 |     0.407 |     23.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x83
+     9.346 |     0.433 |     29.0 |      0 | GET_STATUS len=1 -> 32
+     9.451 |     0.076 |    135.0 |      0 | GET_RATE ep=none wValue=0x0100 len=3 -> 48000 Hz
+    23.851 |    14.265 |      0.0 |      0 | SET_RATE ep=0x86 wValue=0x0100 len=3
+    68.855 |    45.004 |    196.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 01 01 00
+    70.485 |     1.434 |    204.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 01 01 00
+    71.776 |     1.087 |    191.0 |      0 | bRequest=0x01 wValue=0x0010 wIndex=0x0001
+    72.989 |     1.022 |    216.0 |      0 | bRequest=0x03 wValue=0x0016 wIndex=0x0001
+    74.134 |     0.929 |    202.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 01 00 00
+   103.915 |    29.579 |    201.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 01 00 00
+   136.015 |    31.899 |    201.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 01 00 00
+   168.019 |    31.803 |    200.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 01 00 00
+   204.018 |    35.799 |    203.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 01 00 00
+   204.489 |     0.268 |    197.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 00 01 00 00
+   204.875 |     0.189 |    200.0 |      0 | bRequest=0x00 wIndex=0x0002 len=4 -> 00 01 00 00
+   205.266 |     0.191 |    198.0 |      0 | bRequest=0x00 wIndex=0x0003 len=4 -> 00 01 00 00
+   205.659 |     0.195 |    198.0 |      0 | bRequest=0x00 wIndex=0x0004 len=4 -> 00 01 00 00
+   206.213 |     0.356 |    128.0 |      0 | bRequest=0x03 wValue=0x0001
+
+================================================================================================
+EVENT 3  [enumeration]  at 1512.815307 s, 25 transfers, span 281.776 ms
+================================================================================================
+     t(ms) |   gap(ms) |  dur(us) | stream | Request
+------------------------------------------------------------------------------------------------
+     0.000 |           |     71.0 |      0 | bRequest=0x00 len=2 -> 03 00
+     0.166 |     0.095 |    129.0 |      0 | bRequest=0x01 wValue=0x0001
+     0.478 |     0.183 |    198.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 01 01 01 00
+     0.803 |     0.127 |    192.0 |      0 | bRequest=0x01 wValue=0x0010 wIndex=0x0001
+     1.091 |     0.096 |    200.0 |      0 | bRequest=0x00 wIndex=0x0002 len=4 -> 00 01 00 00
+     1.386 |     0.095 |    197.0 |      0 | bRequest=0x00 wIndex=0x0003 len=4 -> 00 01 00 00
+     1.674 |     0.091 |    201.0 |      0 | bRequest=0x00 wIndex=0x0004 len=4 -> 00 01 00 00
+   104.023 |   102.148 |    198.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 01 01 00 00
+   104.398 |     0.177 |    212.0 |      0 | bRequest=0x03 wValue=0x0016 wIndex=0x0001
+   104.848 |     0.238 |    215.0 |      0 | bRequest=0x03 wValue=0x0004 wIndex=0x0001
+   124.010 |    18.947 |    197.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 03 05 10 00
+   124.384 |     0.177 |    171.0 |      0 | bRequest=0x01 wValue=0x0014 wIndex=0x0001
+   184.072 |    59.517 |     72.0 |      0 | GET_DESCRIPTOR wValue=0x0100 len=64 -> 12 01 00 02 ff ff ff 40 0c 20 37 10 00 01 01 02 03 01
+   184.249 |     0.105 |    216.0 |      0 | bRequest=0x03 wValue=0x0004 wIndex=0x0001
+   200.014 |    15.549 |    197.0 |      0 | bRequest=0x00 wIndex=0x0001 len=4 -> 03 05 10 00
+   200.386 |     0.175 |    171.0 |      0 | bRequest=0x01 wValue=0x0014 wIndex=0x0001
+   260.036 |    59.479 |     22.0 |      0 | SET_ADDRESS wValue=0x0004
+   280.022 |    19.964 |     72.0 |      0 | GET_DESCRIPTOR wValue=0x0100 len=18 -> 12 01 00 02 ff ff ff 40 0c 20 37 10 00 01 01 02 03 01
+   280.237 |     0.143 |     51.0 |      0 | GET_DESCRIPTOR wValue=0x0200 len=9 -> 09 02 49 00 02 01 00 c0 00
+   280.382 |     0.094 |    204.0 |      0 | GET_DESCRIPTOR wValue=0x0200 len=73 -> 09 02 49 00 02 01 00 c0 00 09 04 00 00 00 ff 00 00 00 09 04 00 01 03 ff 00 00 00 07 05 02 05 04 00 01 07 05 83 02 00 02 01 07 05 05 02 00 02 01 09 04 01 00 00 ff 00 00 00 09 04 01 01 01 ff 00
+   280.764 |     0.178 |     51.0 |      0 | GET_DESCRIPTOR wValue=0x0300 len=255 -> 04 03 09 04
+   280.902 |     0.087 |     96.0 |      0 | GET_DESCRIPTOR wValue=0x0302 wIndex=0x0409 len=255 -> 1e 03 4a 00 6f 00 63 00 6b 00 65 00 79 00 20 00 33 00 20 00 52 00 65 00 6d 00 69 00 78 00
+   281.085 |     0.087 |     52.0 |      0 | GET_DESCRIPTOR wValue=0x0301 wIndex=0x0409 len=255 -> 0e 03 72 00 65 00 6c 00 6f 00 6f 00 70 00
+   281.230 |     0.093 |     94.0 |      0 | GET_DESCRIPTOR wValue=0x0303 wIndex=0x0409 len=255 -> 22 03 6e 00 6f 00 20 00 73 00 65 00 72 00 69 00 61 00 6c 00 20 00 6e 00 75 00 6d 00 62 00 65 00 72 00
+   281.752 |     0.428 |     24.0 |      0 | SET_CONFIGURATION wValue=0x0001
+
+================================================================================================
+EVENT 4  [init+rate]  at 1513.371354 s, 25 transfers, span 76.355 ms
+================================================================================================
+     t(ms) |   gap(ms) |  dur(us) | stream | Request
+------------------------------------------------------------------------------------------------
+     0.000 |           |     33.0 |      0 | GET_FIRMWARE len=3 -> 31 01 06
+     0.636 |     0.603 |     23.0 |      0 | SET_INTERFACE intf=0 alt=1
+     2.165 |     1.506 |     23.0 |      0 | SET_INTERFACE intf=1 alt=1
+     2.879 |     0.691 |     24.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x86
+     3.482 |     0.579 |     23.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x05
+     4.013 |     0.508 |     23.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x83
+     4.529 |     0.493 |     29.0 |      0 | GET_STATUS len=1 -> 12
+     4.655 |     0.097 |     29.0 |      0 | GET_STATUS len=1 -> 12
+     4.782 |     0.098 |    212.0 |      0 | SET_STATUS wValue=0x0032
+     5.142 |     0.148 |     29.0 |      0 | GET_FIRMWARE len=3 -> 31 01 06
+     5.766 |     0.595 |     25.0 |      0 | SET_INTERFACE intf=0 alt=1
+     7.211 |     1.420 |     24.0 |      0 | SET_INTERFACE intf=1 alt=1
+     7.811 |     0.576 |     24.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x86
+     8.338 |     0.503 |     24.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x05
+     8.819 |     0.457 |     24.0 |      0 | CLEAR_FEATURE(ENDPOINT_HALT) ep=0x83
+     9.191 |     0.348 |     30.0 |      0 | GET_STATUS len=1 -> 32
+     9.303 |     0.082 |    114.0 |      0 | GET_RATE ep=none wValue=0x0100 len=3 -> 44100 Hz
+    24.007 |    14.590 |     51.0 |      0 | SET_RATE ep=0x86 wValue=0x0100 len=3 -> 44100 Hz
+    24.155 |     0.097 |     52.0 |      0 | SET_RATE ep=0x05 wValue=0x0100 len=3 -> 44100 Hz
+    24.305 |     0.098 |     52.0 |      0 | SET_RATE ep=0x86 wValue=0x0100 len=3 -> 44100 Hz
+    24.454 |     0.097 |     52.0 |      0 | SET_RATE ep=0x05 wValue=0x0100 len=3 -> 44100 Hz
+    24.602 |     0.096 |     52.0 |      0 | SET_RATE ep=0x86 wValue=0x0100 len=3 -> 44100 Hz
+    24.753 |     0.099 |    138.0 |      0 | GET_RATE ep=0x86 wValue=0x0100 len=3 -> 44100 Hz
+    76.015 |    51.124 |     30.0 |      0 | GET_STATUS len=1 -> 32
+    76.142 |     0.097 |    213.0 |      0 | SET_STATUS wValue=0x0032
+

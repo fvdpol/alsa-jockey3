@@ -1569,6 +1569,135 @@ designed; it also means "was `48->96` clean before?" cannot be answered by
 comparing pass/fail across builds, only by comparing the underlying
 `watchdog_onset` / stall counts.
 
+## 2026-09-22: cross-target/cross-commit survey, and angle 1 answered -- console-quiet does not clear it
+
+Prompted by an unexpectedly high watchdog count on one `x86_64-debug`
+`JT-RATE-001` run (10/100), all of `tests/hw/results/*/cases/JT-RATE-001*/result.json`
+was scanned -- 537 runs across all six targets (`x86_64-debug/-prod`,
+`arm64-debug/-prod`, `armhf-prod`, `i386-prod`), every driver commit run
+since early August, driver identity resolved via `env.driver.build` or, where
+that was empty, the build-id manifests in `tests/hw/results/manifests/`.
+
+### The rate dependence is structural, not new, and not one target's problem
+
+Of 228 total historical `watchdog_onset_steady_state` hits, **86% (196) land
+on 88200 or 96000** (44100: 9, 48000: 23, 88200: 48, 96000: 148), and this
+holds on every target and every driver commit that has ever hit the watchdog
+at all -- consistent with the fixed 20 ms `JOCKEY3_WATCHDOG_STALL_MS`
+(jockey3.c:265) leaving far less margin at a 83.3 us packet interval (96 kHz)
+than at 226.8 us (44.1 kHz), rather than with any one commit or platform.
+
+### Debug kernels (KASAN/LOCKDEP) amplify it on two independent architectures, not just x86_64's serial console
+
+| target pair | watchdog hits per 100 rate changes |
+|---|---|
+| `arm64-prod` -> `arm64-debug` | 0.79 -> 2.75 |
+| `x86_64-prod` -> `x86_64-debug` | 0.99 -> 3.98 |
+
+Same debug config both places (`KASAN`, `KASAN_GENERIC`, `LOCKDEP`,
+`PROVE_LOCKING`, `DEBUG_ATOMIC_SLEEP`, `DEBUG_OBJECTS`, `DEBUG_KMEMLEAK`,
+`SND_PCM_XRUN_DEBUG`, `WQ_WATCHDOG`). A consistent ~3-5x multiplier on two
+unrelated CPU architectures says this is instrumentation overhead narrowing
+an already-tight margin, not something specific to `x86_64-prod`'s serial
+console.
+
+### Watchdog counts don't track driver commits -- they cluster into isolated per-rig episodes that self-resolve with no code change
+
+- `x86_64-prod`: clean for weeks, then 58 hits over ~6 hours
+  (2026-08-31T18:30 -> 09-01T00:29) spanning commits `55d94edc38`->`cd26ccbe51`
+  -- then **zero hits for the rest of that same `cd26ccbe51` build**, and zero
+  across every subsequent commit and the 7.2->7.3 kernel bump (4600+ changes
+  since).
+- `arm64-prod`: a separate, earlier ~4-hour episode (2026-08-27T16:20->19:59,
+  54 hits, one run hitting 29/200), never recurring since.
+- `armhf-prod` (the weakest hardware: single-core, ARMv6, Pi 1B) is by far the
+  most immune: **2 hits total across 35,164 rate changes**, 9 days of
+  continuous overnight `JT-RATE-00{1,3}` runs on one unchanged build
+  (`282d6b2df3`).
+- `i386-prod`: zero hits (small sample, 112 changes).
+
+Two rigs, two different calendar dates, both vanishing mid-build with no
+driver change either side -- reads as a transient per-rig condition (thermal
+state, USB hub/cable contact, host-side load at that moment) rather than a
+regression any commit introduced or fixed.
+
+### Angle 1 (open question 7) answered: real, not a serial-console artifact -- but console logging is not free either
+
+Frank *intended* to reboot `x86_64-debug` into a freshly rebuilt kernel (the
+previous one was a week older and missing recent `7.3.0-rc1` changes) and
+re-ran `JT-RATE-001` at N=25/100 changes, once with default console settings
+(kernel messages to the serial console) and once after `dmesg -n 1`. **Caught
+after the fact via `uname -a`** (`7.3.0-rc1-alsa-debug+ #6 ... Mon Sep 7
+20:09:10`): the wrong package got installed, and both runs below actually
+ran the same week-old `#6` build the reboot was meant to replace, not the
+intended fresh one. The console-on/off comparison below still stands on its
+own terms (same binary both sides, so it isolates the console variable
+cleanly), but was not yet a data point about the *current* driver HEAD.
+
+| run | console | watchdog hits | rate confinement |
+|---|---|---|---|
+| `20260922T150046Z-functional` | serial console on | 7/100 | 6x 96000, 1x 88200 |
+| `20260922T151842Z-functional` | `dmesg -n 1` (quiet) | 4/100 | 2x 96000, 2x 88200 |
+
+Both runs used the **identical driver+kernel binary**
+(`build_id c0277bc6...`, driver `a7ffb206d3`, kernel `9fa779cee644`, built
+2026-09-08) -- the same binary as an earlier run on 2026-09-15
+(`20260915T142100Z-functional`) that recorded **14/100** hits. So one
+unchanged binary has produced 14, 7 and 4 hits across three runs: the
+run-to-run spread under a fixed build is at least as large as the
+console-on/off difference, which puts the console setting inside the noise
+band rather than establishing it as a controlling variable.
+
+**Answer to open question 7: the stall is real.** Quieting the console did
+not make it vanish (angle 1's own stated criterion), only produced a change
+(7 -> 4) indistinguishable from ordinary run-to-run variance on the same
+binary. The serial console is at most a secondary contributor to variance,
+not the mechanism -- consistent with the debug-kernel-amplification finding
+above (instrumentation of any kind narrows the margin at 88200/96000), and
+not evidence against the leading hardware hypothesis already on record
+(a clock-domain-switch edge case specific to entering the `/256` divider
+config).
+
+### Confirmed on the correct build: `20260922T155643Z-functional`, `x86_64-debug`, HEAD `c6188be`
+
+Reinstalled the intended package (`kernel_git_describe v7.3-rc1-53-gf065677f0fbdc`,
+driver `c6188bed9b`, built 2026-09-22T14:34) and re-ran `JT-RATE-001`,
+n=100. **Outcome: pass.** A single stall event, all at change 77 (`96000`):
+Playback watchdog fired once and recovered with the light URB restart, then
+Capture stalled the "opening a capture stream" way (the older, separately
+documented deferred-recovery path above), whose own light restart also
+failed to bring it back inside its window, so it escalated to a full
+`usb_queue_reset_device()` -- which recovered cleanly (`resets_per_change_pct
+= 1.0%`, `resets_total_device = 1`, `failures = 0`). One escalation in 100
+changes, full recovery, test passes: this is the reset ladder doing exactly
+what it is for, not a new failure mode.
+
+This is also the first genuine current-HEAD data point in this run of
+experiments (the two console-on/off runs above turned out to be on a stale
+`#6` package -- see the correction just above). Contrast with the *other*
+current-HEAD run from earlier the same day, `20260922T134013Z-functional`
+(same driver `c6188be` but a stale kernel package underneath it at the
+time): 10 watchdog onsets, `failures: 1`. Two runs of the literal same
+driver commit, same day, going from a hard fail to a clean single-reset pass
+-- reinforcing that per-run variance dwarfs whatever the console setting or
+any one build contributes, and that the recovery ladder (watchdog -> light
+restart -> full reset) is the thing actually carrying reliability here, not
+the absence of stalls.
+
+### Frank's read: not a submission blocker, a future reliability target
+
+The recovery mechanism -- watchdog detection plus light URB restart -- is
+working as designed in every one of these hundreds of hits across five
+months of test history: no unrecovered stream, no escalation beyond what the
+existing reset ladder already handles, confirmed audible/data-correct
+recovery every time it was checked. This is not treated as a defect blocking
+the mainline submission. It stays open as a **rate-change reliability**
+improvement to pursue afterward -- angles 2 (scope the Ploytec sample clock
+across a `48->96` edge) and 6 (a longer, rate-conditional settle before
+`jockey3_start_urbs()`) above remain the most concrete next steps, along with
+asking whether `JOCKEY3_WATCHDOG_STALL_MS` should scale with the active
+rate's packet interval instead of staying fixed at 20 ms for all four rates.
+
 ## Open questions, in the order worth attacking
 
 1. ~~Measure per-change incidence on each branch, one variable at a time.~~
@@ -1584,6 +1713,254 @@ comparing pass/fail across builds, only by comparing the underlying
    most direct test: if the wedge does not recur with a gap, back-to-back
    resets are implicated; if it does, the cause is elsewhere (cumulative
    device-side state, e.g. a counter or buffer that does not reset per-cycle).
+
+   **2026-09-23 data point, from issue #49 (i386-prod `JT-RATE-004`
+   investigation, no gap between cycles):** after ~60 back-to-back power
+   cuts across three consecutive 20-iteration stress runs, the device
+   stopped reappearing (`aplay -l` empty, though still visible on the USB
+   bus). It was not frozen -- the kernel log showed it alive and actively
+   failing Capture and MIDI IN with `-71` for roughly two minutes until each
+   direction hit `JOCKEY3_MAX_URB_ERRORS=8` and gave up, well after the
+   originally-failed probe. A real mains power cycle (`lib.power.cycle()`,
+   not a VBUS-only cut) recovered it cleanly. Consistent with "back-to-back
+   resets with no gap" as the trigger, and shows the corruption spreads to
+   bulk data endpoints, not just EP0 -- but `gap_seconds` was not varied in
+   this run, so it doesn't by itself distinguish the two branches above.
+   See github.com/fvdpol/alsa-jockey3/issues/49 for the full writeup.
+
+   **2026-09-23 follow-up: a specific, apparently reproducible trigger
+   sequence, and a recovery detail that narrows where the wedge actually
+   lives.** Same `issue49_vbus_cut_sweep.py --arm active` run (i386-prod,
+   `test/issue49-mid-transaction-power-loss`). Exact dmesg sequence that
+   preceded the bus going silent:
+
+   ```
+   USB disconnect, device number 41
+   Rate change to 44100 Hz left a stream stalled (...); attempting recovery
+   [driver-triggered reset -- NOT the test's own power cut]
+   new high-speed USB device number 42
+   New USB device found ... Reloop Jockey 3 Remix Firmware 0x31 v1.0.6
+   Failed to set rate on EP 0x86: -71                 [see below]
+   probe with driver snd-reloop-jockey3 failed with error -71 (both interfaces)
+   USB disconnect, device number 42
+   -- 122 seconds of complete silence, no autonomous re-enumeration attempt --
+   new high-speed USB device number 43                [only after manual recovery]
+   ```
+
+   The pattern: the test's own VBUS cut/reconnect (the `"attempting
+   recovery"` line is that same disconnect's own immediate aftermath, not
+   a second, independent driver-triggered reset -- checked directly and
+   corrected in #49/#50 after first describing it that way) led to a
+   reconnect whose probe then failed at `ploytec_set_rate()`'s first burst
+   write (confirmed via the now-complete `ISSUE48_TRACE()` coverage --
+   `ploytec_initialize_device()` was clean, `set_rate burst(0)` returned
+   `-71`). After that, the bus went completely silent: no USB core retry,
+   nothing, for over two minutes.
+
+   **Recovery detail that's new information:** a real mains power cycle
+   (`lib.power.cycle()`) alone did *not* recover it this time -- waited
+   ~100s, no change. Only an explicit `jockey3-testctl usb-power on`
+   (re-powering the *hub port's* VBUS specifically, a separate switch from
+   the device's own mains supply) brought it back. That points at the wedge
+   this time being in the **hub port's own VBUS state** getting stuck off
+   as a side effect of this failure sequence, rather than (or in addition
+   to) device-side firmware confusion -- a more specific location than the
+   previous data point established.
+
+   Not yet confirmed as reliably reproducible on demand (seen twice now,
+   both under the same general stress, not yet deliberately re-triggered
+   from a clean state). **Parked as its own issue, #50** (xref #48, #49) --
+   not being actively pursued alongside #49's core initialization
+   investigation right now. When picked back up: an OpenVizsla wire-level
+   capture of a deliberately-provoked instance of this exact sequence
+   (driver-triggered reset immediately followed by a VBUS cut/reconnect
+   whose probe fails at `set_rate`), to see what the device and host are
+   actually doing on the wire during the silent window. See `re/usb/` for
+   the existing capture tooling; the capture host itself needs to be a
+   machine other than `alsa-test`, since that box is running the i386
+   kernel #49 needs.
+
+   **2026-09-23, back on #49's core mechanism (not the wedge above): a third
+   sweep arm narrows what "actively rate-changing" actually requires.**
+   `issue49_vbus_cut_sweep.py --arm streaming` isolates whether merely having
+   a stream open and flowing at the moment of the VBUS cut is enough on its
+   own, versus needing the rapid reopen/rate-rotate churn `--arm active`
+   does. One `aplay` opened once, held running across the whole
+   cut/reconnect window, no reopening, no rate rotation: **0/30 clean**,
+   confirmed by grepping all 30 saved traces directly for error return codes
+   (not just the sweep's own "settled" verdict) -- matches `idle`'s 0/30,
+   against `active`'s 37-60% flap rate. Confirmed in source
+   (`jockey3_pcm_hw_params()`, jockey3.c:3066-3067) that
+   `jockey3_set_rate()` only runs when the requested rate actually differs
+   from `chip->current_rate`, which is exactly what `active`'s rate rotation
+   forces on nearly every reopen and a held-open stream never triggers again
+   after its first successful set. So the necessary ingredient is the
+   *repeated* EP0 teardown/reinit churn landing near the reconnect, not
+   simply being open/streaming at cut time. Posted to #49.
+
+   **2026-09-23, cadence magnitude ruled out, then position tested -- a
+   quiet gap eliminates the failure outright.** Reopen cadence *magnitude*
+   doesn't matter either: pushing the reopen interval to 250-400ms (above
+   `start_grace_ms`'s 200ms default, jockey3.c:320) still flapped ~48%,
+   same `set_rate burst(0)`/`-71` signature as the 20-120ms default
+   (37-60%). Frank's sharper follow-up: does *where* a delay sits relative
+   to tearing down the previous stream matter, rather than just its size?
+   Added `--reap-delay-ms`/`--reap-delay-position {before,after}` to
+   `issue49_vbus_cut_sweep.py` (commit d7be14f): `before` holds the current
+   stream open for the delay, then kills it and spawns the next one
+   immediately (zero gap between kill and reopen, same as every prior run);
+   `after` kills it immediately, then leaves an explicit gap with *nothing
+   open at all* for the delay, before spawning the next one. Swept both at
+   100ms and 500ms, n=30 each, trace-confirmed:
+
+   ```
+   before, 100ms: 16/30 flapped (~53%)
+   before, 500ms: 17/30 flapped (~57%)
+   after,  100ms:  0/30 flapped
+   after,  500ms:  0/30 flapped
+   ```
+
+   **`after` is clean at both delays, 0/60 total** -- the first
+   manipulation in this whole investigation that eliminates the failure
+   rather than just relabeling or redistributing it. A silent window as
+   short as 100ms with no PCM device open at all, right after tearing down
+   the previous stream and before opening the next, breaks the race
+   entirely. Points toward the failure needing a new `jockey3_set_rate()`/
+   EP0 sequence to start essentially on the heels of the previous one's
+   teardown, with no quiescent gap -- host-side state (URB ring teardown,
+   `rate_mutex` handoff) or device-side firmware state not having had time
+   to settle before the next command sequence lands, though this doesn't
+   yet distinguish which side. `before` still flaps at roughly the
+   baseline rate but shifts its failure-shape mix toward
+   `firmware_read`/`usb_core_descriptor_read` (early/enumeration-level)
+   over the usual `set_rate_ep` -- flagged as likely an artifact of that
+   implementation's card-presence check going stale by the delay before
+   reap+respawn fire (occasionally racing a fresh `probe()` rather than an
+   established stream's `set_rate()`), not necessarily a true position
+   effect on its own. Posted to #49.
+
+   **2026-09-23, same-rate isolation confirms the rate change (not the
+   reopen) is load-bearing, and the i386-only word-size hypothesis is
+   dropped.** Frank's reasoning: rapid PCM open/close by itself shouldn't
+   matter, since URBs run free for the device's lifetime -- so does the
+   race need an actual rate *change*, or just fast device re-open? Tested
+   with the unmodified `active` arm, fixed at a single rate (`--rates
+   44100`) and 0ms gap (`--race-ms-min/max 0`): after the first reopen,
+   `jockey3_pcm_hw_params()`'s `rate_changed` gate (jockey3.c:3066-3067)
+   no-ops every subsequent one, so this is rapid open/close churn with no
+   EP0 traffic and no URB restart after the first call. Result: **0/30
+   clean**, trace-confirmed (no error codes in 30 saved traces, and
+   exactly one `set_rate burst(0) start` per trace despite dozens of
+   reopen attempts in the window). Confirms it's specifically the repeated
+   `set_rate()`/URB-restart churn that matters, not fast reopen alone.
+
+   Separately, Frank pointed out a fatal flaw in the "32-bit kernel code
+   runs slower, widening the race window" hypothesis floated above: Pi 1B
+   (~700 bogomips) is far slower than the i5 (~6400 bogomips) yet doesn't
+   show this bug at all -- if raw slowness were the variable, Pi 1B should
+   reproduce it more easily, not less. Checked `docs/test_status.md`'s
+   JT-RATE-004 row directly: passes on x86_64-debug/prod, arm64-debug/prod,
+   *and* armhf-prod -- fails only on i386-prod. armhf is also 32-bit and is
+   clean, which rules out word size as the general variable. A SWIOTLB/
+   bounce-buffer check on the i386-prod boot log (a 32-bit DMA-addressing
+   candidate) found nothing, and an IOMMU is active
+   (`iommu: Default domain type: Translated`), arguing against that too.
+   Current best read: something specific to the i386 kernel *build*
+   interacting with this EliteDesk's chipset/`xhci_hcd`, not a portable
+   CPU-speed or word-size effect. Most informative untested check: the
+   identical 0-gap race on x86_64-prod on the *same* hardware (only kernel
+   word size/build differs) -- needs a boot-kernel swap on the shared rig,
+   not done without Frank's go-ahead. Posted to #49.
+
+   **2026-09-23, first wire-level capture of a real `set_rate_ep`
+   failure.** OpenVizsla wired up end-to-end: OV3 taps the bus between
+   `alsa-test` and the hub/Jockey3, `pi4test` (arm64-prod) runs
+   `ov_snapshot.py` under **pypy3** (0 overflow vs CPython's 51 on an
+   identical smoke-test burst, ~half the CPU -- matters given Pi4's
+   weaker single-thread performance than the i5 all the
+   `ov_ftdi_capture_performance.md` numbers were measured on), triggered
+   live off `alsa-test`'s own kernel log. Along the way, found and fixed a
+   real bug in `tests/hw/priv/jockey3-testctl`'s `kmsg-follow`: `dmesg
+   --follow` fully block-buffers stdout once piped, so a live reader can
+   stall a long time between flushes -- fixed with `stdbuf -oL` (commit
+   076e478). Capture window settled at `pre_seconds=1.0`/`post_seconds=2.0`
+   (small enough that the trigger-time render pass, the documented
+   ~85%-of-a-core interpreter cost, stays fast).
+
+   `issue49_vbus_cut_sweep.py --arm active --cycles 15`, cycle 1 hit
+   `set_rate_ep`, trigger caught it clean (60,553 packets,
+   `overflow_delta=0`). Correlated against the kernel log (device address
+   37 = kernel's "device number 9"): `GET_RATE` succeeds (44100 Hz), then
+   **the `SET_RATE(ep=0x86, wLength=3)` SETUP stage is sent and cleanly
+   ACKed by the device -- and then nothing.** No OUT data phase, no STATUS
+   stage, no STALL, no visible rejection: 41ms of no traffic at all to
+   that address, then 3 PING probes (host checking OUT readiness), then 6
+   retries of an unrelated `SET_INTERFACE(intf=1, alt=0)` SETUP, none
+   ACKed either. The device then disappears from address 37 entirely and
+   reappears at a new address (50) -- a full bus reset. So the device
+   *accepts* the SET_RATE SETUP and then goes unresponsive before
+   servicing the data stage, rather than rejecting the request outright --
+   consistent with firmware-side state getting stuck partway through this
+   specific request, not a host/driver bug (host-side traces have been
+   clean right up to this exact point in every trace captured all
+   session). One open question this capture can't resolve: `filter_nak`
+   was on (needed for the capture host's packet budget), which drops the
+   NAK/PING handshake storm in gateware -- so "41ms of nothing" could be
+   true silence or a NAK storm the filter hid; a follow-up with
+   `filter_nak=false` for this one narrow scenario would tell the two
+   apart. Posted to #49; sidecar's Conclusion filled in at
+   `~/alsa-dev/ov-captures/issue49/issue49_20260923T155547Z_1-13-1-1-0-Failed-to-set-rate-on-EP-0x86.md`.
+
+   **2026-09-23, follow-up capture with `filter_nak=false` resolves the
+   open question -- it's true silence, not a NAK storm.** Frank's
+   suspicion going in was the opposite: that the device was NAKing
+   throughout and the filter had hidden it. Reran the identical scenario
+   with the filter off (accepted the higher packet-rate cost -- capture
+   host climbed to ~99% CPU and some overflow accumulated at idle, but the
+   triggered captures themselves still came back clean, `overflow_delta=0`
+   both times). Cycle 6 of a fresh 15-cycle sweep hit `set_rate_ep` again
+   (48000 Hz this time, a different device address, same shape): `GET_RATE`
+   succeeds, `SET_RATE ep=0x86` SETUP+DATA0 sent and ACKed, then the
+   identical ~42ms gap, 3 PINGs, 6 retried `SET_INTERFACE(1,0)` SETUPs,
+   device reappears at a new address. **With the filter off, none of that
+   activity gets any response at all -- no ACK, no NAK, no STALL.**
+   Checked directly that the tooling does capture NAK/ACK responses
+   reliably when the device gives one: every other PING elsewhere in this
+   same trace gets an ACK within 24us, without exception. So the device
+   genuinely stops responding to the bus at all for ~42ms right after
+   accepting the SET_RATE SETUP stage -- not rejecting it, not stalling
+   it, just gone -- before the host gives up and the bus resets. Two
+   independent captures (different addresses, different rates) show the
+   identical shape, which is a real mechanism, not a one-off. Posted to
+   #49.
+
+   **2026-09-23, per-token timing and a bus-suspend check, full detail
+   in `re/usb/issue49_set_rate_stall_analysis.md`.** Frank asked for the
+   response-time detail against a successful `SET_RATE` in the same
+   trace: normal case is SETUP-ACK -> PING within 23us -> ACK -> OUT ->
+   NYET -> IN(status) -> ACK, 52us total, every time. The failing case is
+   byte-for-byte identical through the SETUP's ACK, then diverges exactly
+   one step later -- 41.8ms before the host even attempts the first PING,
+   where the successful case took 23us (~1800x, against a spec that gives
+   an HS device at most 192 bit times/~400ns to respond at all). That gap
+   is host-side silence (nothing was sent, so it isn't the device's
+   non-response yet); only once the host does probe (3 PINGs + 6 retries
+   of a different request) does the device's total non-response become
+   unambiguous. Also checked whether the *bus itself* stalled (SOF
+   tokens stopped) rather than just this endpoint -- literal `SOF` lines
+   are suppressed by the renderer for declutter, but the frame/microframe
+   counter embedded in every line's timestamp bracket is populated
+   directly from real captured SOF tokens, and it advances continuously
+   through the whole gap (210.5 -> 252.4 frames, matching the 41.8ms
+   elapsed almost exactly) -- ruling out a bus-wide stall or the device
+   autosuspending (USB 2.0's Device Suspend Idle Time is 3.0ms; SOF never
+   stopped, so that condition was never met). So the bus's own clock
+   never missed a beat -- what stalled was specifically the next
+   transaction for this one endpoint. Open follow-up: correlate this
+   window against `ISSUE48_TRACE()`'s own kernel-side timestamps for the
+   same call, to see whether the 41.8ms gap already exists between the
+   driver submitting the transfer and the host controller issuing the
+   next token.
 4. ~~**What does the wire show during a failing rate change?**~~ **Answered
    2026-08-17** -- capture IN never produces a single packet, while playback
    OUT resumes normally and EP0 reports no fault. See the 08-17 section. The
@@ -1597,9 +1974,14 @@ comparing pass/fail across builds, only by comparing the underlying
 6. **Does sending `SET_STATUS` unconditionally fix the capture stall?** New
    2026-08-17. The single most actionable item to come out of the vendor
    comparison -- see divergence 1 in that section.
-7. **Is the `48000->96000` mid-stream stall real, or a serial-console
-   artifact?** New 2026-08-31. Re-run console-quiet first (angle 1 in that
-   section); everything else is downstream of that answer.
+7. ~~**Is the `48000->96000` mid-stream stall real, or a serial-console
+   artifact?**~~ **Answered 2026-09-22: real.** Console-quiet did not clear
+   it (7/100 -> 4/100, within the 14/7/4 spread already seen across three
+   runs of one unchanged binary). See the 2026-09-22 section above. Not a
+   blocker for submission -- the watchdog/restart recovery already handles
+   every occurrence -- but open as a future rate-change-reliability target:
+   scope the sample clock on a `48->96` edge (angle 2), and consider scaling
+   `JOCKEY3_WATCHDOG_STALL_MS` with the active rate instead of a fixed 20 ms.
 
 ## Next steps: characterize vendor up/down behavior before touching the driver
 
