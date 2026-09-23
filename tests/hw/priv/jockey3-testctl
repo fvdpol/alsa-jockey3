@@ -493,10 +493,18 @@ kmsg-follow)
 	# assume, so probe it with a non-following read first (fast, output
 	# discarded) and pick the follow variant that works. A plain follow still
 	# captures the log, only the priority shortcut stops working on it.
+	#
+	# stdbuf -oL: dmesg's stdout is fully block-buffered once it is not a
+	# terminal (the normal case for any consumer of this command), so a new
+	# record can sit unflushed for a long time behind whatever accumulated
+	# before it -- a live watcher piping this output sees bursts followed by
+	# silence rather than each record as it lands. Line-buffering here is
+	# free (dmesg already writes one record per line) and makes every record
+	# visible to the reader immediately.
 	if dmesg --raw >/dev/null 2>&1; then
-		exec dmesg --follow --raw
+		exec stdbuf -oL dmesg --follow --raw
 	fi
-	exec dmesg --follow --color=never
+	exec stdbuf -oL dmesg --follow --color=never
 	;;
 
 dmesg-mark)
