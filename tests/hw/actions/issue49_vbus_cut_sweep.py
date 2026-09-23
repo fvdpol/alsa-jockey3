@@ -57,7 +57,16 @@ precondition before the cut varies.
     issue49_vbus_cut_sweep.py --arm idle|active|streaming [--cycles 30]
         [--off-seconds 2] [--timeout 15] [--race-ms-min 20]
         [--race-ms-max 120] [--rates 44100,48000,96000] [--out results.json]
-        [--save-trace DIR]
+        [--save-trace DIR] [--reap-delay-ms MS] [--reap-delay-position before|after]
+
+`--reap-delay-ms`/`--reap-delay-position` (active arm only): a settle-delay
+sweep already ruled out cadence *magnitude* as the mechanism (200-400ms
+reopen intervals, above start_grace_ms, flapped the same ~48% as the
+default 20-120ms). This asks about *position* instead -- a fixed delay
+right before reap() (holding the current stream open longer before
+teardown) versus right after it (an explicit gap with nothing open at all
+before the next stream is spawned). Replaces the random race-ms jitter
+with a deterministic delay when set. See race_reopen_until_gone().
 
 --save-trace reuses #48's own trace_printk() instrumentation
 (issue48_trace_enabled=1). ISSUE48_TRACE() now covers the whole
@@ -232,12 +241,30 @@ def cut_power_async():
     return t, box
 
 
-def race_reopen_until_gone(idx, rates, seed, race_lo, race_hi, deadline_s=30):
+def race_reopen_until_gone(idx, rates, seed, race_lo, race_hi, deadline_s=30,
+                           reap_delay_ms=None, reap_delay_position="after"):
     """JT-RATE-004's race_rate_change_against_cut(), trimmed to what this
     script needs: keep reopening aplay at a rotating rate until the card is
     gone. Returns the number of reopen attempts (not itself a metric this
     script reports -- kept only because interrupting mid-open cleanly needs
-    the same reap() dance JT-RATE-004 uses)."""
+    the same reap() dance JT-RATE-004 uses).
+
+    reap_delay_ms, when set, replaces the random race_lo..race_hi hold-time
+    jitter with a fixed, deterministic delay placed on one specific side of
+    reap() -- isolating *where* in the reopen cycle a delay sits, not just
+    its magnitude (the grace-period sweep already ruled out magnitude/cadence
+    alone as the mechanism; this asks whether position does instead):
+
+        "before" -- delay right before reap(), i.e. the stream just spawned
+                    last iteration is held open longer before being torn
+                    down. This is the same role the old random jitter played,
+                    just deterministic.
+        "after"  -- delay right after reap(), i.e. an explicit gap where
+                    nothing is open at all (no PCM device open, no in-flight
+                    hw_params()) before the next stream is spawned.
+
+    Skipped on the very first iteration in both cases: there is nothing to
+    hold or leave a gap after yet."""
     device = alsa.device_name(idx)
     gen = p = None
     attempt = 0
@@ -246,12 +273,18 @@ def race_reopen_until_gone(idx, rates, seed, race_lo, race_hi, deadline_s=30):
         now_idx, _ = alsa.find_card()
         if now_idx is None:
             break
-        if p is not None:
+        had_stream = p is not None
+        if reap_delay_ms is not None and reap_delay_position == "before" and had_stream:
+            time.sleep(reap_delay_ms / 1000.0)
+        if had_stream:
             reap(gen, p)
+        if reap_delay_ms is not None and reap_delay_position == "after" and had_stream:
+            time.sleep(reap_delay_ms / 1000.0)
         attempt += 1
         rate = rates[(seed + attempt) % len(rates)]
         gen, p = start_playback(device, rate)
-        time.sleep(random.uniform(race_lo, race_hi))
+        if reap_delay_ms is None:
+            time.sleep(random.uniform(race_lo, race_hi))
     if p is not None:
         reap(gen, p)
     return attempt
@@ -309,7 +342,8 @@ def wait_for_settle(marker, timeout):
     return (fails + 1 if settled else fails), settled, shape, usb_core_retries
 
 
-def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi, trace_dir):
+def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi, trace_dir,
+             reap_delay_ms=None, reap_delay_position="after"):
     idx, _ = alsa.find_card()
     if idx is None:
         return {"attempts": None, "settled": False, "error": "no card at cycle start"}
@@ -337,7 +371,9 @@ def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi, trace_dir):
     else:
         off_thread, off_box = cut_power_async()
         marker.write()
-        race_reopen_until_gone(idx, rates, i, race_lo, race_hi)
+        race_reopen_until_gone(idx, rates, i, race_lo, race_hi,
+                               reap_delay_ms=reap_delay_ms,
+                               reap_delay_position=reap_delay_position)
         off_thread.join(timeout=30)
         if off_box.get("rc") != 0:
             return {"attempts": None, "settled": False,
@@ -391,6 +427,16 @@ def main():
     ap.add_argument("--timeout", type=float, default=15.0)
     ap.add_argument("--race-ms-min", type=float, default=20)
     ap.add_argument("--race-ms-max", type=float, default=120)
+    ap.add_argument("--reap-delay-ms", type=float,
+                     help="active arm only: replace the random race-ms jitter "
+                          "with this fixed delay, placed per --reap-delay-position. "
+                          "Isolates delay *position* relative to reap() rather "
+                          "than just cadence magnitude (see race_reopen_until_gone()).")
+    ap.add_argument("--reap-delay-position", choices=["before", "after"], default="after",
+                     help="before: hold the current stream open this long before "
+                          "tearing it down. after: leave an explicit gap with "
+                          "nothing open this long before spawning the next one. "
+                          "Only meaningful with --reap-delay-ms.")
     ap.add_argument("--rates", default="44100,48000,96000")
     ap.add_argument("--out")
     ap.add_argument("--save-trace",
@@ -433,12 +479,16 @@ def main():
     race_lo = args.race_ms_min / 1000.0
     race_hi = args.race_ms_max / 1000.0
 
+    reap_tag = f" reap_delay={args.reap_delay_ms}ms/{args.reap_delay_position}" \
+        if args.reap_delay_ms is not None else ""
     print(f"== arm={args.arm} cycles={args.cycles} off_seconds={args.off_seconds} "
-          f"timeout={args.timeout} ==")
+          f"timeout={args.timeout}{reap_tag} ==")
     results = []
     for i in range(args.cycles):
         r = run_cycle(i, args.arm, rates, args.off_seconds, args.timeout,
-                       race_lo, race_hi, args.save_trace)
+                       race_lo, race_hi, args.save_trace,
+                       reap_delay_ms=args.reap_delay_ms,
+                       reap_delay_position=args.reap_delay_position)
         results.append(r)
         if r.get("error"):
             print(f"  cycle {i + 1}/{args.cycles}: ERROR: {r['error']}",
