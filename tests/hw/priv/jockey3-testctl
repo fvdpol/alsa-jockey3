@@ -87,15 +87,17 @@ TRACE_FUNCS='jockey3_playback_callback jockey3_capture_callback'
 # action, never an event or a filter.
 XHCI_TRACE_EVENTS='xhci_urb_giveback'
 
-# Kept to non-success control-transfer completions only (type 0 is
-# xhci_urb_giveback's own encoding for "control", per its print_symbolic
-# table) -- this is what isolates the one failing SET_RATE completion by
-# construction, since print_fmt does not render the numeric status field
-# even though it is captured (dmesg already gives the value, -71; this
-# gives its timestamp on xhci_hcd's own clock, correlatable against
-# ISSUE48_TRACE()). Fixed, not caller-supplied, for the same reason the
-# event name is.
-XHCI_TRACE_FILTER='status != 0 && type == 0'
+# Kept to control-transfer completions carrying exactly issue #49's -EPROTO
+# (type 0 is xhci_urb_giveback's own encoding for "control", per its
+# print_symbolic table). Deliberately not "status != 0": the racing
+# reopen/rate-change churn this is run alongside tears down and reissues
+# real EP0 transfers on every reopen, and a cancelled-in-flight control
+# URB completing with a benign status (-ENOENT/-ECONNRESET, from the
+# teardown itself, not a hardware fault) produced hundreds of hits per
+# cycle even when nothing failed -- checked directly on this rig before
+# settling on the exact code. Fixed, not caller-supplied, for the same
+# reason the event name is.
+XHCI_TRACE_FILTER='status == -71 && type == 0'
 
 # The Jockey 3's own USB ids, for per-port power switching. Fixed here for the
 # same reason FW_MATCH is: the caller names an ACTION, never a target. A verb
