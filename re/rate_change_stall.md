@@ -1961,6 +1961,29 @@ rate's packet interval instead of staying fixed at 20 ms for all four rates.
    same call, to see whether the 41.8ms gap already exists between the
    driver submitting the transfer and the host controller issuing the
    next token.
+
+   **2026-09-23, two hypotheses checked and ruled out, and the pause is
+   confirmed host-side.** Full detail in
+   `re/usb/issue49_set_rate_stall_analysis.md`. Frank's aplay-respawn
+   hypothesis (maybe the 41.8ms and the `SET_INTERFACE` retries belong to
+   the *next* reopen discovering the device fresh, not the original
+   failure) -- checked and rejected: every token in the sequence targets
+   the *same* device address, no `SET_ADDRESS`/`GET_DESCRIPTOR` appears,
+   and `aplay` has no path to issue `SET_INTERFACE` at all (kernel-driver
+   only). Also checked `PLOYTEC_CTRL_TIMEOUT_MS` (`ploytec_proto.h`, 2000ms)
+   against the observed 41.8ms -- not even close, so the driver's own
+   configured EP0 timeout isn't what ends the pause. Re-reading the
+   per-token evidence directly: the device ACKs the SETUP correctly (same
+   as every successful transfer in the trace) -- that ACK is the last
+   thing *either side* does for 41.8ms, and it's the **host** that doesn't
+   continue, not the device rejecting anything. Question is now squarely
+   host-side. Next: a combined capture -- `--save-trace` (for
+   `ISSUE48_TRACE()`'s own `burst(0) start`/`done` timestamps) plus the
+   OV3 trigger armed simultaneously, to catch the *same* failure instance
+   both ways and see whether `usb_control_msg_send()` was blocked the
+   whole 41.8ms (delay is inside the synchronous call) or returned almost
+   immediately (the wire-visible silence is post-failure housekeeping,
+   which would itself be a distinct finding).
 4. ~~**What does the wire show during a failing rate change?**~~ **Answered
    2026-08-17** -- capture IN never produces a single packet, while playback
    OUT resumes normally and EP0 reports no fault. See the 08-17 section. The

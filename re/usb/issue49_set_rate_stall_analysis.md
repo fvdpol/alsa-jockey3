@@ -241,14 +241,70 @@ not the host controller or the bus as a whole.
   the host's side (e.g. an interrupt or completion the host controller
   itself was waiting on).
 
+## Ruled out: an aplay respawn causing a fresh enumeration
+
+Frank's hypothesis, checked and rejected: could the 41.8ms gap and the
+following `SET_INTERFACE(1,0)` retries actually belong to the *next*
+`aplay` respawn (part of `--arm active`'s rapid reopen/rate-rotate churn)
+discovering the device fresh, rather than to the original failed
+transfer? No -- every token in the whole sequence (the original
+`SET_RATE` SETUP, the 3 PINGs, all 6 `SET_INTERFACE` retries) is addressed
+to the *same* device address (37 or 49, matching the address the original
+`GET_RATE`/`SET_RATE` used). A fresh enumeration needs `SET_ADDRESS`,
+`GET_DESCRIPTOR`, etc. first, and none of that appears -- it's all still
+the one live USB connection. Independently: `aplay` has no path to issue
+`SET_INTERFACE` at all -- that's a kernel-driver-only call
+(`usb_set_interface()`), never something a userspace PCM client can
+trigger directly. So whatever issues the `SET_INTERFACE(1,0)` retries is
+kernel/USB-core software reacting to the original failure, not a new
+userspace-driven device discovery.
+
+## Ruled out: the driver's own configured control-transfer timeout
+
+`ploytec_proto.c`/`ploytec_proto.h` (`PLOYTEC_CTRL_TIMEOUT_MS = 2000`,
+2 full seconds) is the ceiling `usb_control_msg_send()`/`_recv()` pass to
+the USB core for every EP0 call, including this one. 2000ms is nowhere
+near the observed 41.8ms, so whatever ends the pause and produces `-71`
+here is **not** this driver-configured deadline expiring. Ruling this out
+matters because it was the most obvious "the driver just gave up on
+schedule" explanation, and the numbers flatly don't support it.
+
+## Sharpened by direct observation: the pause is host-side, not device rejection
+
+Re-reading the per-token evidence directly (not from timeout-elapsed
+inference): the device did exactly what it should -- it ACKed the
+`SET_RATE` SETUP stage correctly, the same as in every successful
+transaction in the same trace. That ACK is the *last* thing either side
+does for 41.8ms. The host is the side that does not continue: no PING, no
+OUT attempt, nothing, until 41.8ms have passed. Only once the host
+finally does act (3 PINGs, then 6 retries of a different request) does
+the device's non-response become part of the picture. So the open
+question is now squarely about the *host* side: what, in the driver's
+own software, the USB core, or the host controller's own completion
+path, produces a 41.8ms silence immediately after a request that was
+accepted cleanly, and long before the driver's own 2000ms ceiling would
+ever apply.
+
 ## Open follow-ups
 
-1. Correlate this exact wire window against `ISSUE48_TRACE()`'s own
-   kernel-side timestamps for this call, to see whether the 41.8ms gap
-   is already present between the driver *submitting* the transfer and
-   the host controller *issuing* the next token -- would tell us whether
-   the delay originates in host software/scheduling or already reflects
-   the same stall from the host controller's perspective.
+1. **In progress**: correlate this exact wire window against
+   `ISSUE48_TRACE()`'s own kernel-side timestamps for the same call
+   (`ploytec_set_rate()`'s `burst(0) start`/`burst(0) done ret=-71` trace
+   points), captured simultaneously with a fresh OV3 wire capture of the
+   *same* failure instance. Two possible outcomes distinguish very
+   different mechanisms:
+   - if the trace-recorded duration between `start` and `done` is itself
+     ~41.8ms, `usb_control_msg_send()` was genuinely blocked the whole
+     time waiting on the URB -- the delay *is* the failure mechanism,
+     sitting somewhere in the host controller's own completion path;
+   - if that duration is microseconds instead, the call already returned
+     with `-71` almost immediately, and everything seen on the wire
+     afterward (the 41.8ms silence, the PING/SET_INTERFACE attempts) is
+     *post-failure* housekeeping (probe-failure path, USB core cleanup)
+     that happens to be slow to touch the bus again -- which would itself
+     be a distinct, interesting finding: the kernel believing the
+     transfer failed well before the device had actually been given up
+     on at the wire level.
 2. A vendor (Windows/macOS) driver capture at the same transition, for
    comparison -- does the reference driver ever hit this window at all,
    or does its own timing/sequencing avoid it structurally?
