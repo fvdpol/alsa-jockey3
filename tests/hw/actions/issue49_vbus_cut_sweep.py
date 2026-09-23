@@ -27,26 +27,31 @@ priv.usb_power() exclusively. The 0/100 clean result posted to #48 was
 lib.power.cycle() (cold boot) at the shipped usleep_range(25, 35) -- it does
 not, on its own, say anything about the warm-reconnect case.
 
-Two arms, same fixed settle delay (this script does not reload/sweep the
+Three arms, same fixed settle delay (this script does not reload/sweep the
 module -- reload once at the value under test before running either arm):
 
-    idle    -- priv.usb_power("off"), wait, priv.usb_power("on"). Nothing
-               else happening. Isolates "does a VBUS-only warm reconnect
-               alone elevate the failure rate", independent of any
-               concurrent USB activity.
-    active  -- mirrors JT-RATE-004's own race_rate_change_against_cut():
-               fire usb_power("off") in the background (the privileged
-               helper takes 2-4s round-tripping through uhubctl) and, while
-               that resolves, keep reopening aplay at a rotating rate every
-               20-120ms until the card actually disappears. Isolates
-               whether the mid-transaction stress adds anything on top of
-               the warm-reconnect condition alone.
+    idle       -- priv.usb_power("off"), wait, priv.usb_power("on").
+                  Nothing else happening. Isolates "does a VBUS-only warm
+                  reconnect alone elevate the failure rate", independent
+                  of any concurrent USB activity. 0/30 clean.
+    active     -- mirrors JT-RATE-004's own race_rate_change_against_cut():
+                  fire usb_power("off") in the background (the privileged
+                  helper takes 2-4s round-tripping through uhubctl) and,
+                  while that resolves, keep reopening aplay at a rotating
+                  rate every 20-120ms until the card actually disappears.
+                  11/30-12/20 flapped, depending on run.
+    streaming  -- splits what "active" conflates: one aplay opened ONCE
+                  (no reopening, no rate rotation) and held across the
+                  whole cut/reconnect window. Isolates whether rapid
+                  *reopening* specifically matters, or whether merely
+                  having a stream open and flowing at cut time is already
+                  enough on its own.
 
-Held fixed across both arms and matched to JT-RATE-004's own defaults:
-off_seconds, settle timeout, race jitter window, rates. Only the "idle" vs
-"active" precondition varies.
+Held fixed across all arms and matched to JT-RATE-004's own defaults:
+off_seconds, settle timeout, race jitter window, rates. Only the
+precondition before the cut varies.
 
-    issue49_vbus_cut_sweep.py --arm idle|active [--cycles 30]
+    issue49_vbus_cut_sweep.py --arm idle|active|streaming [--cycles 30]
         [--off-seconds 2] [--timeout 15] [--race-ms-min 20]
         [--race-ms-max 120] [--rates 44100,48000,96000] [--out results.json]
         [--save-trace DIR]
@@ -249,6 +254,28 @@ def race_reopen_until_gone(idx, rates, seed, race_lo, race_hi, deadline_s=30):
     return attempt
 
 
+def hold_stream_until_gone(idx, rate, deadline_s=30):
+    """Open ONE aplay at @rate and hold it -- no reopening, no rate
+    rotation -- until the card disappears or @deadline_s elapses.
+
+    Isolates "streaming" from "active": race_reopen_until_gone() conflates
+    two things that might independently matter -- rapid *reopening*
+    (a fresh hw_params()/rate change every 20-120ms) and simply having a
+    stream open and flowing at the moment VBUS drops. This holds only the
+    second condition, with nothing reopening at all."""
+    device = alsa.device_name(idx)
+    gen, p = start_playback(device, rate, seconds=deadline_s + 5)
+    deadline = time.time() + deadline_s
+    while time.time() < deadline:
+        now_idx, _ = alsa.find_card()
+        if now_idx is None:
+            break
+        if p.poll() is not None:
+            break
+        time.sleep(0.2)
+    reap(gen, p)
+
+
 def wait_for_settle(marker, timeout):
     """Same shape as issue48_settle_sweep.py's wait_for_settle(): one sleep,
     then read the log once -- no polling during the window (see that
@@ -288,6 +315,15 @@ def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi, trace_dir):
         if rc != 0:
             return {"attempts": None, "settled": False,
                     "error": f"usb-power off failed: {(err or '').strip()[:120]}"}
+    elif arm == "streaming":
+        off_thread, off_box = cut_power_async()
+        marker.write()
+        hold_stream_until_gone(idx, rates[i % len(rates)])
+        off_thread.join(timeout=30)
+        if off_box.get("rc") != 0:
+            return {"attempts": None, "settled": False,
+                    "error": f"usb-power off failed: "
+                             f"{(off_box.get('err') or '').strip()[:120]}"}
     else:
         off_thread, off_box = cut_power_async()
         marker.write()
@@ -328,7 +364,7 @@ def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi, trace_dir):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--arm", required=True, choices=["idle", "active"])
+    ap.add_argument("--arm", required=True, choices=["idle", "active", "streaming"])
     ap.add_argument("--cycles", type=int, default=30)
     ap.add_argument("--off-seconds", type=float, default=2.0)
     ap.add_argument("--timeout", type=float, default=15.0)
