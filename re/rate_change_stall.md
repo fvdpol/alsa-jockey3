@@ -2028,6 +2028,22 @@ rate's packet interval instead of staying fixed at 20 ms for all four rates.
    independently: the SETUP stage is accepted, but the data payload never
    gets through. Two completely different observation methods now agree
    precisely. Posted to #49.
+
+   **2026-09-23, reboot into x86_64 then a second machine entirely --
+   not i386-only, but not generic `xhci_hcd` either.** Full detail in
+   `re/usb/issue49_set_rate_stall_analysis.md`. First, rebooted this same
+   EliteDesk into its separate 64-bit rootfs: `set_rate_ep` reproduces
+   readily there too (identical wire signature, three more OpenVizsla
+   captures), settling that the earlier "i386-only" framing was an
+   artifact of organic test history, not a real word-size/build
+   dependency. Then, tested on a second, unrelated machine (Frank's
+   notebook, different xHC silicon entirely) with the identical driver
+   build: **zero** failures across 65 cycles, versus ~33% on the
+   EliteDesk under the same sweep. So the mechanism is real and
+   EliteDesk-reproducible across kernel builds, but does not reproduce on
+   different host-controller hardware -- reads as specific to this
+   EliteDesk's xHC (or something idiosyncratic to this one board/BIOS),
+   not a portable Linux `xhci_hcd` behavior. Posted to #49.
 4. ~~**What does the wire show during a failing rate change?**~~ **Answered
    2026-08-17** -- capture IN never produces a single packet, while playback
    OUT resumes normally and EP0 reports no fault. See the 08-17 section. The
