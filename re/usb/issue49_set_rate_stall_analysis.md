@@ -439,18 +439,38 @@ not a single hardcoded timeout. Doesn't change the "host-controller-level,
 not driver/device" conclusion, but the "fixed policy" framing below is
 superseded.
 
-What's still open is *why* this specific racing scenario trips it, and
-why only on i386-prod (confirmed absent on x86_64 and armhf across a
-comparable number of runs). Two live candidates, not yet distinguished:
-a genuine xHCI/kernel-build-specific corner case exposed by VBUS-event
-timing on this exact hardware, or the device's own post-reconnect
-readiness contributing to confusing the xHC's endpoint state tracking
-(the fixed duration being how the xHC's error path reacts, not the device
-"at fault" for rejecting anything). Practically: no driver-side fix
-exists for this failure mode -- the existing probe-retry/reconnect
-recovery path is already the correct response -- and being confirmed
-i386-only makes this read as an environment-specific interaction on a
-lower-priority target, not an LKML-blocking driver defect. The two
-remaining experiments that would close the "why" gap -- x86_64-prod vs.
-i386-prod on the identical hardware, and a vendor-driver capture at the
-same transition -- are documented above but not yet run.
+What's still open is *why* this specific racing scenario trips it. What is
+no longer open: whether it's i386-only. It isn't.
+
+## Correction (2026-09-23): reproduces on x86_64 too, not i386-only
+
+The "confirmed absent on x86_64" claim above was based on JT-RATE-004's
+organic production-test history, which had never happened to hit this
+exact race on x86_64. It does not hold up once the race is deliberately
+forced: immediately after rebooting this same physical EliteDesk/xHC into
+its separate 64-bit rootfs (`x86_64-prod`, same `issue49_vbus_cut_sweep.py
+--arm active`, n=15 cycles), `set_rate_ep` failures landed in 7/15 cycles
+-- confirmed via dmesg as the identical `Failed to set rate on EP 0x86:
+-71` signature, not a different errno. This is a *higher* hit rate than
+typically seen on i386-prod under the same sweep parameters, if anything.
+
+So this is not a 32-bit-vs-64-bit or i386-prod-build-specific interaction.
+It reads as a generic xHCI/`xhci_hcd` behavior under this VBUS-cut +
+rapid-reopen racing pattern, reproducible on at least two different
+kernel builds/word-sizes on the same physical host controller. The
+"lower-priority target, environment-specific" framing above is
+superseded along with it -- this is now a cross-platform xHCI interaction,
+still not diagnosed to a specific root cause, but no longer something
+that can be shrugged off as "only affects the least-tested target."
+
+A wire capture of the x86_64 occurrence is still pending -- the OV3
+trigger's `JT-MARK` pattern (fired every cycle regardless of outcome,
+every ~40s) was consuming the pipeline's 30s cooldown before the actual
+failure line could fire it, so none of the 8 captures taken during this
+sweep line up with an actual `set_rate_ep` failure. Fixed by dropping
+`JT-MARK` from `trigger.toml`'s patterns for any rerun.
+
+The two remaining experiments are now: a vendor-driver capture at the
+same transition, and understanding what specifically about the VBUS-cut
+racing makes the xHC take this path at all (still open, previously
+misframed as "why i386").
