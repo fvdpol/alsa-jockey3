@@ -45,7 +45,10 @@ module -- reload once at the value under test before running either arm):
                   whole cut/reconnect window. Isolates whether rapid
                   *reopening* specifically matters, or whether merely
                   having a stream open and flowing at cut time is already
-                  enough on its own.
+                  enough on its own. 0/30 clean, trace-confirmed (no error
+                  return codes anywhere in 30 saved traces) -- rapid
+                  reopening is the necessary ingredient, not just being
+                  open/streaming at cut time.
 
 Held fixed across all arms and matched to JT-RATE-004's own defaults:
 off_seconds, settle timeout, race jitter window, rates. Only the
@@ -285,7 +288,14 @@ def wait_for_settle(marker, timeout):
     failure ("device descriptor read/64, error") can happen without ever
     producing a "probe ... failed" line at all, since probe() is never
     reached for that device number -- gating on `fails` would silently miss
-    it entirely."""
+    it entirely.
+
+    `settled` from the log alone is necessary but not sufficient: the
+    firmware-print string proves probe() got that far at some point in the
+    window, not that the card is still alive by the time this returns --
+    a wedge arriving after a clean probe (see #50) would still show
+    OK_MARKER in the log. Callers must confirm actual end-of-window
+    liveness themselves (see run_cycle()) before trusting this "settled"."""
     time.sleep(timeout)
     log = kmsg.read_log()
     idx = None
@@ -346,6 +356,17 @@ def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi, trace_dir):
                 "error": f"usb-power on failed: {(err or '').strip()[:120]}"}
 
     attempts, settled, shape, usb_core_retries = wait_for_settle(marker, timeout)
+
+    # wait_for_settle() only proves probe() got there at some point in the
+    # window -- confirm the card is still actually alive now, since a wedge
+    # arriving after a clean probe (#50) would otherwise still read as
+    # "settled". Card gone here despite a clean log is exactly the wedge
+    # shape, so label it as such rather than folding it into "unclassified".
+    if settled:
+        end_idx, _ = alsa.find_card()
+        if end_idx is None or not alsa.control_is_live(end_idx):
+            settled = False
+            shape = "settled_but_dead_at_end"
 
     result = {"attempts": attempts, "settled": settled, "shape": shape,
               "usb_core_retries": usb_core_retries}
