@@ -412,3 +412,32 @@ observation point, agreeing precisely.
    now pinned to a specific host-controller mechanism, even though what
    actually trips that mechanism (plausibly the device not servicing the
    OUT phase, per the point above) is still open.
+
+## Summary conclusion (2026-09-23)
+
+Three independent observation methods now agree precisely on where this
+failure lives: the device correctly ACKs the `SET_RATE` SETUP stage (wire
+capture, identical to every success), `usb_control_msg_send()` is
+genuinely blocked for the whole ~42ms (`ISSUE48_TRACE()`, matching the
+wire measurement), and the host controller's own URB completion
+accounting shows a 0/3-byte short transfer landing within microseconds of
+that same timestamp (`xhci_urb_giveback`). The mechanism is confirmed
+host-controller-level -- not a driver bug, not a device rejection, and
+not variable software scheduling (the ~42ms is tightly repeatable across
+every independent sample, pointing at a fixed xHCI policy).
+
+What's still open is *why* this specific racing scenario trips it, and
+why only on i386-prod (confirmed absent on x86_64 and armhf across a
+comparable number of runs). Two live candidates, not yet distinguished:
+a genuine xHCI/kernel-build-specific corner case exposed by VBUS-event
+timing on this exact hardware, or the device's own post-reconnect
+readiness contributing to confusing the xHC's endpoint state tracking
+(the fixed duration being how the xHC's error path reacts, not the device
+"at fault" for rejecting anything). Practically: no driver-side fix
+exists for this failure mode -- the existing probe-retry/reconnect
+recovery path is already the correct response -- and being confirmed
+i386-only makes this read as an environment-specific interaction on a
+lower-priority target, not an LKML-blocking driver defect. The two
+remaining experiments that would close the "why" gap -- x86_64-prod vs.
+i386-prod on the identical hardware, and a vendor-driver capture at the
+same transition -- are documented above but not yet run.
