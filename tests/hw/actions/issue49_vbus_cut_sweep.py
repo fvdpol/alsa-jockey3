@@ -52,24 +52,24 @@ off_seconds, settle timeout, race jitter window, rates. Only the "idle" vs
         [--save-trace DIR]
 
 --save-trace reuses #48's own trace_printk() instrumentation
-(issue48_trace_enabled=1, the ISSUE48_TRACE() call sites already covering
-every EP0 transfer inside ploytec_initialize_device(): get_firmware,
-set_interface x4, the settle delay, clear_halt x3, get_status). Note it does
-NOT cover ploytec_get_rate(), ploytec_set_rate() or ploytec_start_streaming()
-(all separate functions, called after ploytec_initialize_device() returns,
-from both jockey3_initialize_ploytec()'s probe-time retry loop and
-jockey3_set_rate()) -- "Failed to set rate on EP 0x86" (set_rate_ep) and
-"Ploytec failed to start streaming"/"Failed to start streaming after rate
-change" (start_streaming) are both real, observed failure shapes on
-i386-prod and are invisible to this trace. If a captured trace comes back
-completely clean (every step ret=0) on a cycle dmesg says failed with one
-of those two shapes, that gap is why -- it means ploytec_initialize_device()
-itself genuinely succeeded and the failure is in whichever untraced
-function's message follows -- not evidence nothing happened. Instrumenting
-those three functions the same way is the next thing to add.
+(issue48_trace_enabled=1). ISSUE48_TRACE() now covers the whole
+post-reconnect sequence: ploytec_initialize_device() (get_firmware,
+set_interface x4, the settle delay, clear_halt x3, get_status),
+ploytec_get_rate(), ploytec_set_rate() (each burst write individually), and
+ploytec_start_streaming(). Confirmed: the most common failure shape
+(set_rate_ep) traces to the same specific point every time --
+"set_rate burst(0) done ret=-71", the first SET_RATE write right after
+get_rate succeeds, with ploytec_initialize_device() clean throughout.
 
 The module must already be loaded with issue48_trace_enabled=1 (this script
 does not reload it -- see issue48_settle_sweep.py's reload_with() for how).
+
+Every run starts with a real mains power cycle by default (lib.power.cycle(),
+not priv.usb_power() -- see below for why that distinction matters), so the
+device's firmware starts from the same known-clean state each time,
+independent of whatever state the previous run left it in. --no-power-cycle-first
+skips this, for deliberately continuing to poke at a state a prior run left
+behind (e.g. following up on #50).
 """
 
 import argparse
@@ -84,7 +84,7 @@ import time
 sys.path.insert(0, os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
-from lib import alsa, kmsg, priv          # noqa: E402
+from lib import alsa, kmsg, power, priv   # noqa: E402
 
 FAIL_MARKER = "probe with driver snd-reloop-jockey3 failed with error"
 OK_MARKER = "Reloop Jockey 3 Remix Firmware"
@@ -340,6 +340,11 @@ def main():
                      help="directory to save each cycle's ftrace buffer into "
                           "(reuses #48's issue48_trace_enabled instrumentation "
                           "-- module must already be loaded with it set to 1)")
+    ap.add_argument("--no-power-cycle-first", action="store_true",
+                     help="skip the startup mains power cycle (default: on). "
+                          "Only skip this deliberately -- e.g. to continue "
+                          "investigating a state a previous run already left "
+                          "the device in.")
     args = ap.parse_args()
 
     ok, why = priv.available()
@@ -350,6 +355,22 @@ def main():
 
     if args.save_trace:
         os.makedirs(args.save_trace, exist_ok=True)
+
+    if not args.no_power_cycle_first:
+        # A real mains power cycle, not priv.usb_power() -- see the module
+        # docstring for why the distinction matters here specifically. This
+        # is about the device's *firmware* starting from a known-clean
+        # state every run, independent of whatever wedge or partial-failure
+        # state the previous run (or a previous cycle within this run) may
+        # have left it in -- Frank's call, after #50 surfaced mid-run.
+        print("== power-cycling the device before this run (--no-power-cycle-first to skip) ==")
+        ok, detail = power.cycle()
+        if not ok:
+            sys.exit(f"startup power cycle failed: {detail}")
+        idx = wait_for_card(True, 30.0)
+        if idx is None:
+            sys.exit("device did not reappear within 30s after the startup power cycle")
+        print(f"device back as hw:{idx}, starting run\n")
 
     rates = [int(r) for r in args.rates.split(",")]
     race_lo = args.race_ms_min / 1000.0

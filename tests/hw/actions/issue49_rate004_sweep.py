@@ -20,9 +20,19 @@ iterations_per_run and the timeout that scales with it).
 
     issue49_rate004_sweep.py <path-to-ko> [--values 25,100,250,500,1000,2000]
         [--range-us 10] [--iterations 20] [--timeout 900]
+        [--no-power-cycle-first]
 
 Leaves the module reloaded at the first --values entry (the shipped delay,
 by default) when done, so the rig is not left mid-sweep.
+
+Each value's JT-RATE-004 run starts with a real mains power cycle by
+default (lib.power.cycle(), a cold boot -- see issue49_vbus_cut_sweep.py's
+module docstring for why that's not the same as JT-RATE-004's own
+priv.usb_power() cuts). #50 found that several consecutive JT-RATE-004
+runs back to back, with no recovery pause, can wedge the device -- power
+cycling before each value's run keeps every run starting from the same
+known-clean firmware state instead of silently inheriting whatever state
+the previous value's run left behind. --no-power-cycle-first skips this.
 """
 
 import argparse
@@ -32,9 +42,25 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
+
+from lib import alsa, power  # noqa: E402
+
 MODULE = "snd_reloop_jockey3"
 HERE = os.path.dirname(os.path.abspath(__file__))
 TESTS_HW = os.path.normpath(os.path.join(HERE, ".."))
+
+
+def wait_for_card(timeout):
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        idx, _ = alsa.find_card()
+        if idx is not None and alsa.control_is_live(idx):
+            return idx
+        time.sleep(0.1)
+    return None
 
 
 def reload_with(ko_path, settle_us, range_us):
@@ -77,6 +103,9 @@ def main():
     ap.add_argument("--range-us", type=int, default=10)
     ap.add_argument("--iterations", type=int, default=20)
     ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--no-power-cycle-first", action="store_true",
+                     help="skip the mains power cycle before each value's "
+                          "run (default: on)")
     args = ap.parse_args()
 
     if not os.path.isfile(args.ko_path):
@@ -86,6 +115,14 @@ def main():
     summary_lines = []
     try:
         for settle_us in values:
+            if not args.no_power_cycle_first:
+                print(f"== power-cycling before settle_us={settle_us} ==")
+                ok, detail = power.cycle()
+                if not ok:
+                    sys.exit(f"power cycle failed before settle_us={settle_us}: {detail}")
+                if wait_for_card(30.0) is None:
+                    sys.exit(f"device did not reappear within 30s "
+                             f"before settle_us={settle_us}")
             reload_with(args.ko_path, settle_us, args.range_us)
             note = (f"issue49 JT-RATE-004 sweep settle_us={settle_us} "
                      f"range_us={args.range_us}")
