@@ -480,7 +480,42 @@ durations: 54.5ms, 52.6ms, 197.8ms -- same class of numbers as i386-prod
 x86_64-vs-i386 comparison: the mechanism, the recovery path, and the
 variable duration are all the same on both.
 
-The two remaining experiments are now: a vendor-driver capture at the
-same transition, and understanding what specifically about the VBUS-cut
-racing makes the xHC take this path at all (still open, previously
-misframed as "why i386").
+## Update (2026-09-23): does NOT reproduce on a different xHC -- reopens the "why this hardware" question
+
+The natural next question after closing the i386-vs-x86_64 comparison was
+whether this is generic `xhci_hcd` behavior or specific to the EliteDesk's
+xHC (Skylake-era, Intel Q170 PCH). Tested on a second, unrelated machine:
+Frank's notebook (Dell, Intel Core i7-1370P, 13th-gen mobile chipset --
+genuinely different xHC silicon, different `xhci_pci` instance, same
+driver build, same kernel (`x86_64-prod`, byte-identical `.ko`), same
+`issue49_vbus_cut_sweep.py --arm active` test.
+
+Two sweeps there, 65 cycles total (n=15, then n=50 for confidence): **zero**
+`set_rate_ep` failures, confirmed by grepping the entire kernel log buffer
+for `Failed to set rate`/`EPROTO`/`-71` across both runs -- none found.
+Contrast with the EliteDesk's 10/30 cycles (~33%) under the same sweep
+parameters on `x86_64-prod`.
+
+This reopens what looked like a closed question. The mechanism is real
+and reproducible on the EliteDesk across two different kernel builds
+(i386-prod, x86_64-prod) -- that part stands. But it does **not**
+reproduce at all on a different xHC, at a sample size (n=65, zero hits)
+that makes "just didn't get unlucky" an unlikely explanation given the
+EliteDesk's own ~33% base rate. So this reads as specific to something
+about the EliteDesk's exact host-controller instance -- possibly the
+Q170 PCH's xHC silicon/firmware specifically, possibly something more
+idiosyncratic to this one board/BIOS/firmware revision -- rather than
+generic `xhci_hcd` behavior. Two physical samples (one hit, one miss)
+can't distinguish "Q170 chipsets in general" from "this specific
+EliteDesk," but it does settle "not universal."
+
+Aside, unrelated to this issue: the notebook run surfaced 68 "stream
+stalled, attempting recovery" events across the 65 cycles -- the
+already-tracked rate-change stream-stall problem (`implementation_plan.md`
+Milestone 13 / `re/rate_change_stall.md`), not the `set_rate_ep` EPROTO
+this issue is about. Not investigated further here.
+
+The two remaining experiments: a vendor-driver capture at the same
+transition, and understanding what specifically about the VBUS-cut racing
+-- and now, what specifically about the EliteDesk's xHC -- makes this
+happen at all.
