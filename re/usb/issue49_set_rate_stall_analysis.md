@@ -350,6 +350,51 @@ controller into this fixed-duration error path in the first place --
 this finding rules out one explanation for the 42ms (host software
 dawdling) without yet ruling the device back in as the ultimate trigger.
 
+## Confirmed at the URB level: `xhci_urb_giveback` shows a 0/3-byte short transfer
+
+Added `xhci-trace start|collect|stop` to `tests/hw/priv/jockey3-testctl`
+(commits b69f5ab/2caf7a9/ceb5a47/d994882) to get direct visibility into
+what xhci_hcd's own event ring reports for the failing transfer, via the
+`xhci_urb_giveback` ftrace tracepoint (shares `ISSUE48_TRACE()`'s ring
+buffer, low-overhead, unlike `dyndbg`'s console-flushed `printk` -- see
+the tool's own commit messages for why the other candidate events
+(`xhci_handle_transfer`, `xhci_handle_event`) were rejected: they decode
+TRB/event-ring structure, not a completion status).
+
+The tool's fixed filter went through two iterations before landing on
+usable data: `status != 0 && type == 0` caught hundreds of benign
+non-error completions per cycle (routine URB cancellation as part of the
+racing reopen/rate-change churn's own teardown -- e.g. `-ENOENT`/
+`-ECONNRESET`, not hardware faults); tightening to an exact
+`status == -71` match then caught nothing at all, even on confirmed
+failures, most likely a filter-syntax issue with the negative literal
+rather than genuine absence. Rather than keep tuning the filter, the
+broader (working) `status != 0 && type == 0` capture was searched
+directly by timestamp against the already-known `burst(0) start`/`done`
+window from `ISSUE48_TRACE()` in the same saved trace file -- and that
+works cleanly:
+
+```
+instance 1: xhci_urb_giveback ... length 0/3 ...   at 68485.264171
+            set_rate burst(0) done ret=-71          at 68485.264205
+            (34 microseconds apart)
+
+instance 2: xhci_urb_giveback ... length 0/3 ...   at 68693.592084
+            set_rate burst(0) done ret=-71          at 68693.592119
+            (35 microseconds apart)
+```
+
+Two independent instances, both landing within ~35 microseconds of
+`ISSUE48_TRACE()`'s own completion timestamp -- essentially simultaneous,
+confirming both are reporting the same event from two different vantage
+points (the driver's synchronous wait unblocking right after the URB's
+giveback callback runs, exactly as expected). **`length 0/3`**: the URB
+completed having transferred zero of the requested three bytes. This is
+the kernel/URB-level confirmation of exactly what the OpenVizsla wire
+captures showed independently -- the SETUP stage is accepted, but the
+actual data payload never gets through -- from a completely different
+observation point, agreeing precisely.
+
 ## Open follow-ups
 
 1. Given the delay is host-controller/hardware-level and roughly fixed in

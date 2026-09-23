@@ -2008,6 +2008,26 @@ rate's packet interval instead of staying fixed at 20 ms for all four rates.
    `reload_bitstream=true` restart after a severe overflow event left its
    startup drain seeing zero packets -- reverted back to `false`
    afterward, the normal default.
+
+   **2026-09-23, confirmed at the URB level too: `xhci_urb_giveback` shows
+   a 0/3-byte short transfer.** Full detail in
+   `re/usb/issue49_set_rate_stall_analysis.md`. Added `xhci-trace
+   start|collect|stop` to `tests/hw/priv/jockey3-testctl` for direct
+   visibility into xhci_hcd's own completion accounting (Frank's ask, for
+   a low-effort confirmation without a deep xHCI debugging session) --
+   went through a couple of filter iterations (too broad, then a broken
+   exact-match that caught nothing) before settling on searching the
+   working broad capture by timestamp against the known `burst(0)
+   start`/`done` window instead of fighting the filter further. Two
+   independent instances both show an `xhci_urb_giveback` with `length
+   0/3` (zero of three requested bytes transferred) landing within
+   34-35 *microseconds* of `ISSUE48_TRACE()`'s own `burst(0) done
+   ret=-71` -- essentially simultaneous, confirming both are the same
+   event from different vantage points. This is the kernel/URB-level
+   confirmation of exactly what the OpenVizsla wire captures showed
+   independently: the SETUP stage is accepted, but the data payload never
+   gets through. Two completely different observation methods now agree
+   precisely. Posted to #49.
 4. ~~**What does the wire show during a failing rate change?**~~ **Answered
    2026-08-17** -- capture IN never produces a single packet, while playback
    OUT resumes normally and EP0 reports no fault. See the 08-17 section. The
