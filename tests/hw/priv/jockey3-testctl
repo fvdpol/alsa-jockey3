@@ -82,7 +82,7 @@ TRACE_FUNCS='jockey3_playback_callback jockey3_capture_callback'
 # names an action, never an event, so this cannot be pointed at anything
 # ftrace's xhci-hcd subsystem exposes beyond URB submit/complete and the
 # raw hardware transfer-completion event.
-XHCI_TRACE_EVENTS='xhci_urb_enqueue xhci_urb_giveback xhci_handle_transfer_event'
+XHCI_TRACE_EVENTS='xhci_urb_enqueue xhci_urb_giveback xhci_handle_transfer'
 
 # The Jockey 3's own USB ids, for per-port power switching. Fixed here for the
 # same reason FW_MATCH is: the caller names an ACTION, never a target. A verb
