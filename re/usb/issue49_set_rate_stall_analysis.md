@@ -423,8 +423,21 @@ wire measurement), and the host controller's own URB completion
 accounting shows a 0/3-byte short transfer landing within microseconds of
 that same timestamp (`xhci_urb_giveback`). The mechanism is confirmed
 host-controller-level -- not a driver bug, not a device rejection, and
-not variable software scheduling (the ~42ms is tightly repeatable across
-every independent sample, pointing at a fixed xHCI policy).
+not variable software scheduling.
+
+**Correction (a third wire capture, 96kHz, caught right before the
+64-bit-rootfs reboot):** the silent gap is not a fixed ~42ms. Four
+samples clustered at 41.4-42.8ms (two wire, two `ISSUE48_TRACE()`), but a
+fifth sample -- same signature in every other respect (clean `GET_RATE`,
+`SET_RATE(ep=0x86)` SETUP sent, zero NAKs, full bus reset and
+re-enumeration afterward) -- measured **273.75ms** of silence
+(`capture_2026-09-23_linux_issue49_set_rate_stall_96k_3rd.md`). So the
+duration is bounded below by something like ~42ms but is not a fixed xHCI
+constant; it more likely reflects a bounded error-recovery/retry sequence
+whose actual length depends on what else the host controller has queued,
+not a single hardcoded timeout. Doesn't change the "host-controller-level,
+not driver/device" conclusion, but the "fixed policy" framing below is
+superseded.
 
 What's still open is *why* this specific racing scenario trips it, and
 why only on i386-prod (confirmed absent on x86_64 and armhf across a
