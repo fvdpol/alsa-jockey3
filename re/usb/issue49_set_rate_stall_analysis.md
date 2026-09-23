@@ -285,31 +285,85 @@ path, produces a 41.8ms silence immediately after a request that was
 accepted cleanly, and long before the driver's own 2000ms ceiling would
 ever apply.
 
+## Resolved: `usb_control_msg_send()` is genuinely blocked for the whole gap
+
+Ran a combined capture -- `issue49_vbus_cut_sweep.py --save-trace` (for
+`ISSUE48_TRACE()`'s own kernel timestamps) with the OV3 trigger armed
+simultaneously, to catch `ploytec_set_rate()`'s `burst(0) start`/`burst(0)
+done ret=-71` trace points for the *same kind* of failure instance the
+wire captures above show. (One capture-host hiccup along the way: after
+switching `filter_nak` back on, the OV3's startup drain saw zero packets
+-- `"is the stream flowing?"` -- left over from a severe overflow event
+during the earlier unfiltered run; a one-time `reload_bitstream=true`
+restart cleared it, then reverted back to `false`, the normal default.)
+
+Two independent instances, both landing in the same tight band:
+
+```
+instance 1: get_rate done 62994.580190 -> burst(0) start 62994.595433
+            (15.243ms gap, matches the pattern already seen)
+            -> burst(0) done ret=-71 62994.638224
+            duration: 42.791ms
+
+instance 2: get_rate done 63179.971955 -> burst(0) start 63179.987178
+            (15.223ms gap)
+            -> burst(0) done ret=-71 63180.029783
+            duration: 42.605ms
+```
+
+Both timestamps in each pair come from the same `trace_printk()` call
+site, on the same CPU, within the same uninterrupted kernel thread (no
+cross-CPU migration mid-call) -- so this internal duration measurement
+isn't subject to any per-CPU clock-skew concern, unlike a raw
+trace-vs-dmesg absolute-timestamp comparison would be (`ISSUE48_TRACE()`
+uses ftrace's default per-CPU "local" clock, which is not automatically
+the same reference as `dmesg`'s global monotonic timestamps -- worth
+remembering if a future check ever needs to line up absolute times across
+the two rather than just a duration measured within one).
+
+**42.6-42.8ms, both times, matching the ~41.8ms measured independently on
+the wire in both earlier captures.** Four independent samples total (2
+via OV3 wire, 2 via kernel trace) all landing within about 1ms of each
+other. This settles the open question: **`usb_control_msg_send()` for
+`burst(0)` is genuinely, synchronously blocked inside the kernel for the
+whole ~42ms** -- it does not return quickly with `-71` followed by slow
+cleanup. The delay *is* the failure mechanism, sitting somewhere in the
+completion path between submitting the URB and the host controller
+(hardware and/or `xhci_hcd`) finally reporting it failed.
+
+The tightness of the repeat (four samples within ~1ms of each other) is
+itself informative: a variable host-software-scheduling delay would be
+expected to show much more spread. Landing this consistently on ~42ms
+points instead at something with a **fixed** interval or retry count --
+consistent with an xHCI-hardware-level bus-error/retry-exhaustion policy
+(a fixed number of retries at a fixed interval, per the USB2.0/xHCI
+spec's own error-handling rules) rather than anything the driver's
+software configures or that varies with system load.
+
+Worth being precise about what this does and doesn't settle: it locates
+*where the ~42ms duration comes from* (a fixed host-controller give-up
+policy, not driver software or variable scheduling), not necessarily
+*why that policy gets triggered at all*. The device still visibly does
+nothing to service the OUT/PING phase once the SETUP is ACKed, so the
+device's own unresponsiveness is plausibly still what trips the host
+controller into this fixed-duration error path in the first place --
+this finding rules out one explanation for the 42ms (host software
+dawdling) without yet ruling the device back in as the ultimate trigger.
+
 ## Open follow-ups
 
-1. **In progress**: correlate this exact wire window against
-   `ISSUE48_TRACE()`'s own kernel-side timestamps for the same call
-   (`ploytec_set_rate()`'s `burst(0) start`/`burst(0) done ret=-71` trace
-   points), captured simultaneously with a fresh OV3 wire capture of the
-   *same* failure instance. Two possible outcomes distinguish very
-   different mechanisms:
-   - if the trace-recorded duration between `start` and `done` is itself
-     ~41.8ms, `usb_control_msg_send()` was genuinely blocked the whole
-     time waiting on the URB -- the delay *is* the failure mechanism,
-     sitting somewhere in the host controller's own completion path;
-   - if that duration is microseconds instead, the call already returned
-     with `-71` almost immediately, and everything seen on the wire
-     afterward (the 41.8ms silence, the PING/SET_INTERFACE attempts) is
-     *post-failure* housekeeping (probe-failure path, USB core cleanup)
-     that happens to be slow to touch the bus again -- which would itself
-     be a distinct, interesting finding: the kernel believing the
-     transfer failed well before the device had actually been given up
-     on at the wire level.
+1. Given the delay is host-controller/hardware-level and roughly fixed in
+   duration, worth checking whether this specific ~42ms figure matches
+   any documented xHCI retry/timeout constant (spec or `xhci_hcd` source)
+   -- would confirm the exact mechanism rather than just its signature.
 2. A vendor (Windows/macOS) driver capture at the same transition, for
    comparison -- does the reference driver ever hit this window at all,
    or does its own timing/sequencing avoid it structurally?
-3. Whatever explains the initial 41.8ms host-side gap likely also
-   explains why repeated, tight reopen/rate-change churn is required to
-   reproduce this (see the reap-delay position sweep, `re/rate_change_stall.md`
-   open question 3) -- worth revisiting that finding once this gap is
-   understood, rather than treating them as two separate open threads.
+3. Whatever explains why this specific EP0 transfer, and only this one,
+   triggers the xHC's fixed-duration error path likely also explains why
+   repeated, tight reopen/rate-change churn is required to reproduce this
+   (see the reap-delay position sweep, `re/rate_change_stall.md` open
+   question 3) -- worth revisiting that finding with the ~42ms duration
+   now pinned to a specific host-controller mechanism, even though what
+   actually trips that mechanism (plausibly the device not servicing the
+   OUT phase, per the point above) is still open.

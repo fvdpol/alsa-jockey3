@@ -1984,6 +1984,30 @@ rate's packet interval instead of staying fixed at 20 ms for all four rates.
    whole 41.8ms (delay is inside the synchronous call) or returned almost
    immediately (the wire-visible silence is post-failure housekeeping,
    which would itself be a distinct finding).
+
+   **2026-09-23, resolved: `usb_control_msg_send()` is genuinely blocked
+   for the whole gap.** Full detail in
+   `re/usb/issue49_set_rate_stall_analysis.md`. Combined capture
+   (`--save-trace` + OV3 trigger armed together) caught two independent
+   `set_rate_ep` instances with both `ISSUE48_TRACE()` kernel timestamps
+   and wire captures. `burst(0) start`-to-`done` duration: **42.791ms and
+   42.605ms**, both measured within a single trace call site on one CPU
+   (no cross-clock concerns), matching the ~41.8ms measured independently
+   on the wire in both earlier captures -- four samples total, all within
+   ~1ms of each other. Settles it: the delay is genuinely inside the
+   synchronous kernel call, not fast-failure-then-slow-cleanup. The
+   tightness of the repeat across four independent samples points at a
+   **fixed** host-controller-level interval or retry count (xHCI
+   bus-error/retry-exhaustion policy) rather than variable software
+   scheduling. Caveat kept honest: this locates *where the 42ms comes
+   from* (a fixed host/xHC give-up policy), not necessarily *why it gets
+   triggered at all* -- the device still visibly does nothing to service
+   the OUT/PING phase once the SETUP is ACKed, so it may still be what
+   trips the host controller into this path in the first place. One
+   operational note from getting here: the OV3 needed a one-time
+   `reload_bitstream=true` restart after a severe overflow event left its
+   startup drain seeing zero packets -- reverted back to `false`
+   afterward, the normal default.
 4. ~~**What does the wire show during a failing rate change?**~~ **Answered
    2026-08-17** -- capture IN never produces a single packet, while playback
    OUT resumes normally and EP0 reports no fault. See the 08-17 section. The
