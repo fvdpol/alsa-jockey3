@@ -75,6 +75,15 @@ HWPARAMS_N_MATCH='packet(s)/URB'
 # would let the suite point kernel tracing at anything.
 TRACE_FUNCS='jockey3_playback_callback jockey3_capture_callback'
 
+# xhci-trace's fixed event list, for issue #49: does the host controller's
+# own event-ring completion for a control transfer match the ~42ms stall
+# ISSUE48_TRACE() and an OpenVizsla wire capture already measured
+# independently? Fixed here for the same reason TRACE_FUNCS is: the caller
+# names an action, never an event, so this cannot be pointed at anything
+# ftrace's xhci-hcd subsystem exposes beyond URB submit/complete and the
+# raw hardware transfer-completion event.
+XHCI_TRACE_EVENTS='xhci_urb_enqueue xhci_urb_giveback xhci_handle_transfer_event'
+
 # The Jockey 3's own USB ids, for per-port power switching. Fixed here for the
 # same reason FW_MATCH is: the caller names an ACTION, never a target. A verb
 # taking a hub location and port would grant the suite the right to cut power
@@ -140,6 +149,14 @@ usage() {
 #   trace-callbacks collect  stop tracing, print the trace buffer, reset
 #                          tracing state
 #   trace-callbacks stop  reset tracing state without printing anything
+#                          (cleanup path for a case that errored before
+#                          collect)
+#   xhci-trace start      begin event tracing of xhci_hcd's own URB
+#                          submit/complete and raw transfer-completion
+#                          events (issue #49)
+#   xhci-trace collect    stop tracing, print the trace buffer, reset
+#                          tracing state
+#   xhci-trace stop       reset tracing state without printing anything
 #                          (cleanup path for a case that errored before
 #                          collect)
 #   rtcwake-mem <1-3600>   suspend to RAM and wake after N seconds
@@ -674,6 +691,65 @@ trace-callbacks)
 		;;
 	*)
 		die "trace-callbacks takes start, collect or stop"
+		;;
+	esac
+	;;
+
+xhci-trace)
+	# Event tracing (not function_graph, not dyndbg's pr_debug()/dev_dbg())
+	# specifically because these tracepoints write to the same ftrace ring
+	# buffer ISSUE48_TRACE()'s trace_printk() calls already use -- the two
+	# interleave in one timeline instead of needing separate clocks
+	# reconciled after the fact, and a tracepoint is a lightweight
+	# ring-buffer write rather than a formatted, console-flushed printk.
+	# The latter has already masked a real-time race once in this project
+	# (issue #48: dev_info() on a live serial console) -- xhci_hcd's own
+	# dyndbg lines would carry the same risk here, and would also cover
+	# every device on the bus, not just this one.
+	[ $# -eq 1 ] || die "xhci-trace needs start, collect or stop"
+	tdir=$(tracing_dir) || die "tracefs not mounted"
+	edir="$tdir/events/xhci-hcd"
+
+	case "$1" in
+	start)
+		[ -d "$edir" ] \
+			|| die "no xhci-hcd trace events -- xhci_hcd not loaded, or this kernel's xhci_hcd wasn't built with tracepoints"
+		for ev in $XHCI_TRACE_EVENTS; do
+			[ -f "$edir/$ev/enable" ] \
+				|| die "event '$ev' not found under $edir -- renamed or removed since this verb was written"
+		done
+		echo 0 > "$tdir/tracing_on" || die "cannot stop tracing to reset it"
+		: > "$tdir/trace" || die "cannot clear trace buffer"
+		for ev in $XHCI_TRACE_EVENTS; do
+			echo 1 > "$edir/$ev/enable" || die "cannot enable $ev"
+		done
+		# Best-effort: see trace-callbacks' identical rationale above.
+		echo 32768 > "$tdir/buffer_size_kb" 2>/dev/null || true
+		echo 1 > "$tdir/tracing_on" || die "cannot start tracing"
+		exit 0
+		;;
+	collect)
+		echo 0 > "$tdir/tracing_on" || die "cannot stop tracing"
+		cat "$tdir/trace" || die "cannot read trace buffer"
+		for ev in $XHCI_TRACE_EVENTS; do
+			echo 0 > "$edir/$ev/enable" 2>/dev/null || true
+		done
+		: > "$tdir/trace" 2>/dev/null || true
+		exit 0
+		;;
+	stop)
+		# Cleanup with no output, for a case that errored before it reached
+		# collect -- leaves the host's tracing state as it found it rather
+		# than stuck mid-trace for whoever uses ftrace next.
+		echo 0 > "$tdir/tracing_on" 2>/dev/null || true
+		for ev in $XHCI_TRACE_EVENTS; do
+			echo 0 > "$edir/$ev/enable" 2>/dev/null || true
+		done
+		: > "$tdir/trace" 2>/dev/null || true
+		exit 0
+		;;
+	*)
+		die "xhci-trace takes start, collect or stop"
 		;;
 	esac
 	;;
