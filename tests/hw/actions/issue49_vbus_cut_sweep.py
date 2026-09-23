@@ -87,10 +87,19 @@ CHANNELS = 4
 FORMAT = "S24_3LE"
 TRACE_PATH = "/sys/kernel/debug/tracing/trace"
 
-# Classifies which step the *first* failure in a cycle's window came from,
-# from the same dev_warn/dev_err lines catalogued across i386-prod's
-# captured failures -- ordered so more specific patterns are tried first.
+# Classifies the *first, chronologically earliest* failure in a cycle's
+# window. Two levels, found the hard way by comparing raw dmesg across two
+# consecutive cycles (issue #49): a driver-level one, where USB enumeration
+# itself succeeded and one of ploytec_initialize_device()'s/ploytec_set_rate()'s
+# own EP0 transfers timed out (visible to ISSUE48_TRACE, inside the driver);
+# and a USB-core-level one, "device descriptor read/64, error", which fires
+# *before* probe() is ever entered -- the most basic step of enumeration
+# failing, invisible to ISSUE48_TRACE entirely since the driver never runs.
+# Order here is NOT priority -- classify_failure_shape() scans lines in
+# their actual order and returns whichever pattern is hit first, since which
+# level fails first is exactly the question, not something to assume.
 FAILURE_SHAPE_PATTERNS = [
+    ("usb_core_descriptor_read", re.compile(r"device descriptor read/\d+, error")),
     ("firmware_read", re.compile(r"Firmware version read failed")),
     ("clear_halt", re.compile(r"Failed to clear halt on EP")),
     ("set_rate_ep", re.compile(r"Failed to set rate on EP")),
@@ -100,11 +109,25 @@ FAILURE_SHAPE_PATTERNS = [
 
 
 def classify_failure_shape(seen_lines):
-    for label, pattern in FAILURE_SHAPE_PATTERNS:
-        for line in seen_lines:
+    """Returns (shape, usb_core_retries) -- shape is the first-hit pattern
+    label in chronological order (None if the cycle had no failure at all),
+    usb_core_retries is a count of the usb_core_descriptor_read pattern
+    specifically, since that one can recur several times (several device
+    numbers in a row) without ever producing a "probe ... failed" line, so
+    it is invisible to the `attempts` metric entirely."""
+    shape = None
+    usb_core_retries = 0
+    for line in seen_lines:
+        for label, pattern in FAILURE_SHAPE_PATTERNS:
             if pattern.search(line):
-                return label
-    return "unclassified" if any(FAIL_MARKER in l for l in seen_lines) else None
+                if label == "usb_core_descriptor_read":
+                    usb_core_retries += 1
+                if shape is None:
+                    shape = label
+                break
+    if shape is None and any(FAIL_MARKER in l for l in seen_lines):
+        shape = "unclassified"
+    return shape, usb_core_retries
 
 
 def clear_trace():
@@ -217,7 +240,12 @@ def wait_for_settle(marker, timeout):
     """Same shape as issue48_settle_sweep.py's wait_for_settle(): one sleep,
     then read the log once -- no polling during the window (see that
     script's docstring for why polling itself perturbs this measurement).
-    Also classifies the first failure's shape, per FAILURE_SHAPE_PATTERNS."""
+    Also classifies the first failure's shape, per FAILURE_SHAPE_PATTERNS --
+    unconditionally, not gated on `fails`: a USB-core-level enumeration
+    failure ("device descriptor read/64, error") can happen without ever
+    producing a "probe ... failed" line at all, since probe() is never
+    reached for that device number -- gating on `fails` would silently miss
+    it entirely."""
     time.sleep(timeout)
     log = kmsg.read_log()
     idx = None
@@ -227,8 +255,8 @@ def wait_for_settle(marker, timeout):
     seen = log[idx + 1:] if idx is not None else log
     fails = sum(1 for l in seen if FAIL_MARKER in l)
     settled = any(OK_MARKER in l for l in seen)
-    shape = classify_failure_shape(seen) if fails else None
-    return (fails + 1 if settled else fails), settled, shape
+    shape, usb_core_retries = classify_failure_shape(seen)
+    return (fails + 1 if settled else fails), settled, shape, usb_core_retries
 
 
 def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi, trace_dir):
@@ -268,14 +296,16 @@ def run_cycle(i, arm, rates, off_seconds, timeout, race_lo, race_hi, trace_dir):
         return {"attempts": None, "settled": False,
                 "error": f"usb-power on failed: {(err or '').strip()[:120]}"}
 
-    attempts, settled, shape = wait_for_settle(marker, timeout)
+    attempts, settled, shape, usb_core_retries = wait_for_settle(marker, timeout)
 
-    result = {"attempts": attempts, "settled": settled, "shape": shape}
+    result = {"attempts": attempts, "settled": settled, "shape": shape,
+              "usb_core_retries": usb_core_retries}
     if trace_dir:
         # Saved after wait_for_settle()'s sleep completes, deliberately --
         # see issue48_settle_sweep.py's run_value() for why reading the
         # trace file before that would itself perturb the measurement.
-        outcome_tag = "ok" if (settled and attempts == 1) else (shape or "unknown")
+        outcome_tag = "ok" if (settled and attempts == 1 and not usb_core_retries) \
+            else (shape or "unknown")
         dest = os.path.join(trace_dir, f"{arm}-cycle{i}-{outcome_tag}.trace")
         save_trace(dest)
         result["trace"] = dest
@@ -325,18 +355,25 @@ def main():
         else:
             status = "settled" if r["settled"] else "TIMED OUT"
             shape = f" shape={r['shape']}" if r.get("shape") else ""
+            usb_core = f" usb_core_retries={r['usb_core_retries']}" \
+                if r.get("usb_core_retries") else ""
             print(f"  cycle {i + 1}/{args.cycles}: {r['attempts']} attempt(s), "
-                  f"{status}{shape}")
+                  f"{status}{shape}{usb_core}")
 
     ok_results = [r for r in results if r.get("attempts") is not None]
     if ok_results:
         attempts = [r["attempts"] for r in ok_results]
-        flapped = sum(1 for a in attempts if a > 1)
+        # attempts > 1 misses a cycle whose only failure was USB-core-level
+        # (device descriptor read), since that never produces a "probe ...
+        # failed" line and so never increments `attempts` -- checked here too.
+        flapped = sum(1 for r in ok_results
+                      if r["attempts"] > 1 or r.get("usb_core_retries"))
         timed_out = sum(1 for r in ok_results if not r["settled"])
         shapes = {}
         for r in ok_results:
             if r.get("shape"):
                 shapes[r["shape"]] = shapes.get(r["shape"], 0) + 1
+        total_usb_core_retries = sum(r.get("usb_core_retries", 0) for r in ok_results)
         print(f"\n== summary ==")
         print(f"arm={args.arm}: {flapped}/{len(ok_results)} cycles flapped, "
               f"attempts min={min(attempts)} max={max(attempts)}, "
@@ -345,6 +382,9 @@ def main():
         if shapes:
             print("failure shapes (first failure per cycle): "
                   + ", ".join(f"{k}={v}" for k, v in sorted(shapes.items())))
+        if total_usb_core_retries:
+            print(f"usb_core_descriptor_read retries (total across all cycles): "
+                  f"{total_usb_core_retries}")
     else:
         print("\nno usable cycles", file=sys.stderr)
 
