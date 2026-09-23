@@ -463,12 +463,22 @@ superseded along with it -- this is now a cross-platform xHCI interaction,
 still not diagnosed to a specific root cause, but no longer something
 that can be shrugged off as "only affects the least-tested target."
 
-A wire capture of the x86_64 occurrence is still pending -- the OV3
-trigger's `JT-MARK` pattern (fired every cycle regardless of outcome,
-every ~40s) was consuming the pipeline's 30s cooldown before the actual
-failure line could fire it, so none of the 8 captures taken during this
-sweep line up with an actual `set_rate_ep` failure. Fixed by dropping
-`JT-MARK` from `trigger.toml`'s patterns for any rerun.
+A wire capture of the x86_64 occurrence was pending as of the above --
+the OV3 trigger's `JT-MARK` pattern (fired every cycle regardless of
+outcome, every ~40s) was consuming the pipeline's 30s cooldown before the
+actual failure line could fire it, so none of the 8 captures taken
+during that first sweep line up with an actual `set_rate_ep` failure.
+Fixed by dropping `JT-MARK` from `trigger.toml`'s patterns; a second
+sweep (n=15, 3/15 cycles flapped, all `set_rate_ep`) got three clean
+wire captures of it:
+`re/usb/openvizsla/capture_2026-09-23_linux_issue49_x86_64_44k1.md`
+(+ `_2nd`, `_3rd`). **Identical signature to every i386-prod capture**:
+`SET_RATE(ep=0x86)` SETUP accepted, device silent on that address, full
+re-enumeration to a new address, retry succeeds. Initial-silence
+durations: 54.5ms, 52.6ms, 197.8ms -- same class of numbers as i386-prod
+(41.4-273.75ms), same "bounded below, not fixed" pattern. This closes the
+x86_64-vs-i386 comparison: the mechanism, the recovery path, and the
+variable duration are all the same on both.
 
 The two remaining experiments are now: a vendor-driver capture at the
 same transition, and understanding what specifically about the VBUS-cut
