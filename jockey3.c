@@ -2238,8 +2238,16 @@ static void jockey3_watchdog_work(struct work_struct *work)
 	struct jockey3_chip *chip = container_of(to_delayed_work(work),
 						 struct jockey3_chip, watchdog_work);
 
-	if (jockey3_is_disconnected(chip))
-		return;		/* teardown in progress; do not requeue */
+	/*
+	 * Suspend as well as teardown: jockey3_stop_urbs() disarms with the
+	 * non-sync cancel_delayed_work(), which leaves a tick that is already
+	 * running to finish. Without this it would requeue itself and keep
+	 * ticking for the whole suspend, for no purpose -- every check below
+	 * bails out on the suspended flag anyway. Resume re-arms via
+	 * jockey3_start_urbs().
+	 */
+	if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip))
+		return;
 
 	/*
 	 * A reset stops and restarts the URBs from the USB core's own workqueue.
