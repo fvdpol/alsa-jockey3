@@ -146,14 +146,18 @@ only while a PCM stream is open, because the URBs do too: MIDI output is carried
 in every playback packet, so there is no idle state in which a total absence of
 completions is legitimate.
 
-The watchdog reports and does not act; recovery is left entirely to the
-checks above, which already own it. Logging is edge-triggered: one line when
-a direction stops completing URBs, one when it starts again, with nothing
-repeated in between -- a stall is expected to be either short-lived or, once
-the retry budget above is exhausted, already reported loudly by that path
-instead. The message carries the measured age of the stall rather than a
-fixed threshold, since the threshold alone would only bound it to the width
-of one poll interval.
+The watchdog acts as well as reports. A new stall onset enters the same
+recovery ladder described above -- a lightweight URB stop/start, escalating to
+a full device reset if that does not take. This is the only place recovery can
+begin without a PCM ioctl re-entering the driver first, which matters because a
+long-running, uninterrupted stream never re-enters otherwise. Escalation to a
+reset is drawn from a chip-wide bounded budget, so a device that keeps stalling
+is not reset in a tight loop, and only one recovery ladder runs at a time.
+
+Logging is edge-triggered: one line when a direction stops completing URBs, one
+when it starts again, with nothing repeated in between. The message carries the
+measured age of the stall rather than a fixed threshold, since the threshold
+alone would only bound it to the width of one poll interval.
 
 An idle, unused capture endpoint stalling is the one case the driver
 deliberately tolerates without treating it as a fault: recovery for it is
