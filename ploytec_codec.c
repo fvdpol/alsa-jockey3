@@ -238,13 +238,23 @@ static inline void ploytec_decode_s24_3le(u8 *dest, const u8 *src)
  * versions showed a significant improvement, justifying the added complexity
  * from these optimizations. Table shows the relative speed-up and the time
  * for encoding (4ch) or decoding (6ch) a sample frame on the validation
- * hardware:
+ * hardware, measured through the batch API at the batch sizes the driver
+ * actually uses (10 frames per encode call, 8 per decode):
  *
  * Architecture	Bit	Encode	Decode		Encode Time	Decode Time
- *   i386	32	 4.7x	 4.7x		 14.4 ns	 27.5 ns
- *   x86_64	64	10.2x	 8.8x		  7.3 ns	 15.0 ns
- *   armhf	32	 3.9x	 4.6x		208.9 ns	448.5 ns
- *   arm64	64	 8.1x	 5.7x		 15.6 ns	 41.5 ns
+ *   i386	32	 6.2x	 5.4x		  8.3 ns	 20.7 ns
+ *   x86_64	64	11.0x	 7.8x		  3.7 ns	 11.9 ns
+ *   armhf	32	 3.3x	 4.8x		358.2 ns	762.7 ns
+ *   arm64	64	 6.9x	 6.1x		 13.6 ns	 35.5 ns
+ *
+ * i386 and x86_64 on a Core i5-6500, arm64 on a Raspberry Pi 4B, armhf on a
+ * Raspberry Pi 1B+ (ARMv6). Speed-up is against this same build's portable
+ * reference codec on the same machine, so it is comparable across rows; the
+ * absolute times are not.
+ *
+ * The 64-bit variants gain more than the 32-bit ones because the transpose
+ * works in register-width chunks: a 64-bit word carries twice the bit-plane
+ * of a 32-bit one, so the same frame needs half the operations.
  */
 
 static u64 ploytec_bit_spread_64[256];
