@@ -1694,6 +1694,7 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
 {
 	int i, ret, first_err = 0;
 	int n_playback = 0, n_capture = 0;
+	u8 playback_n_pkts, capture_n_pkts;
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
@@ -1752,12 +1753,19 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
 	 * because the ring turned over. A direction with no open stream is held
 	 * at that default by jockey3_pcm_close(), so it always re-arms at a
 	 * safe N.
+	 *
+	 * Both are read once here rather than per iteration: they are written
+	 * under the stream lock, which is not held here, so a re-load could
+	 * leave URBs in the same ring armed at different lengths.
 	 */
+	playback_n_pkts = READ_ONCE(chip->playback.n_pkts);
+	capture_n_pkts = READ_ONCE(chip->capture.n_pkts);
+
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		chip->playback.urbs[i]->transfer_buffer_length =
-			chip->playback.n_pkts * PLOYTEC_PKT_SIZE;
+			playback_n_pkts * PLOYTEC_PKT_SIZE;
 		chip->capture.urbs[i]->transfer_buffer_length =
-			chip->capture.n_pkts * PLOYTEC_PKT_SIZE;
+			capture_n_pkts * PLOYTEC_PKT_SIZE;
 
 		atomic_inc(&chip->playback.urbs_in_flight);
 		usb_anchor_urb(chip->playback.urbs[i], &chip->playback.anchor);
@@ -1955,7 +1963,7 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *urb_stream)
 {
 	u64 last_time = atomic64_read(&urb_stream->last_callback_time);
-	u64 window_ns = JOCKEY3_LIVENESS_WINDOW_NS(urb_stream->n_shift);
+	u64 window_ns = JOCKEY3_LIVENESS_WINDOW_NS(READ_ONCE(urb_stream->n_shift));
 
 	if (!last_time)
 		return false;
@@ -2048,7 +2056,8 @@ static bool jockey3_stream_streaming_healthy(struct jockey3_chip *chip,
 		return false;
 	}
 
-	if (ktime_get_mono_fast_ns() - last > JOCKEY3_LIVENESS_WINDOW_NS(urb_stream->n_shift)) {
+	if (ktime_get_mono_fast_ns() - last >
+	    JOCKEY3_LIVENESS_WINDOW_NS(READ_ONCE(urb_stream->n_shift))) {
 		dev_dbg_ratelimited(&chip->intf0->dev,
 				    "%s health: cadence plausible but last completion is stale\n",
 				    type);
@@ -2692,8 +2701,8 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 		 * both unconditionally). Reset to the default here so an idle
 		 * direction always re-arms at a safe N.
 		 */
-		urb_stream->n_shift = ilog2(default_n);
-		urb_stream->n_pkts = default_n;
+		WRITE_ONCE(urb_stream->n_shift, ilog2(default_n));
+		WRITE_ONCE(urb_stream->n_pkts, default_n);
 	}
 
 	return 0;
@@ -2920,8 +2929,8 @@ static void jockey3_pcm_set_n(struct jockey3_chip *chip, struct snd_pcm_substrea
 	u8 n_shift = clamp_t(u8, ilog2(n), 0, ilog2(max_n));
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
-		urb_stream->n_shift = n_shift;
-		urb_stream->n_pkts = 1 << n_shift;
+		WRITE_ONCE(urb_stream->n_shift, n_shift);
+		WRITE_ONCE(urb_stream->n_pkts, 1 << n_shift);
 	}
 
 	dev_dbg(&chip->intf0->dev, "hw_params: %s using %u packet(s)/URB (period_bytes=%u)\n",
