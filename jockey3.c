@@ -63,6 +63,16 @@ module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 
 /**
+ * DOC: Reverse-engineering references
+ *
+ * Comments below cite documents by paths beginning "re/". Those are the
+ * reverse-engineering notes this driver was derived from -- USB protocol
+ * analysis, vendor trace comparisons and the experiments behind several of the
+ * timing constants. They are not part of the kernel tree: they live in the
+ * driver's development repository, linked from its MAINTAINERS entry.
+ */
+
+/**
  * DOC: Device model
  *
  * The Reloop Jockey 3 presents two USB interfaces and speaks a proprietary
@@ -1086,8 +1096,7 @@ static void jockey3_capture_callback(struct urb *urb)
 			 * complete ones and drop the rest, but this should
 			 * not happen on firmware behaving as described above
 			 * -- log it once so a change in device behavior is
-			 * visible instead of silently discarded audio (see
-			 * CLAUDE.md's fault-handling principle).
+			 * visible instead of silently discarded audio.
 			 */
 			dev_warn_once(&chip->intf0->dev,
 				      "Capture URB length %d not a multiple of %d, using %d packet(s)\n",

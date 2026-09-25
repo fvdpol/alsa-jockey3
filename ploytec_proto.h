@@ -4,6 +4,11 @@
  *   Ploytec USB Protocol Handling
  *
  *   Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
+ *
+ *   Comments here and in ploytec_proto.c cite documents by paths beginning
+ *   "re/". Those are the reverse-engineering notes this protocol layer was
+ *   derived from; they are not part of the kernel tree but live in the driver's
+ *   development repository, linked from its MAINTAINERS entry.
  */
 
 #ifndef __SOUND_USB_JOCKEY3_PLOYTEC_PROTO_H
