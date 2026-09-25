@@ -1,11 +1,27 @@
-# Playback URB stall with no recovery path ("the wedge")
+# Playback URB stall ("the wedge")
 
-Log of every observed occurrence of a playback URB stream that stalls and
-never recovers on its own. Distinct from the rate-change capture stall
-documented in `rate_change_stall.md` (resolved 2026-08-17, cause identified
-and fixed): this one hits **playback**, is not triggered by a rate change,
-and the driver has no self-healing path for it at all — see the "gap" section
-below. Kept separate per project memory (`jockey3-open-findings`, finding #3):
+> **Mitigated, not closed (as of 2026-09-25).** The "no recovery path" this
+> document was originally named for is gone: the URB liveness watchdog both
+> detects a playback stall and acts on it, entering the shared recovery ladder
+> (`jockey3_recover_urb_stream()` — a lightweight URB stop/start escalating to a
+> budget-gated device reset), and `jockey3_pcm_prepare()`'s liveness check is now
+> direction-agnostic. Passages below written against the detection-only design
+> are kept for the reasoning that led here; the "gap" section in particular
+> describes a gap that has since been filled.
+>
+> What remains open is the stall itself — why the device stops completing
+> playback URBs at all. Recovery makes it survivable, not understood, and it
+> stays a topic for further improvement as knowledge of the device grows, and of
+> the **host** hardware: the September 2026 issue #49 work established that a
+> superficially similar EP0 fault reproduced on one host controller and not at
+> all on another, so the host is now a first-class suspect rather than assumed
+> neutral.
+
+Log of every observed occurrence of a playback URB stream that stalls. Distinct
+from the rate-change capture stall documented in `rate_change_stall.md`
+(resolved 2026-08-17, cause identified and fixed): this one hits **playback**
+and is not triggered by a rate change. Kept separate per project memory
+(`jockey3-open-findings`, finding #3):
 "It belongs with the existing open findings on device wedging, not folded
 into the capture-stall mitigations that already handle the ordinary case."
 
@@ -132,7 +148,15 @@ time relative to the case's own start.
 
 <!-- RUN-LOG:END -->
 
-## The gap
+## The gap (closed — kept for the reasoning)
+
+> Both halves of the mitigation sketched at the end of this section were
+> implemented. `jockey3_pcm_prepare()`'s check is direction-agnostic, and
+> `jockey3_recover_urb_stream()` replaced the capture-specific function as one
+> shared, direction-agnostic ladder. The watchdog is no longer detection-only:
+> `jockey3_watchdog_check()` calls that ladder on a stall onset. The MIDI IN
+> caveat still stands and is still respected — the watchdog watches only the two
+> PCM directions, never EP `0x83`.
 
 `jockey3_pcm_prepare()` checks capture liveness only
 (`needs_recovery = substream->stream == SNDRV_PCM_STREAM_CAPTURE && !alive(&chip->capture)`)
