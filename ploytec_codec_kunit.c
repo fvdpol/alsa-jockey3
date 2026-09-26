@@ -493,17 +493,31 @@ static void ploytec_test_decode_is_linear(struct kunit *test)
 
 static void ploytec_test_encode_batch_equals_single(struct kunit *test)
 {
-	u8 src[PLOYTEC_TEST_MAX_ENCODE_FRAMES * PLOYTEC_PLAYBACK_PCM_FRAME_SIZE];
-	u8 batched[PLOYTEC_TEST_MAX_ENCODE_FRAMES * PLOYTEC_PLAYBACK_FRAME_SIZE];
-	u8 single[PLOYTEC_TEST_MAX_ENCODE_FRAMES * PLOYTEC_PLAYBACK_FRAME_SIZE];
+	const size_t src_len = PLOYTEC_TEST_MAX_ENCODE_FRAMES *
+				PLOYTEC_PLAYBACK_PCM_FRAME_SIZE;
+	const size_t out_len = PLOYTEC_TEST_MAX_ENCODE_FRAMES *
+				PLOYTEC_PLAYBACK_FRAME_SIZE;
 	struct ploytec_test_rng rng;
+	u8 *src, *batched, *single;
+
+	/*
+	 * Heap-allocated: on the stack, src + batched + single alone exceed
+	 * the 32-bit CONFIG_FRAME_WARN limit (reported by kernel test robot,
+	 * see alsa-jockey3#53).
+	 */
+	src = kunit_kzalloc(test, src_len, GFP_KERNEL);
+	batched = kunit_kzalloc(test, out_len, GFP_KERNEL);
+	single = kunit_kzalloc(test, out_len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, src);
+	KUNIT_ASSERT_NOT_NULL(test, batched);
+	KUNIT_ASSERT_NOT_NULL(test, single);
 
 	ploytec_rng_init(&rng, 0xD1CE0FF1CE0FF1CEULL);
-	ploytec_rng_fill(&rng, src, sizeof(src));
+	ploytec_rng_fill(&rng, src, src_len);
 
 	for (int n = 1; n <= PLOYTEC_TEST_MAX_ENCODE_FRAMES; n++) {
-		memset(batched, 0, sizeof(batched));
-		memset(single, 0, sizeof(single));
+		memset(batched, 0, out_len);
+		memset(single, 0, out_len);
 
 		ploytec_encode_batch(batched, src, n);
 
@@ -521,17 +535,26 @@ static void ploytec_test_encode_batch_equals_single(struct kunit *test)
 
 static void ploytec_test_decode_batch_equals_single(struct kunit *test)
 {
-	u8 src[PLOYTEC_TEST_MAX_DECODE_FRAMES * PLOYTEC_CAPTURE_FRAME_SIZE];
-	u8 batched[PLOYTEC_TEST_MAX_DECODE_FRAMES * PLOYTEC_CAPTURE_PCM_FRAME_SIZE];
-	u8 single[PLOYTEC_TEST_MAX_DECODE_FRAMES * PLOYTEC_CAPTURE_PCM_FRAME_SIZE];
+	const size_t src_len = PLOYTEC_TEST_MAX_DECODE_FRAMES *
+				PLOYTEC_CAPTURE_FRAME_SIZE;
+	const size_t out_len = PLOYTEC_TEST_MAX_DECODE_FRAMES *
+				PLOYTEC_CAPTURE_PCM_FRAME_SIZE;
 	struct ploytec_test_rng rng;
+	u8 *src, *batched, *single;
+
+	src = kunit_kzalloc(test, src_len, GFP_KERNEL);
+	batched = kunit_kzalloc(test, out_len, GFP_KERNEL);
+	single = kunit_kzalloc(test, out_len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, src);
+	KUNIT_ASSERT_NOT_NULL(test, batched);
+	KUNIT_ASSERT_NOT_NULL(test, single);
 
 	ploytec_rng_init(&rng, 0xD1CE0FF1CE0FF1CEULL);
-	ploytec_rng_fill(&rng, src, sizeof(src));
+	ploytec_rng_fill(&rng, src, src_len);
 
 	for (int n = 1; n <= PLOYTEC_TEST_MAX_DECODE_FRAMES; n++) {
-		memset(batched, 0, sizeof(batched));
-		memset(single, 0, sizeof(single));
+		memset(batched, 0, out_len);
+		memset(single, 0, out_len);
 
 		ploytec_decode_batch(batched, src, n);
 
