@@ -130,18 +130,36 @@ cases:
       build for a legitimate feature.
 
   - id: JT-BUILD-005
-    title: Cross-compile for every target architecture
+    title: Cross-compile for every target architecture at W=1, sparse
     area: BUILD
     level: L1
     mode: automated
-    status: idea
+    status: implemented
     requires: [kernel-tree, cross-toolchains]
-    metrics: [arches_built]
-    pass: The module builds for x86_64, i386, arm64 and armhf.
+    exec: cases/build_gate_arches.py
+    metrics: [warnings_x86_64, warnings_i386, warnings_arm64, warnings_armhf,
+              arches_built]
+    pass: >
+      The module builds for x86_64, i386, arm64 and armhf with zero W=1/sparse
+      warnings beyond the two known-benign -Wshadow hits JT-BUILD-002 also
+      filters.
     notes: >
-      Catches arch-specific breakage without hardware. Partly covered today by
-      the KUnit cross matrix, which builds the driver for six architectures as
-      a side effect.
+      Was status: idea with a pass condition that only checked "does it build",
+      until kernel test robot reported -Wframe-larger-than on arm-allyesconfig
+      against ploytec_codec_kunit.c (alsa-jockey3#53): JT-BUILD-002 builds only
+      for the host architecture, so 32-bit's tighter CONFIG_FRAME_WARN had no
+      gate. Implemented in tests/build/build_jockey3_arches.sh, which builds
+      each arch's -debug config (the only variant with
+      CONFIG_SND_USB_JOCKEY3_CODEC_KUNIT_TEST=y, where the reported bug lived)
+      up through modules_prepare and an out-of-tree M= build at W=1 C=1 --
+      cheaper than a full build_kernel.sh target, since this only needs the
+      module to compile and sparse to run, not to link or load. Verified
+      against the pre-fix v4.0 tree: reproduces the exact warning at the exact
+      line on both i386-debug (1116 > 1024 bytes) and armhf-debug (1440 > 1280
+      bytes, matching the robot's own numbers), and is clean on all four
+      architectures post-fix. Still partly overlapped by the KUnit cross
+      matrix, which builds the driver for six architectures as a side effect
+      of tests/codec/run_kunit.sh but without W=1/sparse or a warnings gate.
 
   - id: JT-BUILD-006
     title: Running kernel's config matches its own target label
