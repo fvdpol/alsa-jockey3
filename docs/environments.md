@@ -204,6 +204,7 @@ warning on the next sync.
 | `tests/build/build_kernel.sh <target>` | dev box | Builds a target kernel + `.deb`s: `~/sound-build` → `~/kbuild/<target>`. |
 | `tests/build/build_module.sh <target>` | dev box | Builds a **loadable** module for a target, from the sources committed on `feature/jockey3`. Refuses if the branch does not match this repository, or if `vermagic` does not match the target. `--manifest` records build-id → git. |
 | `tests/build/write-manifest.sh` | dev box | build-id → git revision, into the Seafile-synced manifests dir. |
+| `tests/build/export-series.sh <range>` | dev box | Replays a series branch of this repository as one kernel commit per patch on a branch in `~/sound`. See `docs/patch_series.md`. |
 | `tests/codec/run_kunit.sh` | dev box | KUnit under UML/QEMU, via `~/sound-kunit`. |
 | `tests/codec/codecbench.py` | dev box | User-space codec correctness and benchmarking. |
 | `tests/hw/priv/install.sh` | test machine | Installs the privileged helper + sudoers. Once per machine. |

@@ -1,0 +1,38 @@
+diff --git a/MAINTAINERS b/MAINTAINERS
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -23058,6 +23058,13 @@ F:	Documentation/filesystems/relay.rst
+ F:	include/linux/relay.h
+ F:	kernel/relay.c
+ 
++RELOOP JOCKEY 3 DJ CONTROLLER DRIVER
++M:	Frank van de Pol <fvdpol@gmail.com>
++L:	linux-sound@vger.kernel.org
++S:	Maintained
++W:	https://github.com/fvdpol/alsa-jockey3
++F:	sound/usb/jockey3/
++
+ REGISTER MAP ABSTRACTION
+ M:	Mark Brown <broonie@kernel.org>
+ L:	linux-kernel@vger.kernel.org
+diff --git a/sound/usb/Kconfig b/sound/usb/Kconfig
+index b4588915efa1..d7edfbaf099b 100644
+--- a/sound/usb/Kconfig
++++ b/sound/usb/Kconfig
+@@ -205,6 +205,7 @@ config SND_USB_AUDIO_QMI
+ 	  will be called snd-usb-audio-qmi.
+ 
+ source "sound/usb/line6/Kconfig"
++source "sound/usb/jockey3/Kconfig"
+ 
+ endif	# SND_USB
+ 
+diff --git a/sound/usb/Makefile b/sound/usb/Makefile
+index e62794a87e73..1f045c00dbc9 100644
+--- a/sound/usb/Makefile
++++ b/sound/usb/Makefile
+@@ -37,3 +37,4 @@ obj-$(CONFIG_SND_USB_US122L) += snd-usbmidi-lib.o
+ 
+ obj-$(CONFIG_SND) += misc/ usx2y/ caiaq/ 6fire/ hiface/ bcd2000/ qcom/
+ obj-$(CONFIG_SND_USB_LINE6)	+= line6/
++obj-$(CONFIG_SND_USB_JOCKEY3) += jockey3/

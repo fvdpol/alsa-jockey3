@@ -1,0 +1,21 @@
+diff --git a/Documentation/sound/cards/index.rst b/Documentation/sound/cards/index.rst
+index e68bbb13c384..7afea6fa88bf 100644
+--- a/Documentation/sound/cards/index.rst
++++ b/Documentation/sound/cards/index.rst
+@@ -18,4 +18,5 @@ Card-Specific Information
+    hdspm
+    serial-u16550
+    img-spdif-in
++   jockey3
+    pcmtest
+diff --git a/MAINTAINERS b/MAINTAINERS
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -23064,6 +23064,7 @@ M:	Frank van de Pol <fvdpol@gmail.com>
+ L:	linux-sound@vger.kernel.org
+ S:	Maintained
+ W:	https://github.com/fvdpol/alsa-jockey3
++F:	Documentation/sound/cards/jockey3.rst
+ F:	sound/usb/jockey3/
+ 
+ REGISTER MAP ABSTRACTION
