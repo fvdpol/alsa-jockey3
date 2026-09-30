@@ -139,3 +139,30 @@ deeper profiles: the tip is the driver that has already been validated on
 every target, so each intermediate state only needs a sanity check on the
 primary target. Compile coverage of the other architectures comes from the
 gate above.
+
+The module for such a run comes from `tests/build/build_module_series.sh`,
+not `build_module.sh`. The latter only builds `feature/jockey3`, and only
+when it matches this repository.
+
+```sh
+tests/build/build_module_series.sh x86_64-prod --patch 4 --manifest
+# -> ~/kbuild-series/modules/x86_64-prod/04-<sha>/snd-reloop-jockey3.ko
+```
+
+- **It builds the n-th commit of `origin/for-next..jockey3-v5`**, or any
+  kernel commit named instead of `--patch`, against the target's object tree
+  in `~/kbuild`.
+- **Each patch gets its own output directory**, so `build_module.sh`'s module
+  is never overwritten.
+- **It refuses a commit that differs from the target kernel's own source
+  outside the driver and glue paths.** Such a module would pass the vermagic
+  check and still be built against the wrong headers. It reads the kernel's
+  source commit from the `-g<sha>` in the object tree's `debian/changelog`.
+  If `origin/for-next` moves, rebase the series, not the kernel, or rebuild
+  the kernel.
+- **The manifest records `build_kind: series`, `series_patch` and
+  `series_kernel_commit`.** Its `git_hash` points at the series-branch commit
+  the patch was exported from, not this repository's `HEAD`.
+- **It borrows `~/sound-build`**, which `build_module.sh` and
+  `build_kernel.sh` move back on their next run. Don't run it concurrently
+  with either.
