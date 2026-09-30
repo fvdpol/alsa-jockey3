@@ -90,25 +90,52 @@ for seeing what v5 changes relative to v4.
 
 `build_jockey3.sh` cannot gate a series. It syncs from this repository's
 working tree, so it would overwrite every intermediate state with the final
-code and report green. Instead, run the gates on the exported branch, one
-commit at a time:
+code and report green. `tests/build/gate-series.sh` gates the exported
+commits instead, one at a time:
 
 ```sh
-git -C ~/sound checkout jockey3-v5
-git -C ~/sound rebase -x '<gate command>' origin/for-next
+tests/build/gate-series.sh                      # origin/for-next..jockey3-v5
+tests/build/gate-series.sh --only 4             # just the 4th patch
+tests/build/gate-series.sh --variants x86_64 --no-kunit   # quick pass
 ```
 
-Each step must, at minimum:
+It checks each commit out in its own detached worktree, `~/sound-series`,
+which is created on first use. It builds into its own object trees under
+`~/kbuild-series`. So it never touches `~/sound`'s checkout, `~/sound-build`
+or `~/kbuild`, and `export-series.sh` can move `jockey3-v5` between runs.
 
-- remove `sound/usb/jockey3/*.o`, since an incremental build has reported zero
-  warnings having compiled nothing
-- build with `W=12`
-- run `kernel-doc -Wall` over the driver sources that exist at that commit
-- run `checkpatch.pl --strict -g HEAD`, which unlike the diff-based gate sees
-  the subject, sign-off and trailers
-- run KUnit, from the patch that adds it onward
+Per commit, over whatever driver files that commit has:
 
-A wrapper script for this does not exist yet; that is the next piece of
-tooling. Checking out `jockey3-v5` in `~/sound` leaves `feature/jockey3`'s
-state behind, so switch back before using `build_jockey3.sh` or
-`build_module.sh` again.
+| Gate | What |
+|---|---|
+| build | `W=12 C=1 M=sound/usb/jockey3`, per variant, with the module's objects deleted first. The default variants cover every target architecture: `x86_64`, `x86_64-ref` (reference codec), `i386`, `arm64` and `armhf`. The optimized codec differs by word size, so both 32- and 64-bit builds are needed. A missing cross compiler fails the gate. A `-ref` variant is n/a until the commit's Kconfig has the option. |
+| kdoc | `kernel-doc -Wall -Werror`, `.c` and `.h` |
+| checkpatch | `--strict -g <commit>`, so the subject, sign-off and trailers are checked too |
+| spell | codespell over the sources and the `.rst` |
+| rst | `rst2html --strict`, once `jockey3.rst` exists |
+| unused | every non-static `ploytec_*()` must have a caller outside the KUnit tests. The compiler only catches dead static functions. |
+| kunit | UML, once the suite exists; again with the reference codec once that option exists |
+
+The build filters the same known-benign `-Wshadow` hits as
+`build_jockey3.sh`, plus sparse's own report of the `__ret` shadow. Before
+anything runs, the script checks that `scripts/checker-valid.sh` accepts
+sparse; otherwise `C=1` passes having checked nothing.
+
+Each config is copied from `tests/configs/<arch>-debug.config` before every
+build, because `olddefconfig` silently drops a symbol that the commit's
+Kconfig does not define yet, and would not bring it back later.
+
+Logs go to `~/kbuild-series/logs/<nn>-<sha>/`. The exit status is the number
+of failing commits.
+
+The first run is slow: `modules_prepare` runs once per variant and KUnit
+builds UML from scratch. Later runs rebuild only the module.
+
+## Hardware testing
+
+Every patch that touches code gets an x86_64 run with the `smoke` profile;
+only purely documentation patches are exempt. No other targets and no
+deeper profiles: the tip is the driver that has already been validated on
+every target, so each intermediate state only needs a sanity check on the
+primary target. Compile coverage of the other architectures comes from the
+gate above.

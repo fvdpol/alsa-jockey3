@@ -30,7 +30,7 @@ The short version: **one place is edited, everywhere else is a copy.**
 
 ---
 
-## The five locations
+## The locations
 
 | # | Path | What it is | Size |
 |---|---|---|---|
@@ -39,6 +39,7 @@ The short version: **one place is edited, everywhere else is a copy.**
 | 3 | `~/sound-build/` | **Clean worktree of #2**, detached at the same commit. Source for every `O=` build. Never built in tree. | 871 MB |
 | 4 | `~/kbuild/<target>/` | **Target object trees** plus the `.deb` packages they produce. One directory per target. | 19 GB |
 | 5 | `~/sound-kunit/` | **Second worktree of #2**, for `run_kunit.sh`. | 1.7 GB |
+| 6 | `~/sound-series/`, `~/kbuild-series/` | **Third worktree of #2** plus its object trees, for `gate-series.sh`. Detached at whichever series commit was gated last. | — |
 
 ### 1. The dev sandbox — `~/jockey3_linux/alsa-jockey3/`
 
@@ -126,6 +127,13 @@ either clobbering the other.
 A second worktree of #2, used by `tests/codec/run_kunit.sh` for UML and the
 QEMU cross targets. Same reason as #3: `kunit.py` always builds out of tree.
 
+### 6. The series gate — `~/sound-series/` and `~/kbuild-series/`
+
+A third worktree of #2, used only by `tests/build/gate-series.sh`, which
+checks out each commit of an exported patch series in turn and builds it
+`O=` into `~/kbuild-series/obj/<variant>`. It is scratch: its checkout is
+moved on every run and nothing else reads it. See `docs/patch_series.md`.
+
 ---
 
 ## A test build comes from committed sources
@@ -205,6 +213,7 @@ warning on the next sync.
 | `tests/build/build_module.sh <target>` | dev box | Builds a **loadable** module for a target, from the sources committed on `feature/jockey3`. Refuses if the branch does not match this repository, or if `vermagic` does not match the target. `--manifest` records build-id → git. |
 | `tests/build/write-manifest.sh` | dev box | build-id → git revision, into the Seafile-synced manifests dir. |
 | `tests/build/export-series.sh <range>` | dev box | Replays a series branch of this repository as one kernel commit per patch on a branch in `~/sound`. See `docs/patch_series.md`. |
+| `tests/build/gate-series.sh [range]` | dev box | Gates every commit of an exported series on its own, in a separate worktree `~/sound-series` with object trees under `~/kbuild-series`. See `docs/patch_series.md`. |
 | `tests/codec/run_kunit.sh` | dev box | KUnit under UML/QEMU, via `~/sound-kunit`. |
 | `tests/codec/codecbench.py` | dev box | User-space codec correctness and benchmarking. |
 | `tests/hw/priv/install.sh` | test machine | Installs the privileged helper + sudoers. Once per machine. |
