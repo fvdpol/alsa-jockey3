@@ -14,3 +14,29 @@ config SND_USB_JOCKEY3
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called snd-reloop-jockey3.
+
+config SND_USB_JOCKEY3_CODEC_KUNIT_TEST
+	bool "KUnit tests for the Ploytec codec" if !KUNIT_ALL_TESTS
+	depends on SND_USB_JOCKEY3
+	depends on KUNIT
+	depends on KUNIT=y || SND_USB_JOCKEY3=m
+	default KUNIT_ALL_TESTS
+	help
+	  Enable KUnit tests for the Ploytec bit-plane encoder and decoder.
+	  The tests validate the codec against a declarative description
+	  of the wire format, and prove the mapping is a complete bit
+	  permutation.
+
+	  Because the codec functions are internal to the driver, the tests
+	  are linked into the snd-reloop-jockey3 module itself rather than
+	  built separately.
+
+	  KUnit tests run during boot and output the results to the debug
+	  log in TAP format (https://testanything.org/). Only useful for
+	  kernel devs running KUnit test harness and are not for inclusion
+	  into a production build.
+
+	  For more information on KUnit and unit tests in general, refer
+	  to the KUnit documentation in Documentation/dev-tools/kunit/.
+
+	  If unsure, say N.
