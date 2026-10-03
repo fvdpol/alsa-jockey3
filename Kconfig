@@ -2,6 +2,7 @@
 config SND_USB_JOCKEY3
 	tristate "Reloop Jockey 3 support"
 	select SND_PCM
+	select SND_RAWMIDI
 	help
 	  Say Y here to include support for the Reloop Jockey 3 DJ controllers.
 	  These devices utilize a non-standard, proprietary Ploytec USB
