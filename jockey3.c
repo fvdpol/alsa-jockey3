@@ -20,6 +20,7 @@
 #include <linux/completion.h>
 #include <linux/mutex.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 #include <linux/cleanup.h>
 #include <sound/core.h>
 #include <sound/initval.h>
@@ -90,6 +91,11 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * carries MIDI OUT, and the device expects a continuous packet stream. The PCM
  * callbacks therefore only toggle whether a URB's payload is filled from (or
  * copied to) an ALSA buffer.
+ *
+ * A stall can also be found and recovered mid-stream, with no PCM ioctl
+ * involved: jockey3_watchdog_work() polls URB liveness for the device's whole
+ * lifetime and calls the recovery ladder directly on a new stall onset. See
+ * jockey3_watchdog_check() and jockey3_watchdog_arm().
  */
 
 /**
@@ -109,8 +115,8 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * - jockey3_disconnect() does everything that must happen while the device is
  *   still there: latch JOCKEY3_FLAG_DISCONNECTED (for either interface, since
  *   the core takes them down one at a time), release anyone waiting on a
- *   reset, kill the URBs, release interface 1, and hand the card to
- *   snd_card_free_when_closed().
+ *   reset, stop the watchdog, kill the URBs, release interface 1, and hand the
+ *   card to snd_card_free_when_closed().
  *
  * - jockey3_card_free(), reached through card->private_free once the last file
  *   descriptor is closed, frees the buffers and URBs, destroys rate_mutex and
@@ -152,6 +158,39 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  *
  * .trigger and .pointer are called by the core with the stream lock held and
  * interrupts disabled, so neither may sleep.
+ *
+ * The watchdog work item adds one rule: rate_mutex must never be held across
+ * cancel_delayed_work_sync(&chip->watchdog_work). jockey3_stop_urbs() is called
+ * from inside rate_mutex at two sites, so it disarms with the non-sync
+ * cancel_delayed_work(), which is safe under any lock; a tick that is already
+ * running when the cancel lands re-reads 'stopping' and does nothing. The sync
+ * form appears only in jockey3_disconnect(), in probe's error path and in
+ * jockey3_free_resources(), none of which holds a mutex.
+ *
+ * Because that disarm does not wait, a tick can be parked on rate_mutex while
+ * jockey3_pre_reset() takes the device down, then wake to the timestamps it
+ * zeroed and read the stream as stalled. So jockey3_recover_urb_stream()
+ * re-tests DISCONNECTED and RESETTING under the mutex and leaves the restart
+ * to jockey3_post_reset().
+ *
+ * jockey3_watchdog_work() itself may call jockey3_recover_urb_stream(),
+ * which takes rate_mutex and calls jockey3_stop_urbs() -- i.e. the watchdog's
+ * own tick disarming itself via the non-sync cancel above, which is exactly
+ * the safe case: it never blocks and does not affect the tick already
+ * running. It may also queue a full USB reset; that reset runs on system_wq
+ * (usb_queue_reset_device(), drivers/usb/core/message.c), never
+ * system_long_wq where the watchdog runs, so the two cannot serialize behind
+ * one another, and rate_mutex is dropped before the wait for it, letting
+ * jockey3_pre_reset()/jockey3_post_reset() take the mutex themselves to
+ * complete.
+ *
+ * This also means jockey3_recover_urb_stream() can be entered from two
+ * independent contexts (the watchdog, and a PCM ioctl) for what turns out to
+ * be the same stall. rate_mutex alone does not prevent both from running
+ * their stop/start-or-reset sequence concurrently, since neither holds it for
+ * the whole ladder -- chip->recovery_in_progress (atomic_cmpxchg(), not a
+ * lock, since the second caller must decline rather than block) is what
+ * makes only one such ladder run at a time; see its doc comment.
  */
 
 #define JOCKEY3_N_URBS 8
@@ -202,11 +241,40 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
 #define JOCKEY3_MAX_URB_ERRORS 8
 
 /*
+ * URB liveness watchdog.
+ *
+ * A healthy stream completes one URB every @n_pkts packet intervals, and a
+ * packet is 226.8 us at 44100 Hz. So JOCKEY3_WATCHDOG_STALL_MS of silence is
+ * many consecutive missed URBs at any N -- more than scheduling delay or bus
+ * contention produces on a device that is still streaming.
+ *
+ * The threshold is sized against ALSA core's own stall timeout
+ * (wait_for_avail() in sound/core/pcm_lib.c, roughly buffer_size * 1100 / rate
+ * ms), because jockey3_watchdog_check() recovers on this signal and needs
+ * headroom to succeed before the core returns -EIO to userspace itself.
+ * Contrast jockey3_check_urb_stream_alive()'s 1 ms window, which is sampled
+ * repeatedly inside a start grace and need only answer "anything just now?".
+ *
+ * jockey3_watchdog_arm() self-reschedules from the nearer of the two
+ * directions' deadlines, as dev_watchdog() does in net/sched/sch_generic.c.
+ * JOCKEY3_WATCHDOG_POLL_MS is the ceiling, used before either direction has
+ * started; JOCKEY3_WATCHDOG_MIN_POLL_MS the floor, so a confirmed stall is
+ * rechecked tightly rather than waiting out a stale window.
+ */
+#define JOCKEY3_WATCHDOG_POLL_MS	1000
+#define JOCKEY3_WATCHDOG_MIN_POLL_MS	10
+#define JOCKEY3_WATCHDOG_STALL_MS	20
+/*
  * Bounds and evidence thresholds for the "has this direction reached steady
  * streaming yet" checks that run over the window from jockey3_start_urbs()
- * until the device is proven alive. The grace duration itself is the
- * runtime-tunable start_grace_ms (see its comment near the top of the file);
- * these clamp a bad write and gate what counts as real streaming.
+ * until the device is proven alive -- distinct from JOCKEY3_WATCHDOG_STALL_MS,
+ * which governs silence between two completions on an already-established
+ * stream. The grace duration itself is the runtime-tunable start_grace_ms
+ * (see its comment near the top of the file); these clamp a bad write and
+ * gate what counts as real streaming.
+ *
+ * JOCKEY3_GRACE_MS_MIN is deliberately well above JOCKEY3_WATCHDOG_STALL_MS: a
+ * grace at the stall threshold escalates on scheduling jitter by construction.
  *
  * JOCKEY3_HEALTHY_MIN_COMPLETIONS feeds jockey3_stream_streaming_healthy(), the
  * stricter "did the warm restart actually take" test: a real stream lands
@@ -227,6 +295,14 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * budget is consulted after JOCKEY3_RECOVERY_WINDOW_MS has passed since the
  * current one started, so a chip that stops stalling is never left refusing
  * to recover for the rest of its life.
+ *
+ * The watchdog calls jockey3_recover_urb_stream() directly (see its
+ * report_xrun parameter), and an early xrun report from that call can wake a
+ * concurrent jockey3_pcm_prepare() retry on the same direction before the
+ * watchdog's own call returns. chip->recovery_in_progress (see
+ * jockey3_recover_urb_stream()) makes that concurrent second call decline
+ * outright rather than draw from this budget, so one physical stall still
+ * draws against it at most once.
  */
 #define JOCKEY3_RECOVERY_MAX_ATTEMPTS	3
 #define JOCKEY3_RECOVERY_WINDOW_MS	60000
@@ -240,7 +316,7 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  *
  * Writable at runtime (0644) and read through jockey3_start_grace_ms(),
  * which clamps to [JOCKEY3_GRACE_MS_MIN, JOCKEY3_GRACE_MS_MAX] so a bad write
- * cannot drive the grace to an unusable value.
+ * cannot drive the grace down to or below the stall threshold.
  */
 static int start_grace_ms = 200;
 module_param(start_grace_ms, int, 0644);
@@ -248,7 +324,7 @@ MODULE_PARM_DESC(start_grace_ms, "Grace (ms) for PCM to reach steady streaming a
 
 /*
  * Current start-grace budget in ms, clamped so a runtime write cannot drive
- * it to an unusable value.
+ * it to or below the stall threshold.
  */
 static unsigned int jockey3_start_grace_ms(void)
 {
@@ -277,9 +353,14 @@ static unsigned int jockey3_start_grace_ms(void)
  *	jockey3_start_urbs(); zeroed there and by jockey3_stop_urbs(). atomic_t,
  *	incremented lock-free from the completion handler.
  * @urbs_started_time: ktime at which jockey3_start_urbs() submitted this
- *	direction's ring; zeroed by jockey3_stop_urbs().
- *	jockey3_wait_urb_stream_started() measures the confirmation latency
- *	from here.
+ *	direction's ring; zeroed by jockey3_stop_urbs(). The watchdog measures
+ *	from here until the first completion arrives. A separate timestamp is
+ *	needed because @last_callback_time is deliberately 0 between a start and
+ *	the first completion, which jockey3_check_urb_stream_alive() must keep
+ *	reading as "not alive" -- so the watchdog cannot reuse it without either
+ *	reporting a stall at every start or breaking the check after a restart.
+ *	It doubles as the watchdog's post-start grace baseline (the grace
+ *	duration is start_grace_ms).
  * @lock: protects the fields marked "@lock" below; IRQ-safe leaf
  * @dma_off: byte offset into runtime->dma_area, i.e. the hardware pointer; @lock
  * @period_off: bytes accumulated towards the current period; @lock
@@ -296,6 +377,15 @@ static unsigned int jockey3_start_grace_ms(void)
  *	re-anchor a URB after the kill has drained the anchor.
  * @consec_errors: consecutive URB transport errors; @lock. Reset on any
  *	successful completion and by jockey3_start_urbs().
+ * @stall_reported: the watchdog has logged the onset of the current stall;
+ *	@lock. Edge flag, so a wedge produces one onset line and one closing
+ *	line rather than one per tick. Cleared either by the stream completing a
+ *	URB again, or by jockey3_watchdog_clear_stall() when a restart ends the
+ *	outage first -- which is the common case, since every recovery path goes
+ *	through jockey3_stop_urbs()/jockey3_start_urbs().
+ * @stall_since: ktime the current stall was measured from; @lock. Only
+ *	meaningful while @stall_reported is set, and used to report how long the
+ *	outage lasted once the stream comes back.
  * @n_shift: log2 of the Ploytec packets per URB ("N") the next resubmission
  *	will carry, in [0, 3]; @lock. Set by jockey3_pcm_hw_params() from the
  *	period size and reset to the default by jockey3_pcm_close(), so an idle
@@ -322,6 +412,8 @@ struct jockey3_pcm_urb_stream {
 	wait_queue_head_t drain_wait;
 	bool stopping;
 	unsigned int consec_errors;
+	bool stall_reported;
+	u64 stall_since;
 	u8 n_shift;
 	u8 n_pkts;
 };
@@ -339,7 +431,7 @@ struct jockey3_pcm_urb_stream {
  * @xfer_buf: bounce buffer for EP0 control transfers, USB_XFER_BUF_SIZE bytes.
  *	Serialized by @rate_mutex once the card is live. The one exception is
  *	jockey3_initialize(), which runs from probe before the card is
- *	registered, so it is the only user in existence.
+ *	registered or the watchdog armed, so it is the only user in existence.
  * @rate_mutex: serializes the URB stop/start sequences and the EP0 programming
  *	that goes with them; process context only, outermost lock
  * @flags: JOCKEY3_FLAG_* bits, atomic bitops
@@ -349,6 +441,10 @@ struct jockey3_pcm_urb_stream {
  *	so a waiter is released when the USB core skips post_reset() entirely.
  *	Re-armed by jockey3_queue_reset() for a reset this driver starts, and by
  *	jockey3_pre_reset() for one started anywhere else.
+ * @watchdog_work: periodic URB liveness check; see jockey3_watchdog_work().
+ *	Armed by jockey3_start_urbs() and disarmed by jockey3_stop_urbs(), so it
+ *	runs exactly when the URBs are supposed to be flowing -- which, for this
+ *	device, is its whole lifetime rather than only while a PCM stream is open.
  * @recovery_attempts: resets taken from the current window by
  *	jockey3_recovery_budget_take(); not mutex-protected, since
  *	jockey3_pcm_prepare()'s liveness check and recovery run outside
@@ -361,14 +457,22 @@ struct jockey3_pcm_urb_stream {
  *	time, chip-wide rather than per-direction for the same reason
  *	@recovery_attempts is chip-wide: jockey3_stop_urbs()/jockey3_start_urbs()
  *	restart the shared ring for both directions together, so a Playback
- *	recovery and a concurrent Capture recovery -- e.g. two racing
- *	jockey3_pcm_prepare() calls -- would step on each other's
+ *	recovery and a concurrent Capture recovery -- e.g. the watchdog and a
+ *	racing jockey3_pcm_prepare() retry -- would step on each other's
  *	stop/start (or reset) sequence rather than being independent. A second
  *	caller finding this already set declines immediately rather than racing
  *	the first; the first caller's restart brings back whichever direction
  *	the second one wanted too. Test-and-set via atomic_cmpxchg() rather than
  *	a mutex held across the whole ladder, since jockey3_check_urb_stream_alive()
  *	callers elsewhere poll rather than block on recovery finishing.
+ * @warm_start: true if the current URB ring was last started by the stall
+ *	watchdog's own lightweight restart, false for every other (re)start
+ *	(first open, USB reset, probe). Both kinds share
+ *	one start_grace_ms; this only labels which one is in effect, for
+ *	dev_dbg(). Chip-wide, not per-direction: jockey3_start_urbs() restarts
+ *	the shared ring for both directions at once. Plain bool, written by
+ *	jockey3_start_urbs() and read unlocked by the watchdog via
+ *	WRITE_ONCE()/READ_ONCE().
  * @midi_in_urb: the single MIDI IN URB; not anchored, killed directly
  * @midi_in_buf: transfer buffer for @midi_in_urb
  * @midi_lock: protects the MIDI fields; IRQ-safe leaf
@@ -389,9 +493,11 @@ struct jockey3_chip {
 	unsigned int current_rate;
 	unsigned int dev_idx;
 	struct completion reset_done;
+	struct delayed_work watchdog_work;
 	atomic_t recovery_attempts;
 	atomic64_t recovery_window_start;
 	atomic_t recovery_in_progress;
+	bool warm_start;	/* set by jockey3_start_urbs(): warm vs cold, for dev_dbg() only */
 
 	/* MIDI Path */
 	struct urb *midi_in_urb;
@@ -1180,6 +1286,140 @@ static void jockey3_midi_in_callback(struct urb *urb)
 		jockey3_resubmit_failed(chip, ret, "MIDI IN");
 }
 
+/*
+ * How long until a direction's watchdog deadline (last activity plus
+ * JOCKEY3_WATCHDOG_STALL_MS, or the current start grace if no completion has
+ * arrived since the last start), in ms clamped to
+ * [JOCKEY3_WATCHDOG_MIN_POLL_MS, JOCKEY3_WATCHDOG_POLL_MS]. Returns
+ * JOCKEY3_WATCHDOG_POLL_MS if the direction has never started (no deadline to
+ * chase yet), and the floor if the deadline has already passed, so a
+ * confirmed stall gets rechecked tightly instead of waiting out a stale
+ * window. Only meaningful while a PCM stream is open somewhere -- see the
+ * caller, jockey3_watchdog_arm().
+ */
+static unsigned long jockey3_watchdog_next_delay_ms(struct jockey3_chip *chip,
+						    const struct jockey3_pcm_urb_stream *urb_stream)
+{
+	u64 last = atomic64_read(&urb_stream->last_callback_time);
+	u64 started = atomic64_read(&urb_stream->urbs_started_time);
+	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
+	unsigned int grace_ms = jockey3_start_grace_ms();
+	u64 now, remaining_ns;
+
+	if (!started)
+		return JOCKEY3_WATCHDOG_POLL_MS;
+
+	now = ktime_get_mono_fast_ns();
+
+	/*
+	 * Mirror jockey3_watchdog_check()'s own time-based grace window
+	 * (see its kernel-doc): while still inside it, the deadline to chase
+	 * is urbs_started_time + grace_ms regardless of whether an early
+	 * completion has already advanced last_callback_time, or this would
+	 * schedule a tight re-poll off a completion that does not end grace.
+	 */
+	if (now - started < (u64)grace_ms * NSEC_PER_MSEC) {
+		last = started;
+		threshold_ms = grace_ms;
+	} else if (!last) {
+		last = started;
+	}
+
+	remaining_ns = last + threshold_ms * NSEC_PER_MSEC - now;
+
+	if ((s64)remaining_ns <= 0)
+		return JOCKEY3_WATCHDOG_MIN_POLL_MS;
+
+	return clamp_t(unsigned long, div_u64(remaining_ns, NSEC_PER_MSEC),
+		       JOCKEY3_WATCHDOG_MIN_POLL_MS, JOCKEY3_WATCHDOG_POLL_MS);
+}
+
+/* Forward declaration: defined further down */
+static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int direction);
+
+/*
+ * Schedule the next watchdog tick.
+ *
+ * State-dependent cadence. With no substream open nothing is waiting on ALSA
+ * core's wait_for_avail() timeout, so there is no reason to chase
+ * JOCKEY3_WATCHDOG_STALL_MS; poll at the JOCKEY3_WATCHDOG_POLL_MS ceiling.
+ * Once a substream is open, self-reschedule from the nearer of the two
+ * directions' deadlines, as dev_watchdog() does in net/sched/sch_generic.c.
+ *
+ * Unlike dev_watchdog() the delay is not passed through
+ * round_jiffies_relative(), which rounds to whole seconds -- right for a
+ * multi-second watchdog_timeo, two orders of magnitude too coarse here.
+ *
+ * system_long_wq rather than system_wq: the tick is cheap, but
+ * jockey3_watchdog_check() may call jockey3_recover_urb_stream(), which blocks
+ * for seconds, and system_wq items are expected to be short.
+ */
+static void jockey3_watchdog_arm(struct jockey3_chip *chip)
+{
+	unsigned long delay_ms;
+
+	if (jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_PLAYBACK) ||
+	    jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE))
+		delay_ms = min(jockey3_watchdog_next_delay_ms(chip, &chip->playback),
+			       jockey3_watchdog_next_delay_ms(chip, &chip->capture));
+	else
+		delay_ms = JOCKEY3_WATCHDOG_POLL_MS;
+
+	queue_delayed_work(system_long_wq, &chip->watchdog_work, msecs_to_jiffies(delay_ms));
+}
+
+/**
+ * jockey3_watchdog_clear_stall() - close out a stall that a restart ended
+ * @chip: driver state
+ * @urb_stream: the affected direction
+ * @type: direction name, for the log message
+ *
+ * Every recovery path in this driver goes through jockey3_stop_urbs() and
+ * jockey3_start_urbs(), so a stalled stream is essentially always brought back
+ * by a restart rather than by starting to complete URBs again on its own. If
+ * the restart simply cleared the flag, the watchdog's onset line would never
+ * be paired with anything and the outage would have no recorded end -- which
+ * makes "stalls that ended" indistinguishable from "stalls still open" for
+ * anything reading the log afterwards.
+ *
+ * So the restart closes the outage explicitly. Together with the recovery line
+ * in jockey3_watchdog_check(), every onset has exactly one counterpart.
+ */
+static void jockey3_watchdog_clear_stall(struct jockey3_chip *chip,
+					 struct jockey3_pcm_urb_stream *urb_stream,
+					 const char *type)
+{
+	u64 outage_ns = 0;
+	bool reported;
+
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		reported = urb_stream->stall_reported;
+		if (reported)
+			outage_ns = ktime_get_mono_fast_ns() - urb_stream->stall_since;
+		urb_stream->stall_reported = false;
+	}
+
+	if (reported)
+		dev_warn(&chip->intf0->dev,
+			 "%s URB stream restarted after stalling for %llu ms\n",
+			 type, div_u64(outage_ns, NSEC_PER_MSEC));
+}
+
+/*
+ * Stop the watchdog from the URB teardown path.
+ *
+ * Deliberately the non-sync cancel: jockey3_stop_urbs() runs inside rate_mutex
+ * at several sites and the work item takes locks of its own, so waiting for a
+ * running tick here would be a deadlock waiting to happen. Not waiting is safe
+ * because a tick that is already running re-reads 'stopping' under the stream
+ * lock and does nothing. The sync cancel that teardown does need lives in
+ * jockey3_disconnect() and in probe's error path, where no mutex is held.
+ */
+static void jockey3_watchdog_disarm(struct jockey3_chip *chip)
+{
+	cancel_delayed_work(&chip->watchdog_work);
+}
+
 /**
  * jockey3_stop_urbs() - stop all PCM and MIDI URBs
  * @chip: driver state
@@ -1192,6 +1432,8 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 {
 	dev_dbg(&chip->intf0->dev, "Stopping all URBs\n");
 
+	jockey3_watchdog_disarm(chip);
+
 	/*
 	 * Fence the completion handlers before killing anything. Each 'stopping'
 	 * store pairs with the test the matching handler makes while holding the
@@ -1199,6 +1441,12 @@ static void jockey3_stop_urbs(struct jockey3_chip *chip)
 	 * released no handler can add a URB back to an anchor we are about to
 	 * drain. The spinlocks provide the required ordering; no explicit barrier
 	 * is needed.
+	 *
+	 * These stores must also stay above the timestamp zeroing below. The
+	 * watchdog is disarmed without waiting for a tick that is already
+	 * running, and such a tick samples the timestamps before it takes the
+	 * stream lock; 'stopping' being set by the time it gets there is the only
+	 * thing that stops it reporting a stall for a stream we stopped on purpose.
 	 */
 	scoped_guard(spinlock_irqsave, &chip->playback.lock)
 		chip->playback.stopping = true;
@@ -1282,10 +1530,11 @@ static void jockey3_submit_failed(struct jockey3_chip *chip, int err,
 /**
  * jockey3_start_urbs() - submit all PCM and MIDI URBs
  * @chip: driver state
- * @warm: true only for the recovery ladder's lightweight restart of a ring
+ * @warm: true only for the stall watchdog's own lightweight restart of a ring
  *	that was streaming a moment earlier; false for a cold start (first open,
  *	USB reset, probe). Both share start_grace_ms; this
- *	only labels the restart for dev_dbg().
+ *	only labels the restart for dev_dbg() and is recorded chip-wide in
+ *	@chip->warm_start.
  *
  * Clears the stop fences and error budgets, then submits the full URB ring for
  * both directions plus the MIDI IN URB. Uses GFP_KERNEL, so process context
@@ -1330,11 +1579,17 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
 		chip->midi_consec_errors = 0;
 	}
 
+	/* Report and clear any stall this restart is about to end */
+	jockey3_watchdog_clear_stall(chip, &chip->playback, "Playback");
+	jockey3_watchdog_clear_stall(chip, &chip->capture, "Capture");
+
 	/*
-	 * Stamp the start before submitting, not after: a URB can complete
-	 * before the loop below has finished. Reset the cadence counters in the
-	 * same breath.
+	 * Stamp the start before submitting, not after: this is what the
+	 * watchdog measures from until the first completion arrives, and a URB
+	 * can complete before the loop below has finished. Reset the cadence
+	 * counters in the same breath, and record which grace applies.
 	 */
+	WRITE_ONCE(chip->warm_start, warm);
 	atomic64_set(&chip->playback.first_callback_time, 0);
 	atomic64_set(&chip->capture.first_callback_time, 0);
 	atomic_set(&chip->playback.completions_since_start, 0);
@@ -1407,6 +1662,14 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
 				n_playback, JOCKEY3_N_URBS, n_capture, JOCKEY3_N_URBS);
 	}
 
+	/*
+	 * Arm regardless of first_err. A ring that came up short, or did not come
+	 * up at all, is precisely the state worth watching: when the endpoints
+	 * have been disabled underneath us every submit fails and nothing is left
+	 * to report the resulting silence.
+	 */
+	jockey3_watchdog_arm(chip);
+
 	return first_err;
 }
 
@@ -1431,7 +1694,8 @@ static int jockey3_start_urbs(struct jockey3_chip *chip, bool warm)
  *   pointless and jockey3_disconnect() is on its way. This is the common case
  *   on an ordinary unplug and must not be treated like the one above.
  *
- * - anything else is reported and left alone.
+ * - anything else is reported and left alone; the watchdog picks up whatever
+ *   silence results.
  *
  * Note that trying to undo the failure by selecting the working altsetting
  * again does not work: if the control endpoint is unresponsive, that request
@@ -1520,6 +1784,21 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate, bool c
 	return 0;
 }
 
+static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int direction)
+{
+	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
+	bool open;
+
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		open = urb_stream->substream;
+	}
+	return open;
+}
+
+/* Forward declaration: defined further down, alongside its other caller jockey3_pcm_prepare() */
+static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direction,
+				      const char *context, bool report_xrun);
+
 static bool jockey3_check_urb_stream_alive(const struct jockey3_pcm_urb_stream *urb_stream)
 {
 	u64 last_time = atomic64_read(&urb_stream->last_callback_time);
@@ -1566,7 +1845,7 @@ static u64 jockey3_min_urb_interval_ns(const struct jockey3_pcm_urb_stream *urb_
  * jockey3_check_urb_stream_alive() answers "did anything complete just now",
  * which a single FIFO-drain completion satisfies. This is the stricter test,
  * used at the one decision that must not be fooled by trickle: whether the
- * ladder's warm URB restart worked, or it should escalate to a
+ * stall watchdog's warm URB restart worked, or the ladder should escalate to a
  * full USB reset (a stream-killing event, and on this hardware one that can
  * leave the capture endpoint down). It requires
  *
@@ -1629,6 +1908,191 @@ static bool jockey3_stream_streaming_healthy(struct jockey3_chip *chip,
 		type, n, div_u64(span, (u64)(n - 1) * NSEC_PER_USEC),
 		div_u64(min_interval, NSEC_PER_USEC));
 	return true;
+}
+
+/**
+ * jockey3_watchdog_check() - one direction's share of a watchdog tick
+ * @chip: driver state
+ * @direction: SNDRV_PCM_STREAM_PLAYBACK or SNDRV_PCM_STREAM_CAPTURE
+ *
+ * Reports a direction that has stopped completing URBs and, on the onset edge,
+ * recovers it -- the only path that catches a stall mid-stream, with no PCM
+ * ioctl to hand it to. Gated by direction: Playback always recovers because it
+ * carries MIDI OUT; Capture only if a capture stream is open, since the ladder
+ * restarts the shared ring and an idle Capture stall would glitch working
+ * Playback for no visible gain. It is logged and left for the next capture
+ * open.
+ *
+ * Logging is edge-triggered, one line per stall start and end. The measured
+ * age is reported rather than the threshold, since the poll interval would
+ * only bound it to one tick.
+ *
+ * Deliberately does not gate on urbs_in_flight: endpoints disabled underneath
+ * the driver leave nothing in flight, which is the case that must not go
+ * unnoticed. The count is reported as evidence -- a full ring means
+ * "submitted, never returned", an empty one "nothing could be submitted".
+ *
+ * The onset tags itself "startup" or "steady-state" after which threshold
+ * caught it: the start grace, or JOCKEY3_WATCHDOG_STALL_MS once that window
+ * has passed. Only "steady-state" is a real mid-stream fault.
+ *
+ * Time-based rather than keyed off the first completion: at low N a restart
+ * can complete an URB within under a millisecond, a hardware FIFO draining
+ * rather than the pipeline catching up, so an early completion must not end
+ * the grace. jockey3_stream_streaming_healthy() applies the same reasoning in
+ * the recovery ladder.
+ */
+static void jockey3_watchdog_check(struct jockey3_chip *chip, const int direction)
+{
+	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
+	const char *type = direction == SNDRV_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
+	bool log_onset = false, log_recovery = false;
+	u64 now, last, started, age_ns, outage_ns = 0;
+	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
+	unsigned int grace_ms = jockey3_start_grace_ms();
+	bool open = false, startup = false;
+
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		/*
+		 * One flag covers every deliberate stop -- pre_reset and
+		 * teardown both reach jockey3_stop_urbs(). Checked before
+		 * now/last/age_ns are sampled, not after: this tick can have
+		 * been sitting on system_long_wq for a while before it got to
+		 * run, and a stop+restart cycle can complete inside that wait.
+		 */
+		if (urb_stream->stopping) {
+			urb_stream->stall_reported = false;
+			return;
+		}
+
+		/*
+		 * Read both candidate baselines before sampling @now, whichever
+		 * one ends up used below: a completion landing on another CPU
+		 * between reading a baseline and reading @now would otherwise let
+		 * "now - last" underflow to a u64 near its max instead of going
+		 * negative. Reading both first guarantees @now is taken no
+		 * earlier than either.
+		 */
+		started = atomic64_read(&urb_stream->urbs_started_time);
+		last = atomic64_read(&urb_stream->last_callback_time);
+		now = ktime_get_mono_fast_ns();
+
+		if (!started)
+			return;		/* never started; nothing to watch yet */
+
+		if (now - started < (u64)grace_ms * NSEC_PER_MSEC) {
+			/*
+			 * Still inside the fixed post-restart grace window --
+			 * measured from urbs_started_time regardless of whether
+			 * last_callback_time has already advanced. See this
+			 * function's kernel-doc for why an early completion is
+			 * not treated as proof the window is over.
+			 */
+			last = started;
+			threshold_ms = grace_ms;
+			startup = true;
+		} else if (!last) {
+			/* Past the grace window and still never completed once */
+			last = started;
+		}
+
+		age_ns = now - last;
+
+		open = urb_stream->substream;
+
+		if (age_ns > threshold_ms * NSEC_PER_MSEC) {
+			if (!urb_stream->stall_reported) {
+				urb_stream->stall_reported = true;
+				urb_stream->stall_since = last;
+				log_onset = true;
+			}
+		} else if (urb_stream->stall_reported) {
+			urb_stream->stall_reported = false;
+			/*
+			 * @last is the completion that ended the outage and
+			 * @stall_since the one before it started, so the
+			 * difference is the true gap rather than a rounding of
+			 * it to the poll interval.
+			 */
+			outage_ns = last - urb_stream->stall_since;
+			log_recovery = true;
+		}
+	}
+
+	if (log_onset) {
+		dev_warn(&chip->intf0->dev,
+			 "%s URB stream stalled: no completion for %llu ms (%d URBs in flight, substream %s, %s)\n",
+			 type, div_u64(age_ns, NSEC_PER_MSEC),
+			 atomic_read(&urb_stream->urbs_in_flight),
+			 open ? "open" : "idle",
+			 startup ? "startup" : "steady-state");
+		if (startup)
+			dev_dbg(&chip->intf0->dev,
+				"%s stall was inside the %s start grace (%u ms)\n", type,
+				READ_ONCE(chip->warm_start) ? "warm" : "cold", grace_ms);
+	} else if (log_recovery) {
+		dev_warn(&chip->intf0->dev, "%s URB stream recovered after %llu ms\n",
+			 type, div_u64(outage_ns, NSEC_PER_MSEC));
+	}
+
+	if (log_onset && (direction == SNDRV_PCM_STREAM_PLAYBACK || open))
+		jockey3_recover_urb_stream(chip, direction, "watchdog", true);
+}
+
+/**
+ * jockey3_watchdog_work() - periodic URB liveness check
+ * @work: the chip's watchdog_work
+ *
+ * Every error path in this driver hangs off a URB completion, so a device that
+ * simply stops completing URBs is invisible to all of them: nothing runs, so
+ * nothing is logged. A playback stream in that state does not even produce an
+ * xrun, because the hardware pointer never advances far enough to overtake the
+ * application. This is the only place that can notice such a silence, which is
+ * why it runs for the device's whole lifetime rather than only while a PCM
+ * stream is open -- the URBs do too, since MIDI OUT rides in every playback
+ * packet and there is no idle state in which "no completions" is legitimate.
+ *
+ * Acts as well as detects: jockey3_watchdog_check() calls
+ * jockey3_recover_urb_stream() directly on a new stall onset. This is the
+ * only place recovery can be triggered without a PCM ioctl (prepare)
+ * re-entering the driver first -- necessary because a long-running,
+ * uninterrupted stream never re-enters otherwise, and ALSA core's own
+ * wait_for_avail() (sound/core/pcm_lib.c) times out the open substream with
+ * -EIO on its own schedule regardless of whether this driver ever notices.
+ * jockey3_watchdog_arm()'s cadence tightens while a PCM stream is open, for
+ * exactly this reason.
+ *
+ * Calling into jockey3_recover_urb_stream() from here is safe even though it
+ * calls jockey3_stop_urbs(), which disarms this same work item: the disarm is
+ * the non-sync cancel_delayed_work(), which never blocks and only prevents a
+ * future queueing -- it does not affect the tick that is already running
+ * (this one). The reset jockey3_recover_urb_stream() may queue runs on
+ * system_wq (drivers/usb/core/message.c's usb_queue_reset_device()), not
+ * system_long_wq where this tick runs, so the two cannot serialize behind
+ * each other; and rate_mutex is not held across the wait for that reset
+ * (jockey3_recover_urb_stream() drops it first), which is what lets
+ * jockey3_pre_reset()/jockey3_post_reset() take the mutex themselves and
+ * complete while this tick is blocked waiting.
+ */
+static void jockey3_watchdog_work(struct work_struct *work)
+{
+	struct jockey3_chip *chip = container_of(to_delayed_work(work),
+						 struct jockey3_chip, watchdog_work);
+
+	if (jockey3_is_disconnected(chip))
+		return;
+
+	/*
+	 * A reset stops and restarts the URBs from the USB core's own workqueue.
+	 * Sampling in the middle of that would report a stall that is both
+	 * expected and already being dealt with.
+	 */
+	if (!jockey3_is_resetting(chip)) {
+		jockey3_watchdog_check(chip, SNDRV_PCM_STREAM_PLAYBACK);
+		jockey3_watchdog_check(chip, SNDRV_PCM_STREAM_CAPTURE);
+	}
+
+	jockey3_watchdog_arm(chip);
 }
 
 /*
@@ -1725,13 +2189,16 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  *	which direction stalled. True only when a running stream just lost
  *	continuity; false when nothing has flowed yet (.prepare).
  *
- * Called by jockey3_pcm_prepare() once its liveness check has confirmed a
- * stall. A direction found alive at entry returns immediately, so two
- * sequential calls for one stall are cheap.
+ * Shared by jockey3_pcm_prepare()'s liveness check and
+ * jockey3_watchdog_check()'s mid-stream detection. Every call site confirms
+ * the stall first, and a direction found alive at entry returns immediately,
+ * so two sequential calls for one stall are cheap.
  *
  * Concurrent calls need more: two can both pass the alive check before either
  * restarts anything, then run competing stop/start sequences or resets.
  * @chip->recovery_in_progress closes that -- one ladder at a time, chip-wide.
+ * Without it a watchdog tick and a racing jockey3_pcm_prepare() retry collide
+ * and produce -EPROTO on every endpoint, needing a re-enumeration to clear.
  *
  * Ladder: a lightweight URB stop/start, then a full USB reset if that did not
  * take, queued with usb_queue_reset_device() and awaited by
@@ -2351,6 +2818,15 @@ static void jockey3_free_resources(struct jockey3_chip *chip)
 {
 	int i;
 
+	/*
+	 * The last fence on the watchdog. jockey3_disconnect()'s sync cancel is
+	 * not enough on its own: a jockey3_start_urbs() already past its
+	 * DISCONNECTED gate arms the watchdog at its tail, under no mutex that
+	 * would exclude the cancel. Here that cannot happen -- private_free runs
+	 * once the card is closed, so every such caller has returned.
+	 */
+	cancel_delayed_work_sync(&chip->watchdog_work);
+
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		usb_free_urb(chip->playback.urbs[i]);
 		kfree(chip->playback.bufs[i]);
@@ -2665,6 +3141,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->playback.n_pkts = JOCKEY3_PLAYBACK_N;
 	chip->capture.n_shift = ilog2(JOCKEY3_CAPTURE_N);
 	chip->capture.n_pkts = JOCKEY3_CAPTURE_N;
+	INIT_DELAYED_WORK(&chip->watchdog_work, jockey3_watchdog_work);
 
 	chip->xfer_buf = kmalloc(USB_XFER_BUF_SIZE, GFP_KERNEL);
 	if (!chip->xfer_buf) {
@@ -2711,11 +3188,12 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 
 err_free_card:
 	/*
-	 * Same order as jockey3_disconnect(): latch DISCONNECTED, kill the URBs,
-	 * and only then let go of interface 1 and the card. All of it is safe on
-	 * a half-built chip -- the locks and anchors are initialized above with
-	 * no failure point between, and everything jockey3_free_resources()
-	 * touches is NULL until it is allocated.
+	 * Same order as jockey3_disconnect(): latch DISCONNECTED so a watchdog
+	 * tick cannot re-arm itself, wait for any tick already running, kill the
+	 * URBs, and only then let go of interface 1 and the card. All of it is
+	 * safe on a half-built chip -- the locks, anchors and work item are
+	 * initialized above with no failure point between, and everything
+	 * jockey3_free_resources() touches is NULL until it is allocated.
 	 *
 	 * snd_card_free() rather than the disconnect path's
 	 * snd_card_free_when_closed(): the card is not registered yet on any
@@ -2729,6 +3207,7 @@ err_free_card:
 	 */
 	usb_set_intfdata(intf, NULL);
 	set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+	cancel_delayed_work_sync(&chip->watchdog_work);
 	jockey3_stop_urbs(chip);
 	usb_driver_release_interface(&jockey3_driver, intf1);
 	snd_card_free(card);
@@ -2769,6 +3248,15 @@ static void jockey3_disconnect(struct usb_interface *intf)
 		 * jockey3_post_reset(), so this is the only wakeup they get.
 		 */
 		complete_all(&chip->reset_done);
+
+		/*
+		 * Sync here, unlike in jockey3_stop_urbs(): no mutex is held on
+		 * this path, and a tick that is mid-flight must be finished with
+		 * the chip before the card is torn down. DISCONNECTED is already
+		 * set above, so a tick that started just before this will not
+		 * requeue itself.
+		 */
+		cancel_delayed_work_sync(&chip->watchdog_work);
 
 		jockey3_stop_urbs(chip);
 
