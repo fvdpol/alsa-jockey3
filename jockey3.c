@@ -92,10 +92,15 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * callbacks therefore only toggle whether a URB's payload is filled from (or
  * copied to) an ALSA buffer.
  *
- * A stall can also be found and recovered mid-stream, with no PCM ioctl
- * involved: jockey3_watchdog_work() polls URB liveness for the device's whole
- * lifetime and calls the recovery ladder directly on a new stall onset. See
- * jockey3_watchdog_check() and jockey3_watchdog_arm().
+ * A sample-rate change requires tearing the URBs down, reprogramming the
+ * device over EP0, and starting them again. jockey3_pcm_hw_params() checks
+ * URB liveness on both directions afterward and recovers if either did not
+ * restart; see the comment there for what that covers and why.
+ *
+ * A stall can also be found and recovered mid-stream, with no rate change or
+ * PCM ioctl involved: jockey3_watchdog_work() polls URB liveness for the
+ * device's whole lifetime and calls the same recovery ladder directly on a
+ * new stall onset. See jockey3_watchdog_check() and jockey3_watchdog_arm().
  */
 
 /**
@@ -161,7 +166,7 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  *
  * The watchdog work item adds one rule: rate_mutex must never be held across
  * cancel_delayed_work_sync(&chip->watchdog_work). jockey3_stop_urbs() is called
- * from inside rate_mutex at two sites, so it disarms with the non-sync
+ * from inside rate_mutex at three sites, so it disarms with the non-sync
  * cancel_delayed_work(), which is safe under any lock; a tick that is already
  * running when the cancel lands re-reads 'stopping' and does nothing. The sync
  * form appears only in jockey3_disconnect(), in probe's error path and in
@@ -244,9 +249,10 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * URB liveness watchdog.
  *
  * A healthy stream completes one URB every @n_pkts packet intervals, and a
- * packet is 226.8 us at 44100 Hz. So JOCKEY3_WATCHDOG_STALL_MS of silence is
- * many consecutive missed URBs at any N -- more than scheduling delay or bus
- * contention produces on a device that is still streaming.
+ * packet is 226.8 us at 44100 Hz down to 83.3 us at 96000 Hz. So
+ * JOCKEY3_WATCHDOG_STALL_MS of silence is many consecutive missed URBs at any
+ * supported rate and N -- more than scheduling delay or bus contention
+ * produces on a device that is still streaming.
  *
  * The threshold is sized against ALSA core's own stall timeout
  * (wait_for_avail() in sound/core/pcm_lib.c, roughly buffer_size * 1100 / rate
@@ -358,13 +364,17 @@ static unsigned int jockey3_start_grace_ms(void)
  *	needed because @last_callback_time is deliberately 0 between a start and
  *	the first completion, which jockey3_check_urb_stream_alive() must keep
  *	reading as "not alive" -- so the watchdog cannot reuse it without either
- *	reporting a stall at every start or breaking the check after a restart.
+ *	reporting a stall at every start or breaking the post-rate-change check.
  *	It doubles as the watchdog's post-start grace baseline (the grace
  *	duration is start_grace_ms).
  * @lock: protects the fields marked "@lock" below; IRQ-safe leaf
  * @dma_off: byte offset into runtime->dma_area, i.e. the hardware pointer; @lock
  * @period_off: bytes accumulated towards the current period; @lock
  * @running: stream is triggered and its payload should be filled; @lock
+ * @rate_committed: this direction has had a rate accepted by
+ *	jockey3_pcm_hw_params() and not yet released by jockey3_pcm_hw_free();
+ *	@lock. See jockey3_rate_committed_streams() for why the rate interlock
+ *	keys off this rather than off @running or off @substream.
  * @callbacks_active: number of URB completions currently inside the "safe zone"
  *	where they may still touch @substream or runtime->dma_area; @lock. The
  *	last one out wakes @drain_wait. A count rather than a flag because there
@@ -408,6 +418,7 @@ struct jockey3_pcm_urb_stream {
 	unsigned int dma_off;
 	unsigned int period_off;
 	bool running;
+	bool rate_committed;
 	unsigned int callbacks_active;
 	wait_queue_head_t drain_wait;
 	bool stopping;
@@ -432,8 +443,8 @@ struct jockey3_pcm_urb_stream {
  *	Serialized by @rate_mutex once the card is live. The one exception is
  *	jockey3_initialize(), which runs from probe before the card is
  *	registered or the watchdog armed, so it is the only user in existence.
- * @rate_mutex: serializes the URB stop/start sequences and the EP0 programming
- *	that goes with them; process context only, outermost lock
+ * @rate_mutex: serializes sample-rate changes and the URB stop/start that goes
+ *	with them; process context only, outermost lock
  * @flags: JOCKEY3_FLAG_* bits, atomic bitops
  * @current_rate: sample rate the hardware is programmed to; @rate_mutex
  * @dev_idx: card slot held in jockey3_devices_used
@@ -447,7 +458,7 @@ struct jockey3_pcm_urb_stream {
  *	device, is its whole lifetime rather than only while a PCM stream is open.
  * @recovery_attempts: resets taken from the current window by
  *	jockey3_recovery_budget_take(); not mutex-protected, since
- *	jockey3_pcm_prepare()'s liveness check and recovery run outside
+ *	jockey3_pcm_hw_params()'s post-rate-change liveness check runs outside
  *	@rate_mutex by design. The two-atomic race with @recovery_window_start is
  *	benign: the worst case is a handful of extra resets in one window, not a
  *	stuck or negative budget.
@@ -467,7 +478,7 @@ struct jockey3_pcm_urb_stream {
  *	callers elsewhere poll rather than block on recovery finishing.
  * @warm_start: true if the current URB ring was last started by the stall
  *	watchdog's own lightweight restart, false for every other (re)start
- *	(first open, USB reset, probe). Both kinds share
+ *	(first open, rate change, USB reset, probe). Both kinds share
  *	one start_grace_ms; this only labels which one is in effect, for
  *	dev_dbg(). Chip-wide, not per-direction: jockey3_start_urbs() restarts
  *	the shared ring for both directions at once. Plain bool, written by
@@ -488,7 +499,7 @@ struct jockey3_chip {
 	struct usb_interface *intf1;
 	struct snd_pcm *pcm;
 	unsigned char *xfer_buf;
-	struct mutex rate_mutex;	/* serializes URB stop/start; outermost lock */
+	struct mutex rate_mutex;	/* serializes rate changes; outermost lock */
 	unsigned long flags;
 	unsigned int current_rate;
 	unsigned int dev_idx;
@@ -541,6 +552,15 @@ static void jockey3_set_current_rate(struct jockey3_chip *chip, unsigned int rat
 
 	chip->current_rate = rate;
 }
+
+/*
+ * Rate changes are serialized by chip->rate_mutex alone: jockey3_pcm_hw_params()
+ * performs the whole stop/set-rate/start sequence while holding it, so any other
+ * sleepable callback that takes the mutex is automatically excluded for the
+ * duration. There is deliberately no separate "rate changing" flag to poll --
+ * the only caller that could not take the mutex was .trigger, which runs in
+ * atomic context and must not block at all.
+ */
 
 /*
  * Bounded, synchronous wait for a device reset queued via
@@ -628,6 +648,55 @@ static inline struct jockey3_pcm_urb_stream *jockey3_get_pcm_urb_stream(struct j
 		return &chip->playback;
 	else
 		return &chip->capture;
+}
+
+static void jockey3_set_rate_committed(struct jockey3_chip *chip, const int direction,
+				       bool committed)
+{
+	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
+
+	guard(spinlock_irqsave)(&urb_stream->lock);
+	urb_stream->rate_committed = committed;
+}
+
+/*
+ * How many directions currently hold the hardware rate, i.e. have had a rate
+ * accepted by jockey3_pcm_hw_params() and not yet released by
+ * jockey3_pcm_hw_free(). The device has a single rate for both directions, so
+ * this is what the open-time constraint and the hw_params interlock key off.
+ *
+ * Deliberately not a count of *running* streams: .trigger is what sets
+ * @running, so a stream that is open, has its rate fixed and is merely waiting
+ * to be started would not be counted, and the other direction could reprogram
+ * the hardware underneath it -- it would then play or record at the wrong
+ * speed.
+ *
+ * Equally deliberately not a count of *open* streams: a full-duplex
+ * application opens both directions before calling hw_params on either, and
+ * counting opens would pin the second one to whatever rate the device happens
+ * to be sitting at, refusing an otherwise legal rate change.
+ *
+ * One consequence is worth knowing: the constraint jockey3_pcm_open() applies
+ * is permanent for that substream's runtime, while a commitment is not, so a
+ * stream that opened while the other direction held a rate stays pinned to it
+ * even after that direction closes. That is inherent to a device with a single
+ * rate for both directions, and is the safe side of the trade.
+ */
+static int jockey3_rate_committed_streams(struct jockey3_chip *chip)
+{
+	int committed = 0;
+
+	scoped_guard(spinlock_irqsave, &chip->capture.lock) {
+		if (chip->capture.rate_committed)
+			committed++;
+	}
+
+	scoped_guard(spinlock_irqsave, &chip->playback.lock) {
+		if (chip->playback.rate_committed)
+			committed++;
+	}
+
+	return committed;
 }
 
 static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
@@ -1302,7 +1371,7 @@ static unsigned long jockey3_watchdog_next_delay_ms(struct jockey3_chip *chip,
 		       JOCKEY3_WATCHDOG_MIN_POLL_MS, JOCKEY3_WATCHDOG_POLL_MS);
 }
 
-/* Forward declaration: defined further down */
+/* Forward declaration: defined further down, alongside its other caller jockey3_pcm_hw_params() */
 static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int direction);
 
 /*
@@ -1500,7 +1569,7 @@ static void jockey3_submit_failed(struct jockey3_chip *chip, int err,
  * @chip: driver state
  * @warm: true only for the stall watchdog's own lightweight restart of a ring
  *	that was streaming a moment earlier; false for a cold start (first open,
- *	USB reset, probe). Both share start_grace_ms; this
+ *	rate change, USB reset, probe). Both share start_grace_ms; this
  *	only labels the restart for dev_dbg() and is recorded chip-wide in
  *	@chip->warm_start.
  *
@@ -1735,6 +1804,9 @@ static int jockey3_set_rate(struct jockey3_chip *chip, unsigned int rate, bool c
 	 * device's power-on default. The write evidently does more than set a
 	 * frequency; no vendor initialization omits it. See
 	 * re/usb/init_timing_comparison.md.
+	 *
+	 * Callers that want to avoid a redundant rate change already check
+	 * against chip->current_rate before getting here.
 	 */
 	dev_dbg(&chip->intf0->dev, "Setting hardware rate: %u Hz\n", rate);
 	ret = ploytec_set_rate(chip->intf0, chip->xfer_buf, rate, cold_init);
@@ -1763,7 +1835,9 @@ static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int directio
 	return open;
 }
 
-/* Forward declaration: defined further down, alongside its other caller jockey3_pcm_prepare() */
+/* Forward declaration: defined further down, alongside its other callers jockey3_pcm_hw_params()
+ * and jockey3_pcm_prepare()
+ */
 static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direction,
 				      const char *context, bool report_xrun);
 
@@ -1885,11 +1959,11 @@ static bool jockey3_stream_streaming_healthy(struct jockey3_chip *chip,
  *
  * Reports a direction that has stopped completing URBs and, on the onset edge,
  * recovers it -- the only path that catches a stall mid-stream, with no PCM
- * ioctl to hand it to. Gated by direction: Playback always recovers because it
- * carries MIDI OUT; Capture only if a capture stream is open, since the ladder
- * restarts the shared ring and an idle Capture stall would glitch working
- * Playback for no visible gain. It is logged and left for the next capture
- * open.
+ * ioctl to hand it to. Gated as jockey3_pcm_hw_params() gates its own capture
+ * recovery: Playback always recovers because it carries MIDI OUT; Capture only
+ * if a capture stream is open, since the ladder restarts the shared ring and
+ * an idle Capture stall would glitch working Playback for no visible gain. It
+ * is logged and left for the next capture open.
  *
  * Logging is edge-triggered, one line per stall start and end. The measured
  * age is reported rather than the threshold, since the poll interval would
@@ -1922,11 +1996,18 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		/*
-		 * One flag covers every deliberate stop -- pre_reset and
-		 * teardown both reach jockey3_stop_urbs(). Checked before
-		 * now/last/age_ns are sampled, not after: this tick can have
-		 * been sitting on system_long_wq for a while before it got to
-		 * run, and a stop+restart cycle can complete inside that wait.
+		 * One flag covers every deliberate stop -- rate change,
+		 * pre_reset and teardown all reach jockey3_stop_urbs(). Checked
+		 * before now/last/age_ns are sampled, not after: this tick can
+		 * have been sitting on system_long_wq for a while before it got
+		 * to run, and a stop+restart cycle -- which routinely takes on
+		 * the order of 100 ms, far longer than this spinlock is ever
+		 * held -- can complete inside that wait. Sampling first and
+		 * checking stopping second, as this used to, let a tick whose
+		 * data predated the stop act on it once stopping had already
+		 * gone false again, misreporting a rate change's own deliberate
+		 * silence as a stall. See re/rate_change_stall.md for the
+		 * hardware traces this closed.
 		 */
 		if (urb_stream->stopping) {
 			urb_stream->stall_reported = false;
@@ -2022,8 +2103,8 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
  *
  * Acts as well as detects: jockey3_watchdog_check() calls
  * jockey3_recover_urb_stream() directly on a new stall onset. This is the
- * only place recovery can be triggered without a PCM ioctl (prepare)
- * re-entering the driver first -- necessary because a long-running,
+ * only place recovery can be triggered without some PCM ioctl (hw_params,
+ * prepare) re-entering the driver first -- necessary because a long-running,
  * uninterrupted stream never re-enters otherwise, and ALSA core's own
  * wait_for_avail() (sound/core/pcm_lib.c) times out the open substream with
  * -EIO on its own schedule regardless of whether this driver ever notices.
@@ -2155,12 +2236,14 @@ static bool jockey3_wait_urb_stream_started(struct jockey3_chip *chip, const int
  * @report_xrun: report an xrun on both directions' open substreams once
  *	recovery is committed to -- both, since the ring is shared regardless of
  *	which direction stalled. True only when a running stream just lost
- *	continuity; false when nothing has flowed yet (.prepare).
+ *	continuity; false when the caller already expects the discontinuity (a
+ *	rate change) or nothing has flowed yet (.prepare).
  *
- * Shared by jockey3_pcm_prepare()'s liveness check and
- * jockey3_watchdog_check()'s mid-stream detection. Every call site confirms
- * the stall first, and a direction found alive at entry returns immediately,
- * so two sequential calls for one stall are cheap.
+ * Shared by jockey3_pcm_hw_params()'s post-rate-change check,
+ * jockey3_pcm_prepare()'s liveness check and jockey3_watchdog_check()'s
+ * mid-stream detection. Every call site confirms the stall first, and a
+ * direction found alive at entry returns immediately, so two sequential calls
+ * for one stall are cheap.
  *
  * Concurrent calls need more: two can both pass the alive check before either
  * restarts anything, then run competing stop/start sequences or resets.
@@ -2231,13 +2314,17 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	scoped_guard(mutex, &chip->rate_mutex) {
 		/*
 		 * Something else may have already fixed this while the call above
-		 * was waiting for rate_mutex -- a device reset, say, whose
-		 * jockey3_post_reset() restarts the ring under this same mutex.
+		 * was waiting for rate_mutex -- most plausibly
+		 * jockey3_pcm_hw_params()'s own rate-change restart, which holds
+		 * this same mutex across its whole stop/set-rate/start sequence.
 		 * The alive check above this function's entry is stale by the
 		 * time the lock is held; re-checking here is what makes a call
 		 * that raced a legitimate recovery a no-op instead of a second,
 		 * redundant full URB-ring teardown/rebuild landing right on top
-		 * of one that already succeeded.
+		 * of one that already succeeded. Without this re-check the
+		 * redundant restart can miss its own liveness budget and escalate
+		 * to a full USB reset that a change which had already recovered on
+		 * its own never needed. See re/rate_change_stall.md.
 		 */
 		if (jockey3_check_urb_stream_alive(urb_stream)) {
 			dev_dbg(&chip->intf0->dev,
@@ -2344,14 +2431,17 @@ out:
 				 SNDRV_PCM_INFO_BATCH |		\
 				 SNDRV_PCM_INFO_MMAP_VALID)
 
-#define JOCKEY3_PCM_RATES	SNDRV_PCM_RATE_44100
+#define JOCKEY3_PCM_RATES	(SNDRV_PCM_RATE_44100 |	\
+				 SNDRV_PCM_RATE_48000 |	\
+				 SNDRV_PCM_RATE_88200 |	\
+				 SNDRV_PCM_RATE_96000)
 
 static const struct snd_pcm_hardware jockey3_pcm_hw_playback = {
 	.info			= JOCKEY3_PCM_INFO,
 	.formats		= SNDRV_PCM_FMTBIT_S24_3LE,
 	.rates			= JOCKEY3_PCM_RATES,
 	.rate_min		= 44100,
-	.rate_max		= 44100,
+	.rate_max		= 96000,
 	.channels_min		= 4,
 	.channels_max		= 4,
 	.buffer_bytes_max	= 1024 * 1024,
@@ -2374,7 +2464,7 @@ static const struct snd_pcm_hardware jockey3_pcm_hw_capture = {
 	.formats		= SNDRV_PCM_FMTBIT_S24_3LE,
 	.rates			= JOCKEY3_PCM_RATES,
 	.rate_min		= 44100,
-	.rate_max		= 44100,
+	.rate_max		= 96000,
 	.channels_min		= 6,
 	.channels_max		= 6,
 	.buffer_bytes_max	= 1024 * 1024,
@@ -2411,6 +2501,26 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 	if (ret < 0)
 		return ret;
 
+	/*
+	 * Rate constraints under rate_mutex, which also excludes a concurrent
+	 * rate change in jockey3_pcm_hw_params(). Re-check for disconnect here:
+	 * the check above raced with anything that happened while we were not
+	 * holding the mutex.
+	 */
+	scoped_guard(mutex, &chip->rate_mutex) {
+		if (jockey3_is_disconnected(chip))
+			return -ENODEV;
+
+		if (jockey3_rate_committed_streams(chip) > 0) {
+			/* Force the new stream to match the existing hardware rate */
+			ret = snd_pcm_hw_constraint_single(runtime,
+							   SNDRV_PCM_HW_PARAM_RATE,
+							   chip->current_rate);
+			if (ret < 0)
+				return ret;
+		}
+	}
+
 	/* Substream registration under spinlock to ensure memory consistency to the ISR*/
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		urb_stream->substream = substream;
@@ -2437,13 +2547,17 @@ static int jockey3_pcm_close(struct snd_pcm_substream *substream)
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		urb_stream->substream = NULL;
 		urb_stream->running = false;
+		urb_stream->rate_committed = false;
 
 		/*
 		 * A closed direction is not covered by jockey3_pcm_hw_params()
 		 * any more, so its N would otherwise sit at whatever the last
 		 * open left it at -- possibly a small, period-tuned value that
-		 * has nothing to do with the next stream to open it. Reset to
-		 * the default here so an idle direction always runs at a safe N.
+		 * has nothing to do with the next stream to open it, or with
+		 * this direction's own idle ring being re-armed by a rate
+		 * change on the *other* direction (jockey3_start_urbs() re-arms
+		 * both unconditionally). Reset to the default here so an idle
+		 * direction always re-arms at a safe N.
 		 */
 		WRITE_ONCE(urb_stream->n_shift, ilog2(default_n));
 		WRITE_ONCE(urb_stream->n_pkts, default_n);
@@ -2507,18 +2621,20 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 		return ret;
 
 	/*
-	 * Taking rate_mutex here serializes against a URB restart in
-	 * jockey3_recover_urb_stream() or a device reset, both of which hold it
-	 * across their stop/start sequence -- so the liveness below is sampled
-	 * from a settled state rather than from the middle of a URB restart.
+	 * Taking rate_mutex here serializes against an in-flight rate change in
+	 * jockey3_pcm_hw_params(), which holds it across the whole stop/set/start
+	 * sequence -- so the liveness below is sampled from a settled state
+	 * rather than from the middle of a URB restart.
 	 */
 	scoped_guard(mutex, &chip->rate_mutex) {
 		if (jockey3_is_disconnected(chip))
 			return -ENODEV;
 
 		/*
-		 * The ring may have stalled since it was started. Catch it here,
-		 * before the stream that is being prepared starts relying on it.
+		 * Either direction may have been left stalled by an earlier rate
+		 * change that happened while this stream was not open (see
+		 * jockey3_pcm_hw_params()). Catch it here, before the stream that
+		 * is being prepared starts relying on it.
 		 *
 		 * This single sample is only a hint. jockey3_check_urb_stream_alive()'s
 		 * window is scaled to always span a handful of packet intervals
@@ -2562,7 +2678,14 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 
 /*
  * Called by the ALSA core with the substream stream lock held and interrupts
- * disabled, so this callback must never sleep.
+ * disabled, so this callback must never sleep. In particular it must not wait
+ * for a rate change or a device reset: a URB completion can re-enter here via
+ * snd_pcm_period_elapsed() -> snd_pcm_stop_xrun(), and blocking would then
+ * stall the very rate change it is waiting on.
+ *
+ * Serialization against a concurrent rate change is provided by rate_mutex in
+ * the sleepable callbacks instead; the ALSA state machine guarantees .prepare
+ * runs before TRIGGER_START and after every XRUN.
  *
  * Lock order here is snd_pcm_stream_lock -> urb_stream->lock, which is why the
  * URB callbacks drop urb_stream->lock before calling snd_pcm_period_elapsed().
@@ -2644,6 +2767,10 @@ static int jockey3_initialize_ploytec(struct jockey3_chip *chip, u32 *fw_version
  * this direction simply picks up the new N at its own next resubmission; the
  * ring turns over onto it within at most JOCKEY3_N_URBS completions. See
  * re/streaming_overhead.md for the rationale and measurements.
+ *
+ * Called unconditionally on every hw_params(), including when the rate is
+ * unchanged and the URB ring is never touched: N is a per-open, per-period
+ * property, independent of whether a rate change happens to be in progress.
  */
 static void jockey3_pcm_set_n(struct jockey3_chip *chip, struct snd_pcm_substream *substream,
 			      struct snd_pcm_hw_params *hw_params)
@@ -2667,16 +2794,215 @@ static void jockey3_pcm_set_n(struct jockey3_chip *chip, struct snd_pcm_substrea
 		is_playback ? "playback" : "capture", 1U << n_shift, period_bytes);
 }
 
-static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
-				 struct snd_pcm_hw_params *hw_params)
+/**
+ * jockey3_pcm_change_rate() - reprogram the hardware rate for hw_params()
+ * @chip: driver state
+ * @substream: the substream asking for the rate
+ * @rate: the requested rate in Hz
+ * @changed: set true if the hardware was actually reprogrammed
+ *
+ * Split out of jockey3_pcm_hw_params() because nesting two scoped_guard()
+ * blocks in one scope shadows the guard's own variable and trips -Wshadow.
+ * Call with the USB device lock held; see the call site for why.
+ *
+ * Return: 0 on success or if the rate already matched (@changed stays false),
+ * %-EBUSY if the other direction holds a different rate, %-ENODEV if the device
+ * is gone, or the error from programming the rate.
+ */
+static int jockey3_pcm_change_rate(struct jockey3_chip *chip,
+				   struct snd_pcm_substream *substream,
+				   unsigned int rate, bool *changed)
 {
-	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+	int ret;
+
+	/*
+	 * rate_mutex is held across the whole stop/set-rate/start sequence, which
+	 * is what excludes a concurrent rate change from another substream: any
+	 * other sleepable path that needs a settled rate takes the same mutex.
+	 */
+	guard(mutex)(&chip->rate_mutex);
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
+	/*
+	 * Drop this direction's own claim on the rate before counting:
+	 * an application is free to hw_free and run hw_params again at
+	 * a different rate, and its previous commitment must not be
+	 * what blocks it. Cleared inside rate_mutex, so the other
+	 * direction cannot observe the gap and reprogram the hardware.
+	 */
+	jockey3_set_rate_committed(chip, substream->stream, false);
+
+	if (chip->current_rate == rate) {
+		dev_dbg(&chip->intf0->dev, "Rate already set to %u, skipping change\n",
+			rate);
+		jockey3_set_rate_committed(chip, substream->stream, true);
+		return 0;
+	}
+
+	*changed = true;
+
+	/*
+	 * The other direction already holds the rate. The ALSA core
+	 * should have enforced the constraint from jockey3_pcm_open(),
+	 * so this is a backstop -- but it is also the only check that
+	 * covers a stream which opened while the device was idle and
+	 * only now asks for a rate the other direction has since fixed.
+	 */
+	if (jockey3_rate_committed_streams(chip) > 0) {
+		dev_err(&chip->intf0->dev,
+			"Cannot change rate to %u while the other stream holds %u\n",
+			rate, chip->current_rate);
+		return -EBUSY;
+	}
+
+	jockey3_stop_urbs(chip);
+
+	ret = jockey3_set_rate(chip, rate, false);
+	if (ret != 0) {
+		if (jockey3_err_device_gone(ret))
+			dev_dbg(&chip->intf0->dev,
+				"Rate change to %u abandoned; device is gone (%d)\n",
+				rate, ret);
+		else
+			dev_err(&chip->intf0->dev,
+				"Rate change to %u failed: %d\n", rate, ret);
+		/*
+		 * The rate change is what left the endpoints disabled if
+		 * they are, so this restart is the one most likely to
+		 * come back -ENOENT. Report it before returning the rate
+		 * error, which would otherwise be the only thing seen.
+		 */
+		jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip, false),
+					  "a failed rate change");
+		return ret;
+	}
+
+	jockey3_set_current_rate(chip, rate);
+	jockey3_set_rate_committed(chip, substream->stream, true);
+
+	jockey3_start_urbs_failed(chip, jockey3_start_urbs(chip, false), "a rate change");
+
+	return 0;
+}
+
+static int jockey3_pcm_hw_params(struct snd_pcm_substream *substream,
+				 struct snd_pcm_hw_params *hw_params)
+{
+	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+	unsigned int rate = params_rate(hw_params);
+	bool playback_alive, capture_alive, capture_open;
+	bool rate_changed = false;
+	unsigned int grace;
+	int ret = 0;
+
+	dev_dbg(&chip->intf0->dev, "PCM hw_params rate %u, rate_committed_streams %d\n",
+		rate, jockey3_rate_committed_streams(chip));
+
+	if (jockey3_is_disconnected(chip))
+		return -ENODEV;
+
+	/*
+	 * A previous call may have left a stall-recovery reset in flight (see
+	 * jockey3_recover_urb_stream(), called below). Without this, a rate
+	 * change arriving before that reset completes runs jockey3_set_rate()
+	 * and the URB restart against a device that is mid-reset, which fails
+	 * outright instead of recovering. jockey3_pcm_prepare() waits for the
+	 * same reason.
+	 */
+	ret = jockey3_wait_for_reset_completion(chip);
+	if (ret < 0)
+		return ret;
+
+	/* Independent of rate and of whether it changes; see jockey3_pcm_set_n() */
 	jockey3_pcm_set_n(chip, substream, hw_params);
 
+	/*
+	 * Programming a rate calls usb_set_interface(), which the USB core
+	 * serializes against usb_disconnect() with the device lock and nothing
+	 * else; both reach remove_intf_ep_devs(), whose only guard is the
+	 * unlocked bitfield intf->ep_devs_created.
+	 *
+	 * Three constraints fix where it goes. It cannot move down into
+	 * ploytec_initialize_device(): probe, disconnect and the reset callbacks
+	 * already hold it and it is not recursive. It must be dropped before the
+	 * recovery below, which can queue a reset that needs this same lock. And
+	 * it goes outside rate_mutex, the order pre_reset()/post_reset() use.
+	 *
+	 * The watchdog must never take it: jockey3_disconnect() holds it while
+	 * waiting in cancel_delayed_work_sync().
+	 */
+	scoped_guard(device, &chip->dev->dev)
+		ret = jockey3_pcm_change_rate(chip, substream, rate, &rate_changed);
+	if (ret < 0)
+		return ret;
+	if (!rate_changed)
+		return 0;
+
+	/*
+	 * The firmware does not always resume streaming after a rate change, so
+	 * check liveness on both directions and let
+	 * jockey3_recover_urb_stream() force a re-synchronization.
+	 *
+	 * Playback recovers unconditionally -- it carries MIDI OUT, so a stall
+	 * breaks MIDI control. Capture only if a stream is open: an idle
+	 * Capture stall is logged and deferred to the next open, since
+	 * recovering it would glitch working Playback audio.
+	 *
+	 * Outside rate_mutex, because an escalated reset needs pre_reset() and
+	 * post_reset() to take it. Playback goes first: if both died, its
+	 * restart of the shared ring makes the capture call a no-op.
+	 *
+	 * Start grace -- a rate change reprograms the endpoints over EP0.
+	 */
+	grace = jockey3_start_grace_ms();
+	playback_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_PLAYBACK,
+							 grace, false, true);
+	capture_alive = jockey3_wait_urb_stream_started(chip, SNDRV_PCM_STREAM_CAPTURE,
+							grace, false, true);
+	capture_open = jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE);
+
+	if (!playback_alive || (!capture_alive && capture_open)) {
+		dev_warn(&chip->intf0->dev,
+			 "Rate change to %u Hz left a stream stalled (playback_alive=%d, capture_alive=%d, capture_open=%d); attempting recovery\n",
+			 rate, playback_alive, capture_alive, capture_open);
+
+		if (!playback_alive) {
+			ret = jockey3_recover_urb_stream(chip, SNDRV_PCM_STREAM_PLAYBACK,
+							 "rate change", false);
+			if (ret < 0)
+				return ret;
+		}
+
+		if (!capture_alive && capture_open) {
+			ret = jockey3_recover_urb_stream(chip, SNDRV_PCM_STREAM_CAPTURE,
+							 "rate change", false);
+			if (ret < 0)
+				return ret;
+		}
+	} else {
+		if (!capture_alive)
+			dev_dbg(&chip->intf0->dev,
+				"Capture URB stalled after rate change to %u Hz, but no capture stream is open; deferring recovery to next capture open\n",
+				rate);
+		dev_dbg(&chip->intf0->dev, "Rate changed to %u successfully\n", rate);
+	}
+
+	return 0;
+}
+
+/*
+ * Release this direction's claim on the hardware rate. The URB ring is
+ * deliberately left running (see the top-of-file DOC); all this hands back is
+ * the right of the other direction -- or of this one, on a re-run of
+ * hw_params -- to program a different rate.
+ */
+static int jockey3_pcm_hw_free(struct snd_pcm_substream *substream)
+{
+	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
+
+	jockey3_set_rate_committed(chip, substream->stream, false);
 	return 0;
 }
 
@@ -2684,6 +3010,7 @@ static const struct snd_pcm_ops jockey3_pcm_ops = {
 	.open = jockey3_pcm_open,
 	.close = jockey3_pcm_close,
 	.hw_params = jockey3_pcm_hw_params,
+	.hw_free = jockey3_pcm_hw_free,
 	.prepare = jockey3_pcm_prepare,
 	.trigger = jockey3_pcm_trigger,
 	.sync_stop = jockey3_pcm_sync_stop,
@@ -2713,6 +3040,12 @@ static int jockey3_initialize(struct jockey3_chip *chip, int model)
 	 * rather than the smallest passing value, because the time this driver
 	 * otherwise takes to reach its first transfer is host-dependent, so a
 	 * value that only topped that up would erode on a faster machine.
+	 *
+	 * Placed here rather than in ploytec_initialize_device() because that
+	 * runs twice per probe -- once below, once via jockey3_set_rate() -- and
+	 * again on every rate change. This point runs once, and is the last
+	 * before the driver's first EP0 transfer; everything above it in probe()
+	 * is ALSA and USB core bookkeeping.
 	 *
 	 * See re/usb/init_timing_comparison.md for the measurements.
 	 */
@@ -3185,7 +3518,10 @@ static void jockey3_disconnect(struct usb_interface *intf)
 
 	/*
 	 * Latch DISCONNECTED first, and for EITHER interface. Every ALSA entry
-	 * point tests it on the way in.
+	 * point tests it on the way in, so setting it before anything else is
+	 * torn down closes the window where e.g. jockey3_pcm_hw_params() had
+	 * already passed its check and would go on to resubmit URBs we just
+	 * killed.
 	 *
 	 * Doing it for interface 1 as well is what covers the unbind order. The
 	 * driver is bound to both interfaces and the USB core takes them down
