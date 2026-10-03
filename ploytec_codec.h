@@ -24,7 +24,20 @@
 #define PLOYTEC_CAPTURE_FRAME_SIZE	64
 #define PLOYTEC_CAPTURE_PCM_FRAME_SIZE	18	// 6 channels * 3 bytes
 
+/**
+ * enum ploytec_codec_variant - which encode/decode implementation got selected
+ * @PLOYTEC_CODEC_PORTABLE: portable reference implementation
+ * @PLOYTEC_CODEC_OPTIMIZED_64BIT: lookup-table/bit-packing codec, 64-bit build
+ * @PLOYTEC_CODEC_OPTIMIZED_32BIT: lookup-table/bit-packing codec, 32-bit build
+ */
+enum ploytec_codec_variant {
+	PLOYTEC_CODEC_PORTABLE,
+	PLOYTEC_CODEC_OPTIMIZED_64BIT,
+	PLOYTEC_CODEC_OPTIMIZED_32BIT,
+};
+
 /* batching of the sample processing */
+enum ploytec_codec_variant ploytec_initialize_codec(void);
 void ploytec_encode_batch(u8 *dest, const u8 *src, const int n_frames);
 void ploytec_decode_batch(u8 *dest, const u8 *src, const int n_frames);
 
