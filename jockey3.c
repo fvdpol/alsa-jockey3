@@ -5,6 +5,8 @@
  *   Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/types.h>
 #include <linux/atomic.h>
 #include <linux/module.h>
@@ -1807,7 +1809,35 @@ static struct usb_driver jockey3_driver = {
 	.id_table = jockey3_ids
 };
 
-module_usb_driver(jockey3_driver);
+/*
+ * The codec's bit-spread lookup tables are module-global and unlocked, so they
+ * are built once per module rather than per device.
+ */
+static int __init jockey3_module_init(void)
+{
+	enum ploytec_codec_variant codec_variant = ploytec_initialize_codec();
+
+	switch (codec_variant) {
+	case PLOYTEC_CODEC_PORTABLE:
+		pr_debug("using portable codec\n");
+		break;
+	case PLOYTEC_CODEC_OPTIMIZED_64BIT:
+		pr_debug("using 64-bit optimized codec\n");
+		break;
+	case PLOYTEC_CODEC_OPTIMIZED_32BIT:
+		pr_debug("using 32-bit optimized codec\n");
+		break;
+	}
+
+	return usb_register(&jockey3_driver);
+}
+module_init(jockey3_module_init);
+
+static void __exit jockey3_module_exit(void)
+{
+	usb_deregister(&jockey3_driver);
+}
+module_exit(jockey3_module_exit);
 
 MODULE_AUTHOR("Frank van de Pol <fvdpol@gmail.com>");
 MODULE_DESCRIPTION(CARD_NAME " ALSA Driver");
