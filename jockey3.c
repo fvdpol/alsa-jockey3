@@ -24,10 +24,12 @@
 #include <linux/cleanup.h>
 #include <sound/core.h>
 #include <sound/initval.h>
+#include <sound/rawmidi.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include "ploytec_proto.h"
 #include "ploytec_codec.h"
+#include "ploytec_midi.h"
 
 #define RELOOP_VENDOR_ID         0x200c
 #define RELOOP_JOCKEY3_ME_PID    0x1019
@@ -439,6 +441,7 @@ struct jockey3_pcm_urb_stream {
  * @intf0: interface 0, which the driver is bound to; read-only after probe
  * @intf1: interface 1, claimed explicitly because it owns EP 0x86
  * @pcm: the PCM device; read-only after probe
+ * @rmidi: the rawmidi device; read-only after probe
  * @xfer_buf: bounce buffer for EP0 control transfers, USB_XFER_BUF_SIZE bytes.
  *	Serialized by @rate_mutex once the card is live. The one exception is
  *	jockey3_initialize(), which runs from probe before the card is
@@ -484,9 +487,16 @@ struct jockey3_pcm_urb_stream {
  *	the shared ring for both directions at once. Plain bool, written by
  *	jockey3_start_urbs() and read unlocked by the watchdog via
  *	WRITE_ONCE()/READ_ONCE().
+ * @midi_in_substream: open MIDI IN substream, or NULL; @midi_lock
+ * @midi_out_substream: open MIDI OUT substream, or NULL; @midi_lock
  * @midi_in_urb: the single MIDI IN URB; not anchored, killed directly
  * @midi_in_buf: transfer buffer for @midi_in_urb
  * @midi_lock: protects the MIDI fields; IRQ-safe leaf
+ * @midi_out_acc: accumulator for the MIDI OUT rate limiter; @midi_lock
+ * @midi_rate_divisor: current_rate / PLOYTEC_PLAYBACK_FRAMES; @midi_lock.
+ *	Derived from @current_rate and published here because the rate limiter
+ *	runs in URB completion context and cannot take @rate_mutex.
+ * @midi_state: Running Status expander state; @midi_lock
  * @midi_stopping: see jockey3_pcm_urb_stream.stopping; @midi_lock
  * @midi_consec_errors: consecutive MIDI IN URB errors; @midi_lock
  * @playback: playback streaming state
@@ -498,6 +508,7 @@ struct jockey3_chip {
 	struct usb_interface *intf0;
 	struct usb_interface *intf1;
 	struct snd_pcm *pcm;
+	struct snd_rawmidi *rmidi;
 	unsigned char *xfer_buf;
 	struct mutex rate_mutex;	/* serializes rate changes; outermost lock */
 	unsigned long flags;
@@ -511,9 +522,14 @@ struct jockey3_chip {
 	bool warm_start;	/* set by jockey3_start_urbs(): warm vs cold, for dev_dbg() only */
 
 	/* MIDI Path */
+	struct snd_rawmidi_substream *midi_in_substream;
+	struct snd_rawmidi_substream *midi_out_substream;
 	struct urb *midi_in_urb;
 	unsigned char *midi_in_buf;
 	spinlock_t midi_lock;	/* protects the MIDI fields; IRQ-safe leaf */
+	unsigned int midi_out_acc;
+	unsigned int midi_rate_divisor;
+	struct ploytec_midi_running_status midi_state;
 	bool midi_stopping;
 	unsigned int midi_consec_errors;
 
@@ -578,11 +594,22 @@ static inline bool jockey3_is_resetting(const struct jockey3_chip *chip)
 	return test_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 }
 
+/*
+ * Publish a new sample rate.
+ *
+ * chip->current_rate is protected by rate_mutex, but the MIDI OUT rate limiter
+ * runs in URB completion (atomic) context and cannot take it. Rather than have
+ * that path read current_rate unlocked, the value it actually needs is derived
+ * here and published under midi_lock -- which also gets the division off the
+ * per-URB hot path.
+ */
 static void jockey3_set_current_rate(struct jockey3_chip *chip, unsigned int rate)
 {
 	lockdep_assert_held(&chip->rate_mutex);
 
 	chip->current_rate = rate;
+	scoped_guard(spinlock_irqsave, &chip->midi_lock)
+		chip->midi_rate_divisor = rate / PLOYTEC_PLAYBACK_FRAMES;
 }
 
 /*
@@ -1153,6 +1180,58 @@ static void jockey3_capture_callback(struct urb *urb)
 		jockey3_resubmit_failed(chip, ret, "capture");
 }
 
+/**
+ * jockey3_get_next_midi_out_byte() - pick the MIDI byte for one playback packet
+ * @chip: driver state
+ *
+ * Every outgoing playback packet reserves one slot for MIDI. This returns the
+ * byte for it, through a leaky-bucket limiter holding the stream to roughly
+ * 2500 bytes/sec. The hardware carries the full MIDI line rate of 3125
+ * bytes/sec, but sustained traffic at it makes the control surface stop
+ * responding to updates, so the limit sits below that. The idle byte is
+ * returned when there is nothing to send or no budget.
+ *
+ * midi_lock is held across snd_rawmidi_transmit() so
+ * chip->midi_out_substream cannot change under us. The order is safe because
+ * the rawmidi core calls snd_rawmidi_output_trigger() without substream->lock,
+ * and holding a driver lock there is the established idiom (sound/usb/midi.c
+ * does it under ep->buffer_lock).
+ *
+ * Called from the playback URB completion handler, so this runs in atomic
+ * context.
+ *
+ * Return: the byte to place in the packet's MIDI slot.
+ */
+static u8 jockey3_get_next_midi_out_byte(struct jockey3_chip *chip)
+{
+	u8 b;
+
+	guard(spinlock_irqsave)(&chip->midi_lock);
+
+	/*
+	 * Rate limit MIDI to ~2500 bytes/sec -- see the kernel-doc above for why
+	 * this sits below the device's 3125 bytes/sec MIDI line rate.
+	 */
+	chip->midi_out_acc += 2500;
+	if (chip->midi_out_acc < chip->midi_rate_divisor)
+		return PLOYTEC_MIDI_IDLE_BYTE;
+	chip->midi_out_acc -= chip->midi_rate_divisor;
+
+	/* Handle queued byte from Running Status expansion first before consuming from ALSA */
+	if (chip->midi_state.has_queued_byte) {
+		chip->midi_state.has_queued_byte = false;
+		return chip->midi_state.queued_byte;
+	}
+
+	if (!chip->midi_out_substream)
+		return PLOYTEC_MIDI_IDLE_BYTE;
+
+	if (snd_rawmidi_transmit(chip->midi_out_substream, &b, 1) != 1)
+		return PLOYTEC_MIDI_IDLE_BYTE;
+
+	return ploytec_midi_running_status_expand(&chip->midi_state, b, &chip->intf0->dev);
+}
+
 /*
  * Fill the sample area of a playback packet with silence, for when there is
  * no PCM data to send.
@@ -1252,13 +1331,17 @@ static void jockey3_playback_callback(struct urb *urb)
 	}
 
 	/*
-	 * Every packet reserves one slot for a MIDI OUT byte. Nothing feeds it
-	 * yet, so it carries the idle byte.
+	 * The outgoing MIDI data is encapsulated in the playback stream, one
+	 * real (rate-limited) byte per packet: jockey3_get_next_midi_out_byte()'s
+	 * leaky-bucket limiter is calibrated on @midi_rate_divisor, which
+	 * assumes exactly one call per packet interval. Calling it once
+	 * per URB instead of once per packet would silently divide MIDI
+	 * OUT throughput by the chosen N.
 	 */
 	for (sp = 0; sp < submit_pkts; sp++) {
 		u8 *sub = buf + sp * PLOYTEC_PKT_SIZE;
 
-		sub[PLOYTEC_MIDI_OUT_OFFSET] = PLOYTEC_MIDI_IDLE_BYTE;
+		sub[PLOYTEC_MIDI_OUT_OFFSET] = jockey3_get_next_midi_out_byte(chip);
 
 		/* Ploytec Sync byte and gap padding */
 		sub[PLOYTEC_SYNC_BYTE_OFFSET] = PLOYTEC_SYNC_BYTE_VALUE;
@@ -1306,9 +1389,10 @@ static void jockey3_playback_callback(struct urb *urb)
 static void jockey3_midi_in_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
+	unsigned char *buf = (unsigned char *)urb->transfer_buffer;
 	unsigned int errors;
 	bool stopping;
-	int ret;
+	int i, n = 0, ret;
 
 	switch (jockey3_urb_check(urb)) {
 	case JOCKEY3_URB_STOPPED:
@@ -1332,6 +1416,8 @@ static void jockey3_midi_in_callback(struct urb *urb)
 				"MIDI IN stopped after %u consecutive URB errors\n", errors);
 			return;
 		}
+		/* Transient: resubmit, but there is no usable data in this buffer */
+		urb->actual_length = 0;
 		break;
 	case JOCKEY3_URB_OK:
 		scoped_guard(spinlock_irqsave, &chip->midi_lock)
@@ -1343,11 +1429,29 @@ static void jockey3_midi_in_callback(struct urb *urb)
 		return;
 
 	/*
-	 * Nothing consumes the payload yet, but the endpoint is kept polled: the
-	 * device is only ever run with all three bulk endpoints serviced.
+	 * Compact the payload in place, dropping the padding the device emits
+	 * between real MIDI bytes. The transfer buffer is ours, so this needs no
+	 * lock; doing it up front turns the delivery below into a single locked
+	 * call instead of one per byte.
+	 *
+	 * For different devices (firmware revision) different padding bytes have
+	 * been observed: 0xF9, 0xFB, 0xFD, 0xFF. Since the device is not sending
+	 * any MIDI system or real-time messages, we can safely ignore any byte
+	 * 0xF0..0xFF received from the device.
 	 */
+	for (i = 0; i < urb->actual_length; i++)
+		if (buf[i] < 0xF0)
+			buf[n++] = buf[i];
+
 	ret = 0;
 	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
+		/*
+		 * Deliver under midi_lock so the substream cannot be cleared by
+		 * jockey3_midi_in_close() while we are dereferencing it.
+		 */
+		if (n && !chip->midi_stopping && chip->midi_in_substream)
+			snd_rawmidi_receive(chip->midi_in_substream, buf, n);
+
 		if (!chip->midi_stopping && !jockey3_is_disconnected(chip))
 			ret = usb_submit_urb(urb, GFP_ATOMIC);
 	}
@@ -3049,6 +3153,81 @@ static const struct snd_pcm_ops jockey3_pcm_ops = {
 	.pointer = jockey3_pcm_pointer,
 };
 
+static int jockey3_midi_in_open(struct snd_rawmidi_substream *substream)
+{
+	struct jockey3_chip *chip = substream->rmidi->private_data;
+
+	if (jockey3_is_disconnected(chip))
+		return -ENODEV;
+	return 0;
+}
+
+/*
+ * Normally trigger(0) has already cleared the pointer, but the rawmidi core can
+ * reach close without it (an interrupted drain, or close_substream() with
+ * cleanup suppressed), so drop it here too rather than leave a dangling
+ * reference for the URB callback.
+ */
+static int jockey3_midi_in_close(struct snd_rawmidi_substream *substream)
+{
+	struct jockey3_chip *chip = substream->rmidi->private_data;
+
+	guard(spinlock_irqsave)(&chip->midi_lock);
+	if (chip->midi_in_substream == substream)
+		chip->midi_in_substream = NULL;
+
+	return 0;
+}
+
+static void jockey3_midi_in_trigger(struct snd_rawmidi_substream *substream, int up)
+{
+	struct jockey3_chip *chip = substream->rmidi->private_data;
+
+	guard(spinlock_irqsave)(&chip->midi_lock);
+	chip->midi_in_substream = up ? substream : NULL;
+}
+
+static int jockey3_midi_out_open(struct snd_rawmidi_substream *substream)
+{
+	struct jockey3_chip *chip = substream->rmidi->private_data;
+
+	if (jockey3_is_disconnected(chip))
+		return -ENODEV;
+	return 0;
+}
+
+/* See jockey3_midi_in_close() for why the pointer is cleared here as well. */
+static int jockey3_midi_out_close(struct snd_rawmidi_substream *substream)
+{
+	struct jockey3_chip *chip = substream->rmidi->private_data;
+
+	guard(spinlock_irqsave)(&chip->midi_lock);
+	if (chip->midi_out_substream == substream)
+		chip->midi_out_substream = NULL;
+
+	return 0;
+}
+
+static void jockey3_midi_out_trigger(struct snd_rawmidi_substream *substream, int up)
+{
+	struct jockey3_chip *chip = substream->rmidi->private_data;
+
+	guard(spinlock_irqsave)(&chip->midi_lock);
+	chip->midi_out_substream = up ? substream : NULL;
+}
+
+static const struct snd_rawmidi_ops jockey3_midi_in_ops = {
+	.open = jockey3_midi_in_open,
+	.close = jockey3_midi_in_close,
+	.trigger = jockey3_midi_in_trigger
+};
+
+static const struct snd_rawmidi_ops jockey3_midi_out_ops = {
+	.open = jockey3_midi_out_open,
+	.close = jockey3_midi_out_close,
+	.trigger = jockey3_midi_out_trigger
+};
+
 static int jockey3_initialize(struct jockey3_chip *chip, int model)
 {
 	int ret;
@@ -3188,6 +3367,9 @@ static void jockey3_card_free(struct snd_card *card)
 static int jockey3_init_midi_urb(struct jockey3_chip *chip)
 {
 	struct usb_device *dev = chip->dev;
+
+	memset(&chip->midi_state, 0, sizeof(chip->midi_state));
+	chip->midi_out_acc = 0;
 
 	chip->midi_in_buf = kmalloc(PLOYTEC_PKT_SIZE, GFP_KERNEL);
 	if (!chip->midi_in_buf)
@@ -3359,6 +3541,23 @@ static int jockey3_init_pcm(struct jockey3_chip *chip)
 				      jockey3_capture_chmap, 6, 0, NULL);
 }
 
+static int jockey3_init_midi(struct jockey3_chip *chip)
+{
+	int ret = snd_rawmidi_new(chip->card, CARD_NAME " MIDI", 0, 1, 1, &chip->rmidi);
+
+	if (ret < 0)
+		return ret;
+
+	chip->rmidi->private_data = chip;
+	strscpy(chip->rmidi->name, CARD_NAME " MIDI", sizeof(chip->rmidi->name));
+	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_INPUT, &jockey3_midi_in_ops);
+	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_OUTPUT, &jockey3_midi_out_ops);
+	chip->rmidi->info_flags = SNDRV_RAWMIDI_INFO_INPUT |
+				  SNDRV_RAWMIDI_INFO_OUTPUT |
+				  SNDRV_RAWMIDI_INFO_DUPLEX;
+	return 0;
+}
+
 static void jockey3_setup_card_names(struct jockey3_chip *chip, int driver_info)
 {
 	/*
@@ -3500,6 +3699,10 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 		goto err_free_card;
 
 	ret = jockey3_init_pcm(chip);
+	if (ret < 0)
+		goto err_free_card;
+
+	ret = jockey3_init_midi(chip);
 	if (ret < 0)
 		goto err_free_card;
 
@@ -3762,4 +3965,4 @@ module_exit(jockey3_module_exit);
 MODULE_AUTHOR("Frank van de Pol <fvdpol@gmail.com>");
 MODULE_DESCRIPTION(CARD_NAME " ALSA Driver");
 MODULE_LICENSE("GPL");
-MODULE_SOFTDEP("pre: snd-pcm");
+MODULE_SOFTDEP("pre: snd-pcm snd-rawmidi");
