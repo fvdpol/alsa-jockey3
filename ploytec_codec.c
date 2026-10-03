@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   ALSA driver for Reloop Jockey 3 devices
- *   Ploytec PCM encoding functions for the S24_3LE format (3 bytes per sample)
+ *   Ploytec PCM encoding/decoding functions for the S24_3LE format (3 bytes per sample)
  *
  *   Copyright (c) 2026 by Frank van de Pol <fvdpol@gmail.com>
  */
@@ -86,6 +86,55 @@ static inline void ploytec_encode_s24_3le(u8 *dest, const u8 *src)
 }
 
 /**
+ * ploytec_decode_s24_3le() - Decode 64-byte Ploytec frame to 6-channel S24_3LE
+ * @dest: 18-byte destination buffer (6 channels * 3 bytes)
+ * @src: 64-byte source buffer
+ *
+ * Ploytec Bit-Plane Interleaving (Capture):
+ * Similar to encoding, the capture path interleaves 3 pairs of channels
+ * into bit-planes (bit 0, 1, and 2 of each byte).
+ * - Bytes 0x00-0x17: Pair 1 (bits 0,1,2)
+ * - Bytes 0x20-0x37: Pair 2 (bits 0,1,2)
+ */
+static inline void ploytec_decode_s24_3le(u8 *dest, const u8 *src)
+{
+	int i;
+
+	memset(dest, 0, 18);
+	for (i = 0; i < 8; i++) {
+		/* Channel 1: odd channel 1 (bit 0 of bytes 0x00-0x17) */
+		dest[0x00] |= ((src[0x10 + i] & 0x01) << (7 - i));	// Ch1 LSB byte
+		dest[0x01] |= ((src[0x08 + i] & 0x01) << (7 - i));
+		dest[0x02] |= ((src[0x00 + i] & 0x01) << (7 - i));	// Ch1 MSB byte
+
+		/* Channel 2: even channel 2 (bit 0 of bytes 0x20-0x37) */
+		dest[0x03] |= ((src[0x30 + i] & 0x01) << (7 - i));
+		dest[0x04] |= ((src[0x28 + i] & 0x01) << (7 - i));
+		dest[0x05] |= ((src[0x20 + i] & 0x01) << (7 - i));
+
+		/* Channel 3: odd channel 3 (bit 1 of bytes 0x00-0x17) */
+		dest[0x06] |= (((src[0x10 + i] & 0x02) >> 1) << (7 - i));
+		dest[0x07] |= (((src[0x08 + i] & 0x02) >> 1) << (7 - i));
+		dest[0x08] |= (((src[0x00 + i] & 0x02) >> 1) << (7 - i));
+
+		/* Channel 4: even channel 4 (bit 1 of bytes 0x20-0x37) */
+		dest[0x09] |= (((src[0x30 + i] & 0x02) >> 1) << (7 - i));
+		dest[0x0A] |= (((src[0x28 + i] & 0x02) >> 1) << (7 - i));
+		dest[0x0B] |= (((src[0x20 + i] & 0x02) >> 1) << (7 - i));
+
+		/* Channel 5: odd channel 5 (bit 2 of bytes 0x00-0x17) */
+		dest[0x0C] |= (((src[0x10 + i] & 0x04) >> 2) << (7 - i));
+		dest[0x0D] |= (((src[0x08 + i] & 0x04) >> 2) << (7 - i));
+		dest[0x0E] |= (((src[0x00 + i] & 0x04) >> 2) << (7 - i));
+
+		/* Channel 6: even channel 6 (bit 2 of bytes 0x20-0x37) */
+		dest[0x0F] |= (((src[0x30 + i] & 0x04) >> 2) << (7 - i));
+		dest[0x10] |= (((src[0x28 + i] & 0x04) >> 2) << (7 - i));
+		dest[0x11] |= (((src[0x20 + i] & 0x04) >> 2) << (7 - i));
+	}
+}
+
+/**
  * ploytec_encode_batch() - Encode a number of 4-channel S24_3LE to 48-byte Ploytec frames
  * @dest: n_frames * 48-byte destination buffer (Ploytec playback frame)
  * @src: n_frames * 12-byte source buffer (4 channels * 3 bytes)
@@ -97,5 +146,20 @@ void ploytec_encode_batch(u8 *dest, const u8 *src, const int n_frames)
 		ploytec_encode_s24_3le(dest, src);
 		dest += PLOYTEC_PLAYBACK_FRAME_SIZE;
 		src += PLOYTEC_PLAYBACK_PCM_FRAME_SIZE;
+	}
+}
+
+/**
+ * ploytec_decode_batch() - Decode a number of 64-byte Ploytec frames to 6-channel S24_3LE
+ * @dest: n_frames * 18-byte destination buffer (6 channels * 3 bytes)
+ * @src: n_frames * 64-byte source buffer
+ * @n_frames: number of frames to process in this batch
+ */
+void ploytec_decode_batch(u8 *dest, const u8 *src, const int n_frames)
+{
+	for (int f = 0; f < n_frames; f++) {
+		ploytec_decode_s24_3le(dest, src);
+		dest += PLOYTEC_CAPTURE_PCM_FRAME_SIZE;
+		src += PLOYTEC_CAPTURE_FRAME_SIZE;
 	}
 }

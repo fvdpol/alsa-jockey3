@@ -77,7 +77,7 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * - EP 0x83 IN:  MIDI input
  *
  * Audio is not sample-interleaved but bit-plane interleaved; see
- * ploytec_codec.c for the wire format and the encode implementation.
+ * ploytec_codec.c for the wire format and the encode/decode implementations.
  *
  * URBs run free for the lifetime of the device rather than being started and
  * stopped around PCM use: the playback stream must keep flowing because it
@@ -309,6 +309,60 @@ static bool jockey3_process_out_packet(struct jockey3_chip *chip, u8 *urb_buf)
 	return false;
 }
 
+static bool jockey3_process_in_packet(struct jockey3_chip *chip, const u8 *urb_buf)
+{
+	struct snd_pcm_substream *substream = chip->capture.substream;
+	struct jockey3_pcm_urb_stream *urb_stream = &chip->capture;
+	struct snd_pcm_runtime *runtime;
+	unsigned int pcm_buffer_size;
+	unsigned int alsa_frame_size;
+	unsigned int frames_in_batch;
+	unsigned int bytes_left;
+	int f = 0;
+
+	if (unlikely(!substream || !substream->runtime))
+		return false;
+
+	runtime = substream->runtime;
+	if (unlikely(!runtime->dma_area))
+		return false;
+
+	pcm_buffer_size = snd_pcm_lib_buffer_bytes(substream);
+	alsa_frame_size = runtime->channels * 3; // 6 * 3 = 18 bytes
+
+	while (f < PLOYTEC_CAPTURE_FRAMES) {
+		frames_in_batch = PLOYTEC_CAPTURE_FRAMES - f;
+		bytes_left = pcm_buffer_size - urb_stream->dma_off;
+
+		/* Respect circular buffer wrap-around */
+		if (bytes_left < frames_in_batch * alsa_frame_size)
+			frames_in_batch = bytes_left / alsa_frame_size;
+
+		if (frames_in_batch == 0)
+			break;
+
+		ploytec_decode_batch(runtime->dma_area + urb_stream->dma_off,
+				     urb_buf + f * PLOYTEC_CAPTURE_FRAME_SIZE,
+				     frames_in_batch);
+
+		/* Advance pointers */
+		urb_stream->dma_off += frames_in_batch * alsa_frame_size;
+		if (urb_stream->dma_off >= pcm_buffer_size)
+			urb_stream->dma_off -= pcm_buffer_size;
+
+		urb_stream->period_off += frames_in_batch * alsa_frame_size;
+
+		f += frames_in_batch;
+	}
+
+	if (urb_stream->period_off >= runtime->period_size * alsa_frame_size) {
+		urb_stream->period_off %= runtime->period_size * alsa_frame_size;
+		return true;
+	}
+
+	return false;
+}
+
 enum jockey3_urb_state {
 	JOCKEY3_URB_OK,		/* completed normally */
 	JOCKEY3_URB_STOPPED,	/* teardown in progress; return without resubmitting */
@@ -491,7 +545,10 @@ static void jockey3_capture_callback(struct urb *urb)
 {
 	struct jockey3_chip *chip = urb->context;
 	struct jockey3_pcm_urb_stream *urb_stream = &chip->capture;
+	struct snd_pcm_substream *substream = NULL;
+	bool period_elapsed = false;
 	bool data_valid = true;
+	bool active = false;
 	bool stopping;
 	int ret;
 
@@ -516,10 +573,42 @@ static void jockey3_capture_callback(struct urb *urb)
 	if (unlikely(jockey3_is_disconnected(chip)))
 		return;
 
-	ret = 0;
+	if (data_valid && unlikely(urb->actual_length < PLOYTEC_PKT_SIZE)) {
+		dev_err(&chip->intf0->dev, "Capture URB too small: %d; required at least %d\n",
+			urb->actual_length, PLOYTEC_PKT_SIZE);
+		data_valid = false;
+	}
+
+	/* Step 1: Safely fetch the pointer and join the safe zone */
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		if (data_valid)
 			urb_stream->consec_errors = 0;
+
+		if (data_valid && !urb_stream->stopping &&
+		    urb_stream->running && urb_stream->substream) {
+			urb_stream->callbacks_active++;
+			active = true;
+			substream = urb_stream->substream;
+
+			period_elapsed = jockey3_process_in_packet(chip, urb->transfer_buffer);
+		}
+	}
+
+	/*
+	 * Step 2: Safe Zone. ALSA core can't free 'substream' because
+	 * jockey3_pcm_sync_stop() waits for 'callbacks_active' to drain before
+	 * the core releases the buffer. Our lock is released here to avoid an
+	 * ABBA deadlock with ALSA's internal locking: snd_pcm_period_elapsed()
+	 * takes the stream lock, and the order is stream lock -> urb_stream->lock.
+	 */
+	if (period_elapsed && substream)
+		snd_pcm_period_elapsed(substream);
+
+	ret = 0;
+	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
+		/* Leave the safe zone; last one out wakes any waiter */
+		if (active && !--urb_stream->callbacks_active)
+			wake_up(&urb_stream->drain_wait);
 
 		/*
 		 * Keep resubmitting the URB while the interface is alive. The
@@ -985,6 +1074,26 @@ static const struct snd_pcm_hardware jockey3_pcm_hw_playback = {
 	.periods_max		= 1024,
 };
 
+static const struct snd_pcm_hardware jockey3_pcm_hw_capture = {
+	.info			= JOCKEY3_PCM_INFO,
+	.formats		= SNDRV_PCM_FMTBIT_S24_3LE,
+	.rates			= JOCKEY3_PCM_RATES,
+	.rate_min		= 44100,
+	.rate_max		= 44100,
+	.channels_min		= 6,
+	.channels_max		= 6,
+	.buffer_bytes_max	= 1024 * 1024,
+	/*
+	 * One capture URB carries one packet of 8 frames * 6 channels * 3 bytes
+	 * = 144 bytes; see the playback .period_bytes_min comment above for why
+	 * the minimum must cover at least one packet.
+	 */
+	.period_bytes_min	= PLOYTEC_CAPTURE_FRAMES * 6 * 3,
+	.period_bytes_max	= 512 * 1024,
+	.periods_min		= 2,
+	.periods_max		= 1024,
+};
+
 static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 {
 	struct jockey3_chip *chip = snd_pcm_substream_chip(substream);
@@ -998,7 +1107,8 @@ static int jockey3_pcm_open(struct snd_pcm_substream *substream)
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
 
-	runtime->hw = jockey3_pcm_hw_playback;
+	runtime->hw = substream->stream == SNDRV_PCM_STREAM_PLAYBACK ?
+		      jockey3_pcm_hw_playback : jockey3_pcm_hw_capture;
 
 	/* The period accounting assumes a whole number of periods per buffer */
 	ret = snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
@@ -1398,9 +1508,15 @@ static int jockey3_validate_endpoints(struct usb_interface *intf0, struct usb_in
  *
  * The one exception is the playback Master pair, which is marked FL/FR so that
  * userspace (PipeWire and friends) can identify the device's primary output.
+ * There is no equivalent notion for the inputs, so capture is left entirely
+ * unpositioned.
  *
  * Physical layout:
  *   Playback: 1-2 Master Out L/R, 3-4 Headphone L/R
+ *   Capture:  1-2 Input 1 L/R, 3-4 Input 2 L/R, 5-6 Microphone
+ *
+ * The microphone is mono: the balanced input stage feeds the same analog
+ * signal to both converters, so channels 5 and 6 carry identical content.
  */
 static const struct snd_pcm_chmap_elem jockey3_playback_chmap[] = {
 	{ .channels = 4,
@@ -1409,9 +1525,17 @@ static const struct snd_pcm_chmap_elem jockey3_playback_chmap[] = {
 	{ }
 };
 
+static const struct snd_pcm_chmap_elem jockey3_capture_chmap[] = {
+	{ .channels = 6,
+	  .map = { SNDRV_CHMAP_UNKNOWN, SNDRV_CHMAP_UNKNOWN,
+		   SNDRV_CHMAP_UNKNOWN, SNDRV_CHMAP_UNKNOWN,
+		   SNDRV_CHMAP_UNKNOWN, SNDRV_CHMAP_UNKNOWN } },
+	{ }
+};
+
 static int jockey3_init_pcm(struct jockey3_chip *chip)
 {
-	int ret = snd_pcm_new(chip->card, CARD_NAME " Audio", 0, 1, 0, &chip->pcm);
+	int ret = snd_pcm_new(chip->card, CARD_NAME " Audio", 0, 1, 1, &chip->pcm);
 
 	if (ret < 0)
 		return ret;
@@ -1419,10 +1543,16 @@ static int jockey3_init_pcm(struct jockey3_chip *chip)
 	strscpy(chip->pcm->name, CARD_NAME " Audio", sizeof(chip->pcm->name));
 	chip->pcm->private_data = chip;
 	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_PLAYBACK, &jockey3_pcm_ops);
+	snd_pcm_set_ops(chip->pcm, SNDRV_PCM_STREAM_CAPTURE, &jockey3_pcm_ops);
 	snd_pcm_set_managed_buffer_all(chip->pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
 
-	return snd_pcm_add_chmap_ctls(chip->pcm, SNDRV_PCM_STREAM_PLAYBACK,
-				      jockey3_playback_chmap, 4, 0, NULL);
+	ret = snd_pcm_add_chmap_ctls(chip->pcm, SNDRV_PCM_STREAM_PLAYBACK,
+				     jockey3_playback_chmap, 4, 0, NULL);
+	if (ret < 0)
+		return ret;
+
+	return snd_pcm_add_chmap_ctls(chip->pcm, SNDRV_PCM_STREAM_CAPTURE,
+				      jockey3_capture_chmap, 6, 0, NULL);
 }
 
 static void jockey3_setup_card_names(struct jockey3_chip *chip, int driver_info)
