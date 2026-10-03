@@ -208,3 +208,158 @@ int ploytec_initialize_device(struct usb_interface *intf, void *xfer_buf, bool b
 
 	return ploytec_get_status(intf, xfer_buf, &status);
 }
+
+/**
+ * ploytec_start_streaming - Trigger the device to start streaming
+ * @intf: USB interface
+ * @xfer_buf: Temporary transfer buffer
+ *
+ * Reads the status byte and writes it back with the STREAMING bit set. The
+ * write is unconditional, which is the whole point: the device already
+ * reports STREAMING set after a rate change, so a conditional write would
+ * never be issued there at all. Ending a rate change with a second status
+ * read instead left the capture endpoint failing to restart after roughly one
+ * rate change in six, so the write evidently does more than set a bit -- see
+ * re/rate_change_stall.md.
+ *
+ * The vendors do not read the status back afterwards, so neither do we.
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int ploytec_start_streaming(struct usb_interface *intf, void *xfer_buf)
+{
+	struct usb_device *dev = interface_to_usbdev(intf);
+	u8 status;
+	int ret;
+
+	ret = ploytec_get_status(intf, xfer_buf, &status);
+	if (ret < 0)
+		return ret;
+	dev_dbg(&intf->dev, "Start Streaming: Status: 0x%02x\n", status);
+
+	return usb_control_msg_send(dev, 0, PLOYTEC_SET_STATUS, PLOYTEC_SET_STATUS_TYPE,
+				    status | PLOYTEC_STATUS_STREAMING,
+				    0, NULL, 0, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
+}
+
+/**
+ * ploytec_get_rate - Read hardware sample rate
+ * @intf: USB interface
+ * @xfer_buf: Temporary transfer buffer
+ * @index: wIndex to read from -- PLOYTEC_RATE_IDX_DEVICE before programming,
+ *	PLOYTEC_RATE_IDX_PCM_IN to verify afterwards
+ * @rate: Pointer to store the rate
+ *
+ * The wIndex is not cosmetic. The device answers both forms: the vendor
+ * drivers read the live rate device-wide and always verify against the
+ * capture endpoint.
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int ploytec_get_rate(struct usb_interface *intf, void *xfer_buf, u16 index, u32 *rate)
+{
+	struct usb_device *dev = interface_to_usbdev(intf);
+	u8 *buf = xfer_buf;
+	int ret;
+
+	ret = usb_control_msg_recv(dev, 0, PLOYTEC_REQ_GET_RATE, PLOYTEC_REQ_GET_RATE_TYPE,
+				   0x0100, index,
+				   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
+	if (ret < 0)
+		return ret;
+
+	*rate = (u32)buf[0] | ((u32)buf[1] << 8) | ((u32)buf[2] << 16);
+	return 0;
+}
+
+/**
+ * ploytec_set_rate - Set hardware sample rate
+ * @intf: USB interface
+ * @xfer_buf: Temporary transfer buffer
+ * @rate: Sample rate in Hz
+ * @cold_init: true when this programs the rate as part of bringing the device
+ *	up, false when it changes the rate of a device already running
+ *
+ * The vendor drivers use two shapes here, and the difference is not cosmetic.
+ * A cold init starts programming the rate after a short gap; a rate change
+ * waits longer, writes once, pauses, then repeats the burst. Both end the
+ * burst on the capture endpoint and verify from it, which is the invariant
+ * that holds across every captured vendor sequence on both platforms; the
+ * write count itself is not load-bearing. The sleeps below stand in for
+ * windows in which the vendor host sends nothing at all -- it is waiting, not
+ * polling. See re/usb/init_timing_comparison.md.
+ *
+ * Return: 0 on success (including when the post-write rate verification
+ * detects a mismatch, which is only logged), negative errno if a control
+ * transfer fails.
+ */
+int ploytec_set_rate(struct usb_interface *intf, void *xfer_buf, u32 rate, bool cold_init)
+{
+	static const u16 burst_index[] = {
+		PLOYTEC_RATE_IDX_PCM_IN,
+		PLOYTEC_RATE_IDX_PCM_OUT,
+		PLOYTEC_RATE_IDX_PCM_IN,
+		PLOYTEC_RATE_IDX_PCM_OUT,
+		PLOYTEC_RATE_IDX_PCM_IN,
+	};
+	struct usb_device *dev = interface_to_usbdev(intf);
+	u8 *buf = xfer_buf;
+	u32 current_hw_rate = 0;
+	unsigned int i;
+	int ret;
+
+	dev_dbg(&intf->dev, "Setting rate %u Hz (%s)\n",
+		rate, cold_init ? "cold init" : "rate change");
+
+	buf[0] = rate & 0xFF;
+	buf[1] = (rate >> 8) & 0xFF;
+	buf[2] = (rate >> 16) & 0xFF;
+
+	if (cold_init) {
+		/* A fresh device gets a short gap and no separate first write. */
+		usleep_range(14000, 15000);
+	} else {
+		/* A rate change waits before touching the rate at all. */
+		usleep_range(50000, 51000);
+
+		ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_TYPE,
+					   0x0100, PLOYTEC_RATE_IDX_PCM_IN,
+					   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
+		if (ret < 0) {
+			dev_err(&intf->dev, "Failed to set rate on EP 0x86: %d\n", ret);
+			return ret;
+		}
+
+		/* Write once, pause, then repeat the burst. */
+		usleep_range(10000, 11000);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(burst_index); i++) {
+		ret = usb_control_msg_send(dev, 0, PLOYTEC_SET_RATE, PLOYTEC_SET_RATE_TYPE,
+					   0x0100, burst_index[i],
+					   buf, 3, PLOYTEC_CTRL_TIMEOUT_MS, GFP_KERNEL);
+		if (ret < 0) {
+			dev_err(&intf->dev, "Failed to set rate on EP 0x%02x: %d\n",
+				burst_index[i], ret);
+			return ret;
+		}
+	}
+
+	if (ploytec_get_rate(intf, xfer_buf, PLOYTEC_RATE_IDX_PCM_IN, &current_hw_rate) == 0) {
+		if (current_hw_rate != rate)
+			dev_warn(&intf->dev, "Rate mismatch! Requested %u Hz, Hardware at %u Hz\n",
+				 rate, current_hw_rate);
+		else
+			dev_dbg(&intf->dev, "Rate verified as %u Hz\n", current_hw_rate);
+	}
+
+	/*
+	 * Every vendor sequence goes quiet between verifying the rate and
+	 * programming the status byte, which is the caller's next step in
+	 * ploytec_start_streaming(). The window does not vary with the rate,
+	 * so there is nothing to scale.
+	 */
+	usleep_range(50000, 51000);
+
+	return 0;
+}
