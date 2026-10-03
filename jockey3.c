@@ -3547,7 +3547,7 @@ static int jockey3_validate_endpoints(struct usb_interface *intf0, struct usb_in
  * There is no equivalent notion for the inputs, so capture is left entirely
  * unpositioned.
  *
- * Physical layout:
+ * Physical layout (see Documentation/sound/cards/jockey3.rst):
  *   Playback: 1-2 Master Out L/R, 3-4 Headphone L/R
  *   Capture:  1-2 Input 1 L/R, 3-4 Input 2 L/R, 5-6 Microphone
  *
