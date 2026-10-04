@@ -28,17 +28,59 @@ main ─── … ─── X                          the driver as it is
                  S ── P1 ── P2 ── … ── Pn   series branch
 ```
 
-- `S` is a setup commit that strips the driver files down to the first
-  patch's state. It is not part of the series and never leaves this
-  repository.
+- `S` is a setup commit that removes every file in `sync-driver.sh --list`
+  and nothing else, so `P1` is a pure addition. It is not part of the series
+  and never leaves this repository.
 - `P1..Pn` each add one piece back, and carry the final kernel commit message:
-  subject, body, `Assisted-by:`, `Signed-off-by:`.
-- `git diff X Pn -- <driver files>` must be empty.
-  `export-series.sh --expect-repo main` checks exactly this: it builds
+  subject, body, then exactly `Assisted-by: LLM` and `Signed-off-by:`. The
+  maintainer asked for the single generic `Assisted-by:` line in place of one
+  per model. No other trailers: the export copies the message verbatim.
+- `git diff X Pn` must be empty, for the whole tree.
+  `export-series.sh --expect-repo main` checks the driver files: it builds
   `main`'s kernel tree the same way and compares it with the tip.
 
-A fix to any patch is a rebase on this branch followed by a fresh export.
 Nothing is ever edited on the kernel side.
+
+## Revising the series
+
+Review feedback means a new version of the series, again split. The series
+branch is an ordinary linear branch, so a change to patch `k` is a fixup:
+
+```sh
+git config rerere.enabled true          # once; see below
+git switch -c series/v6 series/v5       # v5 stays as what was sent
+git commit --fixup=<Pk> ...             # the change, against the patch it belongs to
+GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <S>
+```
+
+- **Tag what was sent.** Put an annotated tag on the series branch when a
+  version goes out, and export each version to its own kernel branch
+  (`jockey3-v5`, `jockey3-v6`). `git range-diff` between the two kernel
+  branches then gives most of the `Changes v5 -> v6` text.
+- **Land the change on `main` too, as its own commit,** tested at the tip like
+  any other fix. The series tip must still equal `main` afterwards. One commit
+  per review item on `main`, one fixup per review item on the series.
+- **Never rebase the series onto a newer `main`.** The only link between the
+  two is the tip-equals-`main` check.
+- **Expect conflicts downstream of a fixup.** The completion handlers are
+  touched by the transport, playback, capture, coalescing, recovery, watchdog
+  and MIDI patches, so a change to an early one conflicts in each later one.
+  `rerere` records every resolution once and replays it.
+- **Keep later patches from rewriting earlier lines.** Code arrives in its
+  final form and final place in the file wherever possible; a comment is
+  reworded by a later patch only where leaving it would describe code that is
+  not there yet. That is what keeps a mid-series fixup cheap.
+- **Every patch's comments must be true for that patch's tree.** After a
+  rebase, re-run `gate-series.sh` over the whole range, not only the patch
+  that changed. Two things are exempt, because fixing them would make later
+  patches rewrite code lines: log strings and identifier names keep their
+  final wording from the patch that adds them (`rate_mutex` exists before
+  rate switching does), and a comment that states a fact about the device
+  or the protocol stays even where the driver does not use it yet.
+- **A re-export gives the kernel commits new ids,** although their trees are
+  unchanged. The manifests of `build_module_series.sh` record those ids, so
+  rebuild the modules after every export and do not export between building
+  a module and testing it.
 
 ## Exporting to the kernel tree
 
@@ -133,8 +175,15 @@ builds UML from scratch. Later runs rebuild only the module.
 
 ## Hardware testing
 
-Every patch that touches code gets an x86_64 run with the `smoke` profile;
-only purely documentation patches are exempt. No other targets and no
+Every patch that touches code is loaded on x86_64 hardware; only a purely
+documentation patch is exempt. The bar for an intermediate patch is that the
+device is detected and bound with no crash, oops or other odd behavior. A run
+of the `smoke` profile on top of that is welcome but not required. An early
+patch cannot pass the whole profile: there is no PCM device before playback is added, no capture
+before the capture patch, one sample rate until rate switching and no MIDI
+until the MIDI patch. Run the cases a patch can pass with `--case`, and
+narrow a case to the rates it has with `--param 'rates=[44100]'`, so that a
+run's verdict means something. No other targets and no
 deeper profiles: the tip is the driver that has already been validated on
 every target, so each intermediate state only needs a sanity check on the
 primary target. Compile coverage of the other architectures comes from the
