@@ -3449,23 +3449,30 @@ static int jockey3_init_capture_urbs(struct jockey3_chip *chip)
 
 static bool jockey3_has_bulk_endpoint(struct usb_interface *intf, u8 ep_num, bool out)
 {
-	int i, j;
+	struct usb_host_interface *alts;
+	int i;
 
-	for (i = 0; i < intf->num_altsetting; i++) {
-		struct usb_host_interface *alts = &intf->altsetting[i];
+	/*
+	 * Alt 1 only: it is the setting ploytec_initialize_device() selects
+	 * and the one the URBs run on. Alt 0 has no endpoints on this device,
+	 * so an endpoint found only there would pass a check over every
+	 * altsetting and then fail at URB submission.
+	 */
+	alts = usb_altnum_to_altsetting(intf, 1);
+	if (!alts)
+		return false;
 
-		for (j = 0; j < alts->desc.bNumEndpoints; j++) {
-			struct usb_endpoint_descriptor *epd = &alts->endpoint[j].desc;
+	for (i = 0; i < alts->desc.bNumEndpoints; i++) {
+		struct usb_endpoint_descriptor *epd = &alts->endpoint[i].desc;
 
-			if (out) {
-				if (usb_endpoint_is_bulk_out(epd) &&
-				    usb_endpoint_num(epd) == ep_num)
-					return true;
-			} else {
-				if (usb_endpoint_is_bulk_in(epd) &&
-				    usb_endpoint_num(epd) == ep_num)
-					return true;
-			}
+		if (out) {
+			if (usb_endpoint_is_bulk_out(epd) &&
+			    usb_endpoint_num(epd) == ep_num)
+				return true;
+		} else {
+			if (usb_endpoint_is_bulk_in(epd) &&
+			    usb_endpoint_num(epd) == ep_num)
+				return true;
 		}
 	}
 	return false;
