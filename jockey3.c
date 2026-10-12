@@ -122,8 +122,11 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * - jockey3_disconnect() does everything that must happen while the device is
  *   still there: latch JOCKEY3_FLAG_DISCONNECTED (for either interface, since
  *   the core takes them down one at a time), release anyone waiting on a
- *   reset, stop the watchdog, kill the URBs, release interface 1, and hand the
- *   card to snd_card_free_when_closed().
+ *   reset, stop the watchdog, kill the URBs and release interface 1. The
+ *   disconnect() that finishes last, counted by @active_intfs, then hands the
+ *   card to snd_card_free_when_closed(). Both interfaces can be unbound at
+ *   once from sysfs, and neither may free the chip while the other is still
+ *   inside it.
  *
  * - jockey3_card_free(), reached through card->private_free once the last file
  *   descriptor is closed, frees the buffers and URBs, destroys rate_mutex and
@@ -455,6 +458,13 @@ struct jockey3_pcm_urb_stream {
  *	it on the way out.
  * @current_rate: sample rate the hardware is programmed to; @rate_mutex
  * @dev_idx: card slot held in jockey3_devices_used
+ * @active_intfs: interfaces that have not finished jockey3_disconnect(): 2
+ *	after probe. Each disconnect drops it after its last access to the chip,
+ *	and the one that reaches zero hands the card to
+ *	snd_card_free_when_closed(). The USB core can run the two disconnects
+ *	concurrently (unbinding both interfaces from sysfs), and
+ *	usb_driver_release_interface() does not wait for one already underway,
+ *	so neither may free the chip while the other is still inside it.
  * @reset_done: completed by jockey3_post_reset(), and by jockey3_disconnect()
  *	so a waiter is released when the USB core skips post_reset() entirely.
  *	Re-armed by jockey3_queue_reset() for a reset this driver starts, and by
@@ -518,6 +528,7 @@ struct jockey3_chip {
 	unsigned long flags;
 	unsigned int current_rate;
 	unsigned int dev_idx;
+	atomic_t active_intfs;
 	struct completion reset_done;
 	struct delayed_work watchdog_work;
 	atomic_t recovery_attempts;
@@ -3675,6 +3686,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->intf0 = usb_get_intf(intf);
 	chip->intf1 = usb_get_intf(intf1);
 	chip->flags = 0;
+	atomic_set(&chip->active_intfs, 2);
 
 	spin_lock_init(&chip->midi_lock);
 	spin_lock_init(&chip->playback.lock);
@@ -3842,25 +3854,34 @@ static void jockey3_disconnect(struct usb_interface *intf)
 		 * runs when the last file descriptor is closed, by which time
 		 * usb_disconnect() may already have freed the interface. This
 		 * recurses into jockey3_disconnect() for interface 1, which only
-		 * latches DISCONNECTED and clears its intfdata; if the core got
-		 * there first, usb_driver_release_interface() sees a condition
-		 * other than USB_INTERFACE_BOUND and returns.
+		 * latches DISCONNECTED, clears its intfdata and drops its share
+		 * of @active_intfs; if the core got there first,
+		 * usb_driver_release_interface() sees a condition other than
+		 * USB_INTERFACE_BOUND and returns.
 		 */
 		usb_driver_release_interface(&jockey3_driver, chip->intf1);
-
-		/*
-		 * snd_card_free_when_closed() disconnects the card now and frees
-		 * it once userspace has closed it -- it never blocks, which is
-		 * the whole point of not using a managed card (see the comment in
-		 * jockey3_probe()). It runs snd_pcm_stop(DISCONNECTED) under the
-		 * stream lock on the way, which drives our .trigger and clears
-		 * 'running' with the proper locking, so there is nothing to clear
-		 * here by hand. @chip lives in card->private_data and may be gone
-		 * the moment this returns, so nothing below may touch it.
-		 */
-		snd_card_free_when_closed(chip->card);
 	}
 	usb_set_intfdata(intf, NULL);
+
+	/*
+	 * Whichever disconnect() comes last frees the card. The core does not
+	 * serialize the two against each other: unbinding both interfaces from
+	 * sysfs at once can have this one running while the other has already
+	 * returned from usb_driver_release_interface(), which does not wait for
+	 * an unbind in flight. Dropping the count only after the last access to
+	 * @chip above means the freeing side never pulls it out from under the
+	 * other.
+	 *
+	 * snd_card_free_when_closed() disconnects the card now and frees it once
+	 * userspace has closed it -- it never blocks, which is the whole point
+	 * of not using a managed card (see the comment in jockey3_probe()). It
+	 * runs snd_pcm_stop(DISCONNECTED) under the stream lock on the way,
+	 * which drives our .trigger and clears 'running' with the proper
+	 * locking, so there is nothing to clear here by hand. @chip lives in
+	 * card->private_data and may be gone the moment this returns.
+	 */
+	if (chip && atomic_dec_and_test(&chip->active_intfs))
+		snd_card_free_when_closed(chip->card);
 }
 
 /*
