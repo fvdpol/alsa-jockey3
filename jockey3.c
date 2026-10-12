@@ -552,6 +552,38 @@ static struct usb_driver jockey3_driver;
 static DEFINE_MUTEX(jockey3_devices_mutex);
 static DECLARE_BITMAP(jockey3_devices_used, SNDRV_CARDS);
 
+/*
+ * jockey3_claim_slot() and jockey3_release_slot() are separate functions so
+ * that jockey3_probe(), which unwinds with goto, holds no scope-based cleanup
+ * of its own: the cleanup helpers and goto are not to be mixed in one function.
+ */
+
+/**
+ * jockey3_claim_slot - take the first enabled, unused card slot
+ *
+ * Return: the slot index, or -ENODEV if every enabled slot is in use.
+ */
+static int jockey3_claim_slot(void)
+{
+	unsigned int dev_idx;
+
+	guard(mutex)(&jockey3_devices_mutex);
+
+	for (dev_idx = 0; dev_idx < SNDRV_CARDS; dev_idx++) {
+		if (enable[dev_idx] && !test_bit(dev_idx, jockey3_devices_used)) {
+			__set_bit(dev_idx, jockey3_devices_used);
+			return dev_idx;
+		}
+	}
+	return -ENODEV;
+}
+
+static void jockey3_release_slot(unsigned int dev_idx)
+{
+	guard(mutex)(&jockey3_devices_mutex);
+	__clear_bit(dev_idx, jockey3_devices_used);
+}
+
 /* Chip flags */
 #define JOCKEY3_FLAG_DISCONNECTED	0
 #define JOCKEY3_FLAG_RESETTING		1
@@ -3362,8 +3394,7 @@ static void jockey3_free_resources(struct jockey3_chip *chip)
 
 	mutex_destroy(&chip->rate_mutex);
 
-	scoped_guard(mutex, &jockey3_devices_mutex)
-		__clear_bit(chip->dev_idx, jockey3_devices_used);
+	jockey3_release_slot(chip->dev_idx);
 
 	/* Last, reversing jockey3_probe(): everything above may read these. */
 	usb_put_intf(chip->intf1);
@@ -3606,17 +3637,10 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	if (ret < 0)
 		return ret;
 
-	/* Claim the first enabled, unused card slot */
-	scoped_guard(mutex, &jockey3_devices_mutex) {
-		for (dev_idx = 0; dev_idx < SNDRV_CARDS; dev_idx++)
-			if (enable[dev_idx] && !test_bit(dev_idx, jockey3_devices_used))
-				break;
-
-		if (dev_idx >= SNDRV_CARDS)
-			return -ENODEV;
-
-		__set_bit(dev_idx, jockey3_devices_used);
-	}
+	ret = jockey3_claim_slot();
+	if (ret < 0)
+		return ret;
+	dev_idx = ret;
 
 	/*
 	 * Deliberately not snd_devm_card_new(): a managed card is freed from the
@@ -3765,8 +3789,7 @@ err_free_card:
 
 err_free_idx:
 	/* Only reached before the card exists */
-	scoped_guard(mutex, &jockey3_devices_mutex)
-		__clear_bit(dev_idx, jockey3_devices_used);
+	jockey3_release_slot(dev_idx);
 	return ret;
 }
 
