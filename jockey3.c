@@ -3291,7 +3291,7 @@ static int jockey3_initialize(struct jockey3_chip *chip, int model)
 {
 	int ret;
 	int rate;
-	u32 fw_version;
+	u32 fw_version = 0;
 
 	/*
 	 * Let the device finish booting before speaking to it.
