@@ -3321,9 +3321,14 @@ static int jockey3_initialize(struct jockey3_chip *chip, int model)
 	 */
 	msleep(250);
 
+	/*
+	 * Retry a device that refuses, not one that has stopped answering:
+	 * ploytec_initialize_device() gives up after the first EP0 timeout, and
+	 * retrying here would spend that timeout ten times over in probe.
+	 */
 	for (int retry = 10; retry > 0; retry--) {
 		ret = jockey3_initialize_ploytec(chip, &fw_version);
-		if (ret == 0)
+		if (ret == 0 || ploytec_ctrl_ep_unresponsive(ret))
 			break;
 		usleep_range(50000, 100000); /* Wait 50-100 ms before retrying */
 	}

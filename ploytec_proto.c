@@ -32,7 +32,7 @@
  *
  * Return: true if EP0 has stopped responding.
  */
-static bool ploytec_ctrl_ep_unresponsive(int err)
+bool ploytec_ctrl_ep_unresponsive(int err)
 {
 	switch (err) {
 	case -ETIMEDOUT:
