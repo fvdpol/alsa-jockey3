@@ -189,10 +189,18 @@ if [ "$MANIFEST" = 1 ]; then
 	json=${out#manifest: }
 
 	# The series-branch commit this kernel commit was exported from:
-	# export-series.sh keeps the author date and the message.
+	# export-series.sh keeps the author date and the message. Backup
+	# branches of earlier revisions share both, so also require the same
+	# jockey3.c -- blob ids are content hashes, comparable across repos.
 	adate=$(K log -1 --format=%aI "$SHA")
+	kblob=$(K rev-parse "$SHA:sound/usb/jockey3/jockey3.c")
 	src=$(git -C "$REPO" log --all --format='%H%x09%aI%x09%s' |
-		awk -F'\t' -v d="$adate" -v s="$SUBJECT" '$2 == d && $3 == s {print $1}')
+		awk -F'\t' -v d="$adate" -v s="$SUBJECT" '$2 == d && $3 == s {print $1}' |
+		while read -r c; do
+			if [ "$(git -C "$REPO" rev-parse "$c:jockey3.c")" = "$kblob" ]; then
+				echo "$c"
+			fi
+		done)
 	[ "$(echo "$src" | grep -c .)" = 1 ] || {
 		echo "  (no unique series-branch commit for $SHORT; git_* fields left as HEAD)" >&2
 		src=
