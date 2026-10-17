@@ -136,9 +136,10 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * callback that is still in flight during an unplug to keep dereferencing it.
  * Such a callback finds JOCKEY3_FLAG_DISCONNECTED set and returns -ENODEV.
  *
- * probe's error path performs the disconnect half by hand and then calls
- * snd_card_free(); the card is never registered on any path that reaches
- * there, so the synchronous free cannot block.
+ * probe's error path performs the disconnect half by hand and ends the same
+ * way, with snd_card_free_when_closed(): a failing snd_card_register() may
+ * already have created the device nodes, so userspace can be holding the card
+ * open even there.
  */
 
 /**
@@ -3779,10 +3780,10 @@ err_free_card:
 	 * initialized above with no failure point between, and everything
 	 * jockey3_free_resources() touches is NULL until it is allocated.
 	 *
-	 * snd_card_free() rather than the disconnect path's
-	 * snd_card_free_when_closed(): the card is not registered yet on any
-	 * path that reaches here, so nothing can have it open and the
-	 * synchronous free cannot block.
+	 * snd_card_free_when_closed() rather than snd_card_free(), as in
+	 * jockey3_disconnect(): snd_card_register() creates the device nodes
+	 * before it can still fail, so userspace may have the card open, and
+	 * snd_card_free() would block probe until it lets go.
 	 *
 	 * probe() owns the usb_device lock, as usb_driver_claim_interface()
 	 * requires, and every unbind takes the same lock (see
@@ -3794,7 +3795,7 @@ err_free_card:
 	cancel_delayed_work_sync(&chip->watchdog_work);
 	jockey3_stop_urbs(chip);
 	usb_driver_release_interface(&jockey3_driver, intf1);
-	snd_card_free(card);
+	snd_card_free_when_closed(card);
 	return ret;
 
 err_free_idx:
