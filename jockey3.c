@@ -1531,6 +1531,10 @@ static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int directio
  * JOCKEY3_WATCHDOG_STALL_MS; poll at the JOCKEY3_WATCHDOG_POLL_MS ceiling.
  * Once a substream is open, self-reschedule from the nearer of the two
  * directions' deadlines, as dev_watchdog() does in net/sched/sch_generic.c.
+ * Capture's deadline counts only while a capture stream is open: an idle
+ * Capture stall is logged, never recovered (see jockey3_watchdog_check()),
+ * and chasing its long-passed deadline would pin the tick to
+ * JOCKEY3_WATCHDOG_MIN_POLL_MS for as long as Playback stays open.
  *
  * Unlike dev_watchdog() the delay is not passed through
  * round_jiffies_relative(), which rounds to whole seconds -- right for a
@@ -1542,14 +1546,13 @@ static bool jockey3_stream_is_open(struct jockey3_chip *chip, const int directio
  */
 static void jockey3_watchdog_arm(struct jockey3_chip *chip)
 {
-	unsigned long delay_ms;
+	bool capture_open = jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE);
+	unsigned long delay_ms = JOCKEY3_WATCHDOG_POLL_MS;
 
-	if (jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_PLAYBACK) ||
-	    jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_CAPTURE))
-		delay_ms = min(jockey3_watchdog_next_delay_ms(chip, &chip->playback),
-			       jockey3_watchdog_next_delay_ms(chip, &chip->capture));
-	else
-		delay_ms = JOCKEY3_WATCHDOG_POLL_MS;
+	if (capture_open || jockey3_stream_is_open(chip, SNDRV_PCM_STREAM_PLAYBACK))
+		delay_ms = jockey3_watchdog_next_delay_ms(chip, &chip->playback);
+	if (capture_open)
+		delay_ms = min(delay_ms, jockey3_watchdog_next_delay_ms(chip, &chip->capture));
 
 	queue_delayed_work(system_long_wq, &chip->watchdog_work, msecs_to_jiffies(delay_ms));
 }
@@ -2137,9 +2140,10 @@ static bool jockey3_stream_streaming_healthy(struct jockey3_chip *chip,
  * unnoticed. The count is reported as evidence -- a full ring means
  * "submitted, never returned", an empty one "nothing could be submitted".
  *
- * The onset tags itself "startup" or "steady-state" after which threshold
- * caught it: the start grace, or JOCKEY3_WATCHDOG_STALL_MS once that window
- * has passed. Only "steady-state" is a real mid-stream fault.
+ * The onset tags itself "startup" if the direction has not completed a
+ * single URB since its last start -- caught once the start grace has run
+ * out -- and "steady-state" otherwise. Only "steady-state" is a real
+ * mid-stream fault.
  *
  * Time-based rather than keyed off the first completion: at low N a restart
  * can complete an URB within under a millisecond, a hardware FIFO draining
@@ -2202,10 +2206,10 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 			 */
 			last = started;
 			threshold_ms = grace_ms;
-			startup = true;
 		} else if (!last) {
 			/* Past the grace window and still never completed once */
 			last = started;
+			startup = true;
 		}
 
 		age_ns = now - last;
@@ -2240,7 +2244,8 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 			 startup ? "startup" : "steady-state");
 		if (startup)
 			dev_dbg(&chip->intf0->dev,
-				"%s stall was inside the %s start grace (%u ms)\n", type,
+				"%s stream completed nothing within the %s start grace (%u ms)\n",
+				type,
 				READ_ONCE(chip->warm_start) ? "warm" : "cold", grace_ms);
 	} else if (log_recovery) {
 		dev_warn(&chip->intf0->dev, "%s URB stream recovered after %llu ms\n",
