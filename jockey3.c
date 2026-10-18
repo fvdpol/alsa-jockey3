@@ -20,6 +20,7 @@
 #include <linux/completion.h>
 #include <linux/mutex.h>
 #include <linux/wait.h>
+#include <linux/wait_bit.h>
 #include <linux/workqueue.h>
 #include <linux/cleanup.h>
 #include <sound/core.h>
@@ -2586,8 +2587,9 @@ static int jockey3_run_recovery_ladder(struct jockey3_chip *chip, const int dire
  *
  * Return: 0 if the direction is confirmed alive, recovery gave up and logged
  * why (still non-fatal to the caller), or a concurrent call already had this
- * in hand; -ENODEV if the device is gone; or -EAGAIN if a reset was queued
- * but did not complete in time.
+ * in hand, which jockey3_pcm_prepare() then waits out; -ENODEV if the
+ * device is gone; or -EAGAIN if a reset was queued but did not complete in
+ * time.
  */
 static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direction,
 				      const char *context)
@@ -2610,7 +2612,9 @@ static int jockey3_recover_urb_stream(struct jockey3_chip *chip, const int direc
 	}
 
 	ret = jockey3_run_recovery_ladder(chip, direction, context);
-	atomic_set(&chip->recovery_in_progress, 0);
+	/* Fully ordered, as wake_up_var() requires; see jockey3_pcm_prepare() */
+	atomic_xchg(&chip->recovery_in_progress, 0);
+	wake_up_var(&chip->recovery_in_progress);
 	return ret;
 }
 
@@ -2866,6 +2870,34 @@ static int jockey3_pcm_prepare(struct snd_pcm_substream *substream)
 		if (ret < 0)
 			return ret;
 	}
+
+	/*
+	 * Do not return into a recovery ladder that is still in flight,
+	 * whoever runs it: the call above declines when one is, and a stream
+	 * found alive never makes it at all. The ladder reports its xrun once,
+	 * when it commits, so a stream started after that would ride the
+	 * ladder's later URB restart or USB reset untold, and with a small
+	 * buffer ALSA core's wait_for_avail() timeout, about 1.1 buffer times,
+	 * turns that gap into -EIO. The ladder clears the flag only once its
+	 * reset, if any, has completed.
+	 *
+	 * A stream that passes this check just before the ladder takes the
+	 * flag is normally running by the time the ladder reports, so it is
+	 * told. Missed is only one whose START ioctl comes after that report:
+	 * a window no wider than the gap from .prepare returning to START,
+	 * left open rather than serializing .trigger against the ladder.
+	 *
+	 * Bounded by the longest a ladder can take: two start graces and the
+	 * one-second reset wait, plus headroom for rate_mutex.
+	 */
+	if (!wait_var_event_timeout(&chip->recovery_in_progress,
+				    !atomic_read_acquire(&chip->recovery_in_progress),
+				    msecs_to_jiffies(2 * jockey3_start_grace_ms() + 2000))) {
+		dev_warn(&chip->intf0->dev, "Timeout waiting for stream recovery\n");
+		return -EAGAIN;
+	}
+	if (jockey3_is_disconnected(chip))
+		return -ENODEV;
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		urb_stream->dma_off = 0;
