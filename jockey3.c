@@ -1120,8 +1120,9 @@ static void jockey3_capture_callback(struct urb *urb)
 	if (data_valid) {
 		n_pkts = urb->actual_length / PLOYTEC_PKT_SIZE;
 		if (unlikely(n_pkts == 0)) {
-			dev_err(&chip->intf0->dev, "Capture URB too small: %d; required at least %d\n",
-				urb->actual_length, PLOYTEC_PKT_SIZE);
+			dev_err_ratelimited(&chip->intf0->dev,
+					    "Capture URB too small: %d; required at least %d\n",
+					    urb->actual_length, PLOYTEC_PKT_SIZE);
 			data_valid = false;
 		} else if (unlikely(urb->actual_length % PLOYTEC_PKT_SIZE)) {
 			/*
