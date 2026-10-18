@@ -614,14 +614,21 @@ static inline void ploytec_decode_frame(u8 *dest, const u8 *src)
  * ploytec_initialize_codec() - Initialize the codec's pre-computed lookup tables
  *
  * Builds the bit-spread lookup table(s) used by the optimized encoder/decoder.
- * Must be called once (e.g. at driver probe) before any call to
- * ploytec_encode_batch() or ploytec_decode_batch().
+ * Must be called before any call to ploytec_encode_batch() or
+ * ploytec_decode_batch(). Only the first call builds them: a later one may run
+ * while URB completions are reading the tables, as the KUnit suite linked into
+ * the module does.
  *
  * Return: which codec variant this build selected, for the caller to log.
  */
 enum ploytec_codec_variant ploytec_initialize_codec(void)
 {
-	ploytec_codec_init_tables();
+	static bool initialized;
+
+	if (!initialized) {
+		ploytec_codec_init_tables();
+		initialized = true;
+	}
 	return ploytec_codec_selected;
 }
 

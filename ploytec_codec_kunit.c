@@ -852,7 +852,10 @@ static void ploytec_test_codec_variant_matches_build(struct kunit *test)
 
 static int ploytec_codec_suite_init(struct kunit_suite *suite)
 {
-	/* Builds the bit-spread lookup tables the optimized codecs need. */
+	/*
+	 * The lookup tables the optimized codecs need. module_init() has
+	 * normally built them already, and then this does nothing.
+	 */
 	ploytec_initialize_codec();
 
 	return 0;
