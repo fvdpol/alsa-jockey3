@@ -43,15 +43,30 @@ Nothing is ever edited on the kernel side.
 
 ## Revising the series
 
-Review feedback means a new version of the series, again split. The series
-branch is an ordinary linear branch, so a change to patch `k` is a fixup:
+Review feedback means a new version of the series, again split. Every change
+is made on `main` first, as its own commit, and then folded into the series
+branch from the patch that introduces the code it touches:
 
 ```sh
-git config rerere.enabled true          # once; see below
-git switch -c series/v6 series/v5       # v5 stays as what was sent
-git commit --fixup=<Pk> ...             # the change, against the patch it belongs to
-GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <S>
+git branch series/v6 v5.0                         # v5 stays as what was sent
+# fix on main, build, commit; then, for a fix belonging to patch k:
+tests/build/series/fold-patch.py <main-commit> <k> [--dry-run]
+tests/build/export-series.sh --branch jockey3-v6 --expect-repo main S..series/v6
 ```
+
+`fold-patch.py` applies the commit's diff to every patch from `k` to the
+tip, and rewrites the chain with each commit's message, author and dates
+unchanged. Where the context differs between patches, so that one diff will
+not apply everywhere, `fold-sub.py <fixer.py> <file> <k>` instead runs the
+`fix()` function of a small script over the file in each of those patches.
+Both default to `--branch series/v6`, and a no-op rewrite reproduces the
+branch's commit ids exactly.
+
+Fold each fix as soon as it is on `main`, while it is fresh, and check that
+the export still reports the tip matching `main`. Do not use
+`git commit --fixup` with `rebase --autosquash` on this series: the later
+patches rewrite the same regions, so every fixup conflicts in each one after
+it.
 
 - **Tag what was sent.** Put an annotated tag on the series branch when a
   version goes out, and export each version to its own kernel branch
@@ -59,19 +74,20 @@ GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <S>
   branches then gives most of the `Changes v5 -> v6` text.
 - **Land the change on `main` too, as its own commit,** tested at the tip like
   any other fix. The series tip must still equal `main` afterwards. One commit
-  per review item on `main`, one fixup per review item on the series.
+  per review item on `main`, one fold per review item on the series.
 - **Never rebase the series onto a newer `main`.** The only link between the
   two is the tip-equals-`main` check.
-- **Expect conflicts downstream of a fixup.** The completion handlers are
+- **A fix lands where its code first exists.** The completion handlers are
   touched by the transport, playback, capture, coalescing, recovery, watchdog
-  and MIDI patches, so a change to an early one conflicts in each later one.
-  `rerere` records every resolution once and replays it.
+  and MIDI patches, so a fix there usually folds from an early patch. A fix
+  whose wording depends on the tree, such as a comment that counts call
+  sites, needs `fold-sub.py`, or better, wording that does not depend on it.
 - **Keep later patches from rewriting earlier lines.** Code arrives in its
   final form and final place in the file wherever possible; a comment is
   reworded by a later patch only where leaving it would describe code that is
-  not there yet. That is what keeps a mid-series fixup cheap.
+  not there yet. That is what keeps a mid-series fold cheap.
 - **Every patch's comments must be true for that patch's tree.** After a
-  rebase, re-run `gate-series.sh` over the whole range, not only the patch
+  fold, re-run `gate-series.sh` over the whole range, not only the patch
   that changed. Two things are exempt, because fixing them would make later
   patches rewrite code lines: log strings and identifier names keep their
   final wording from the patch that adds them (`rate_mutex` exists before
