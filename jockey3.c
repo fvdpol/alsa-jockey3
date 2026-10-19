@@ -2933,12 +2933,17 @@ static int jockey3_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	dev_dbg(&chip->intf0->dev, "PCM trigger stream %d, cmd %d\n", substream->stream, cmd);
 
-	if (jockey3_is_disconnected(chip))
-		return -ENODEV;
-
+	/*
+	 * Refuse only START once disconnected. STOP must still clear @running:
+	 * the ALSA core ignores the error, and jockey3_pcm_sync_stop() relies on
+	 * @running being false so that no URB completion can join the safe zone
+	 * after it has drained.
+	 */
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		switch (cmd) {
 		case SNDRV_PCM_TRIGGER_START:
+			if (jockey3_is_disconnected(chip))
+				return -ENODEV;
 			urb_stream->running = true;
 			break;
 		case SNDRV_PCM_TRIGGER_STOP:
