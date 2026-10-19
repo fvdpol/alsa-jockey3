@@ -24,8 +24,9 @@ def message(c):
     return raw[raw.index('\n\n') + 2:]
 
 
-def rewrite(branch, first, new_files, dry):
-    """new_files(commit) -> {path: content or None}; None leaves the file as is."""
+def rewrite(branch, first, new_files, dry, messages=None):
+    """new_files(commit) -> {path: content or None}; None leaves the file as is.
+    messages: {patch number: new commit message} for the patches to reword."""
     C = commits(branch)
     assert 1 <= first <= len(C), (first, len(C))
     parent = C[first - 2] if first > 1 else git('rev-parse', BASE).strip()
@@ -46,7 +47,7 @@ def rewrite(branch, first, new_files, dry):
                     GIT_AUTHOR_DATE=fmt[2], GIT_COMMITTER_NAME=fmt[3],
                     GIT_COMMITTER_EMAIL=fmt[4], GIT_COMMITTER_DATE=fmt[5].strip())
         parent = git('commit-tree', tree, '-p', parent,
-                     inp=message(C[k]), env=cenv).strip()
+                     inp=(messages or {}).get(k + 1, message(C[k])), env=cenv).strip()
         print(f'p{k+1:02d} {C[k][:7]} -> {parent[:7]}')
     if not dry:
         git('update-ref', f'refs/heads/{branch}', parent, C[-1])

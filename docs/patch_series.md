@@ -60,7 +60,8 @@ unchanged. Where the context differs between patches, so that one diff will
 not apply everywhere, `fold-sub.py <fixer.py> <file> <k>` instead runs the
 `fix()` function of a small script over the file in each of those patches.
 Both default to `--branch series/v6`, and a no-op rewrite reproduces the
-branch's commit ids exactly.
+branch's commit ids exactly. Neither touches a commit message. When a fix
+makes a patch's message wrong, `reword-patch.py <k> <msgfile>` replaces it.
 
 Fold each fix as soon as it is on `main`, while it is fresh, and check that
 the export still reports the tip matching `main`. Do not use
