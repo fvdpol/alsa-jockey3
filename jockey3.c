@@ -3304,6 +3304,14 @@ static int jockey3_midi_out_open(struct snd_rawmidi_substream *substream)
 
 	if (jockey3_is_disconnected(chip))
 		return -ENODEV;
+
+	/*
+	 * Start every session from a clean Running Status state: a writer that
+	 * closed mid-message would otherwise have the next one's bytes expanded
+	 * against its stale status.
+	 */
+	scoped_guard(spinlock_irqsave, &chip->midi_lock)
+		memset(&chip->midi_state, 0, sizeof(chip->midi_state));
 	return 0;
 }
 
