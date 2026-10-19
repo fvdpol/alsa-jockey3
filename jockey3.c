@@ -170,11 +170,11 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  *
  * The watchdog work item adds one rule: rate_mutex must never be held across
  * cancel_delayed_work_sync(&chip->watchdog_work). jockey3_stop_urbs() is called
- * from inside rate_mutex at four sites, so it disarms with the non-sync
+ * from inside rate_mutex, so it disarms with the non-sync
  * cancel_delayed_work(), which is safe under any lock; a tick that is already
  * running when the cancel lands re-reads 'stopping' and does nothing. The sync
  * form appears only in jockey3_disconnect(), in probe's error path and in
- * jockey3_free_resources(), none of which holds a mutex.
+ * jockey3_free_resources(), none of which holds a mutex across it.
  *
  * Because that disarm does not wait, a tick can be parked on rate_mutex while
  * jockey3_suspend() or jockey3_pre_reset() takes the device down, then wake to
@@ -2519,8 +2519,8 @@ static int jockey3_run_recovery_ladder(struct jockey3_chip *chip, const int dire
 	 *
 	 * Racy by construction -- either state arriving just after the test still
 	 * hits it. The timeout bounds that; closing it properly would mean
-	 * serializing against jockey3_disconnect(), which must not block on
-	 * driver locks.
+	 * holding jockey3_disconnect() off across the queue and the wait for the
+	 * reset, and it must not block for that long.
 	 */
 	if (jockey3_is_disconnected(chip) || jockey3_is_suspended(chip)) {
 		dev_dbg(&chip->intf0->dev,
@@ -3902,7 +3902,16 @@ static void jockey3_disconnect(struct usb_interface *intf)
 		 */
 		cancel_delayed_work_sync(&chip->watchdog_work);
 
-		jockey3_stop_urbs(chip);
+		/*
+		 * Under rate_mutex, like every other stop/start of the rings. A
+		 * restart already past its DISCONNECTED test would otherwise
+		 * clear the stop fences after this and submit URBs we have just
+		 * killed. Every holder of the mutex either runs under the device
+		 * lock held here, and so cannot be running now, or keeps it only
+		 * for a URB stop/start, so this waits milliseconds at most.
+		 */
+		scoped_guard(mutex, &chip->rate_mutex)
+			jockey3_stop_urbs(chip);
 
 		/*
 		 * Release interface 1 here, not from card->private_free: that
