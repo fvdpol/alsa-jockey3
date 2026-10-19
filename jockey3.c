@@ -620,8 +620,14 @@ static void jockey3_set_current_rate(struct jockey3_chip *chip, unsigned int rat
 	lockdep_assert_held(&chip->rate_mutex);
 
 	chip->current_rate = rate;
-	scoped_guard(spinlock_irqsave, &chip->midi_lock)
+	scoped_guard(spinlock_irqsave, &chip->midi_lock) {
 		chip->midi_rate_divisor = rate / PLOYTEC_PLAYBACK_FRAMES;
+		/*
+		 * Restart the limiter: a credit built up under a larger divisor
+		 * would let several bytes through back to back at the new rate.
+		 */
+		chip->midi_out_acc = 0;
+	}
 }
 
 /*
