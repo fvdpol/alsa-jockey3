@@ -103,7 +103,8 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * A stall can also be found and recovered mid-stream, with no rate change or
  * PCM ioctl involved: jockey3_watchdog_work() polls URB liveness for the
  * device's whole lifetime and calls the same recovery ladder directly on a
- * new stall onset. See jockey3_watchdog_check() and jockey3_watchdog_arm().
+ * stall, with backoff while it lasts. See jockey3_watchdog_check() and
+ * jockey3_watchdog_arm().
  */
 
 /**
@@ -270,11 +271,22 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * directions' deadlines, as dev_watchdog() does in net/sched/sch_generic.c.
  * JOCKEY3_WATCHDOG_POLL_MS is the ceiling, used before either direction has
  * started; JOCKEY3_WATCHDOG_MIN_POLL_MS the floor, so a confirmed stall is
- * rechecked tightly rather than waiting out a stale window.
+ * rechecked tightly rather than waiting out a stale window -- unless the
+ * recovery backoff below holds the next attempt off anyway.
  */
 #define JOCKEY3_WATCHDOG_POLL_MS	1000
 #define JOCKEY3_WATCHDOG_MIN_POLL_MS	10
 #define JOCKEY3_WATCHDOG_STALL_MS	20
+/*
+ * Backoff between the recovery ladders the watchdog starts for one stall: the
+ * first runs at once, each later one waits twice as long as the one before,
+ * up to the cap. A device that stays down is then retried a couple of times a
+ * minute rather than every few hundred milliseconds for as long as it is
+ * plugged in. Steady streaming resets it. Ladders a PCM ioctl starts are not
+ * gated, so opening or re-preparing a stream still tries at once.
+ */
+#define JOCKEY3_WATCHDOG_RETRY_MIN_MS	500
+#define JOCKEY3_WATCHDOG_RETRY_MAX_MS	30000
 /*
  * Bounds and evidence thresholds for the "has this direction reached steady
  * streaming yet" checks that run over the window from jockey3_start_urbs()
@@ -401,6 +413,14 @@ static unsigned int jockey3_start_grace_ms(void)
  * @stall_since: ktime the current stall was measured from; @lock. Only
  *	meaningful while @stall_reported is set, and used to report how long the
  *	outage lasted once the stream comes back.
+ * @retry_at: ktime before which the watchdog starts no further recovery ladder
+ *	for this direction; 0 for none pending. Written by jockey3_watchdog_check()
+ *	only; atomic because jockey3_watchdog_next_delay_ms() reads it from
+ *	other contexts.
+ * @retry_backoff_ms: how long the watchdog waits after its next ladder before
+ *	another, in [JOCKEY3_WATCHDOG_RETRY_MIN_MS, JOCKEY3_WATCHDOG_RETRY_MAX_MS];
+ *	jockey3_watchdog_check() only, which the work item never runs twice at
+ *	once.
  * @n_shift: log2 of the Ploytec packets per URB ("N") the next resubmission
  *	will carry, in [0, 3]; @lock. Set by jockey3_pcm_hw_params() from the
  *	period size and reset to the default by jockey3_pcm_close(), so an idle
@@ -430,6 +450,8 @@ struct jockey3_pcm_urb_stream {
 	unsigned int consec_errors;
 	bool stall_reported;
 	u64 stall_since;
+	atomic64_t retry_at;
+	unsigned int retry_backoff_ms;
 	u8 n_shift;
 	u8 n_pkts;
 };
@@ -1541,10 +1563,10 @@ static void jockey3_midi_in_callback(struct urb *urb)
  * arrived since the last start), in ms clamped to
  * [JOCKEY3_WATCHDOG_MIN_POLL_MS, JOCKEY3_WATCHDOG_POLL_MS]. Returns
  * JOCKEY3_WATCHDOG_POLL_MS if the direction has never started (no deadline to
- * chase yet), and the floor if the deadline has already passed, so a
- * confirmed stall gets rechecked tightly instead of waiting out a stale
- * window. Only meaningful while a PCM stream is open somewhere -- see the
- * caller, jockey3_watchdog_arm().
+ * chase yet), and the floor if the deadline has already passed and no
+ * recovery backoff is holding, so a confirmed stall gets rechecked tightly
+ * instead of waiting out a stale window. Only meaningful while a PCM stream
+ * is open somewhere -- see the caller, jockey3_watchdog_arm().
  */
 static unsigned long jockey3_watchdog_next_delay_ms(struct jockey3_chip *chip,
 						    const struct jockey3_pcm_urb_stream *urb_stream)
@@ -1576,8 +1598,20 @@ static unsigned long jockey3_watchdog_next_delay_ms(struct jockey3_chip *chip,
 
 	remaining_ns = last + threshold_ms * NSEC_PER_MSEC - now;
 
-	if ((s64)remaining_ns <= 0)
+	if ((s64)remaining_ns <= 0) {
+		/*
+		 * Stalled. While the backoff holds the next ladder off there is
+		 * nothing for a tight re-poll to act on; the ceiling bounds how
+		 * late a stream coming back on its own is noticed.
+		 */
+		u64 retry_at = atomic64_read(&urb_stream->retry_at);
+
+		if (retry_at > now)
+			return clamp_t(unsigned long,
+				       div_u64(retry_at - now, NSEC_PER_MSEC),
+				       JOCKEY3_WATCHDOG_MIN_POLL_MS, JOCKEY3_WATCHDOG_POLL_MS);
 		return JOCKEY3_WATCHDOG_MIN_POLL_MS;
+	}
 
 	return clamp_t(unsigned long, div_u64(remaining_ns, NSEC_PER_MSEC),
 		       JOCKEY3_WATCHDOG_MIN_POLL_MS, JOCKEY3_WATCHDOG_POLL_MS);
@@ -2181,21 +2215,32 @@ static bool jockey3_stream_streaming_healthy(struct jockey3_chip *chip,
 	return true;
 }
 
+/* Hold the watchdog's next ladder for a direction off, and lengthen the hold */
+static void jockey3_watchdog_back_off(struct jockey3_pcm_urb_stream *urb_stream)
+{
+	atomic64_set(&urb_stream->retry_at, ktime_get_mono_fast_ns() +
+		     (u64)urb_stream->retry_backoff_ms * NSEC_PER_MSEC);
+	urb_stream->retry_backoff_ms = min(urb_stream->retry_backoff_ms * 2,
+					   JOCKEY3_WATCHDOG_RETRY_MAX_MS);
+}
+
 /**
  * jockey3_watchdog_check() - one direction's share of a watchdog tick
  * @chip: driver state
  * @direction: SNDRV_PCM_STREAM_PLAYBACK or SNDRV_PCM_STREAM_CAPTURE
  *
- * Reports a direction that has stopped completing URBs and, on the onset edge,
- * recovers it -- the only path that catches a stall mid-stream, with no PCM
+ * Reports a direction that has stopped completing URBs and recovers it, at
+ * once on the onset and then with backoff for as long as the stall lasts (see
+ * JOCKEY3_WATCHDOG_RETRY_MIN_MS) -- the only path that catches a stall mid-stream, with no PCM
  * ioctl to hand it to. Gated as jockey3_pcm_hw_params() gates its own capture
  * recovery: Playback always recovers because it carries MIDI OUT; Capture only
  * if a capture stream is open, since the ladder restarts the shared ring and
  * an idle Capture stall would glitch working Playback for no visible gain. It
  * is logged and left for the next capture open.
  *
- * Logging is edge-triggered, one line per stall start and end. The measured
- * age is reported rather than the threshold, since the poll interval would
+ * Logging is edge-triggered, one line per stall start and end; a restart
+ * ends a stall, so a device that stays down logs once per recovery attempt.
+ * The measured age is reported rather than the threshold, since the poll interval would
  * only bound it to one tick.
  *
  * Deliberately does not gate on urbs_in_flight: endpoints disabled underneath
@@ -2218,7 +2263,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 {
 	struct jockey3_pcm_urb_stream *urb_stream = jockey3_get_pcm_urb_stream(chip, direction);
 	const char *type = direction == SNDRV_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
-	bool log_onset = false, log_recovery = false;
+	bool log_onset = false, log_recovery = false, stalled = false;
 	u64 now, last, started, age_ns, outage_ns = 0;
 	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
 	unsigned int grace_ms = jockey3_start_grace_ms();
@@ -2280,6 +2325,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 		open = urb_stream->substream;
 
 		if (age_ns > threshold_ms * NSEC_PER_MSEC) {
+			stalled = true;
 			if (!urb_stream->stall_reported) {
 				urb_stream->stall_reported = true;
 				urb_stream->stall_since = last;
@@ -2315,8 +2361,39 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 			 type, div_u64(outage_ns, NSEC_PER_MSEC));
 	}
 
-	if (log_onset && (direction == SNDRV_PCM_STREAM_PLAYBACK || open))
-		jockey3_recover_urb_stream(chip, direction, "watchdog");
+	/*
+	 * Completing URBs past the start grace is steady streaming; anything
+	 * short of that, a restart included, leaves the backoff where it is.
+	 */
+	if (!stalled && threshold_ms == JOCKEY3_WATCHDOG_STALL_MS) {
+		urb_stream->retry_backoff_ms = JOCKEY3_WATCHDOG_RETRY_MIN_MS;
+		atomic64_set(&urb_stream->retry_at, 0);
+		return;
+	}
+
+	if (!stalled || (direction != SNDRV_PCM_STREAM_PLAYBACK && !open) ||
+	    now < atomic64_read(&urb_stream->retry_at))
+		return;
+
+	/*
+	 * On every stalled tick once the backoff allows, not only on the onset:
+	 * a ladder that did not bring the stream back leaves it stalled, and
+	 * the restart inside it opens a fresh onset only after the grace, which
+	 * would otherwise retry at that pace for as long as the device is down.
+	 */
+	jockey3_recover_urb_stream(chip, direction, "watchdog");
+
+	/*
+	 * Both directions: the ladder restarted the shared ring, so the other
+	 * one, if it is down too, has had its attempt as well. Otherwise it
+	 * would climb a ladder of its own once the restart's grace ran out,
+	 * and a wedged device would see two per round.
+	 */
+	dev_dbg(&chip->intf0->dev,
+		"%s: next watchdog recovery no sooner than %u ms from now\n",
+		type, urb_stream->retry_backoff_ms);
+	jockey3_watchdog_back_off(&chip->playback);
+	jockey3_watchdog_back_off(&chip->capture);
 }
 
 /**
@@ -2333,7 +2410,7 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
  * packet and there is no idle state in which "no completions" is legitimate.
  *
  * Acts as well as detects: jockey3_watchdog_check() calls
- * jockey3_recover_urb_stream() directly on a new stall onset. This is the
+ * jockey3_recover_urb_stream() on a stall, backing off while it lasts: the
  * only place recovery can be triggered without some PCM ioctl (hw_params,
  * prepare) re-entering the driver first -- necessary because a long-running,
  * uninterrupted stream never re-enters otherwise, and ALSA core's own
@@ -3856,6 +3933,10 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	atomic64_set(&chip->capture.last_callback_time, 0);
 	atomic64_set(&chip->playback.urbs_started_time, 0);
 	atomic64_set(&chip->capture.urbs_started_time, 0);
+	atomic64_set(&chip->playback.retry_at, 0);
+	atomic64_set(&chip->capture.retry_at, 0);
+	chip->playback.retry_backoff_ms = JOCKEY3_WATCHDOG_RETRY_MIN_MS;
+	chip->capture.retry_backoff_ms = JOCKEY3_WATCHDOG_RETRY_MIN_MS;
 	/*
 	 * Default N until the first hw_params() picks a period-tuned value
 	 * (jockey3_pcm_set_n()); matches the width the URB buffers below are
