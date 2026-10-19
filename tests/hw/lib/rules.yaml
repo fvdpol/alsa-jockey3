@@ -337,12 +337,17 @@ driver_fail:
     why: Endpoint delivered less than a packet; the format assumption is broken.
   - pattern: 'hardware may need power-cycling'
     why: >
-      One of jockey3_recover_urb_stream()'s two give-up paths. Recovery
+      One of jockey3_recover_urb_stream()'s three give-up paths. Recovery
       escalated all the way through a full USB reset and the stream is still
       dead.
+  - pattern: 'full USB reset not performed or failed'
+    why: >
+      jockey3_recover_urb_stream()'s third give-up path: the reset was queued
+      but did not run (device suspended or gone, interface unbinding, device
+      lock busy) or usb_reset_device() failed. The stream is still dead.
   - pattern: 'recovery budget exhausted, not resetting'
     why: >
-      jockey3_recover_urb_stream()'s other give-up path: the chip-wide
+      jockey3_recover_urb_stream()'s second give-up path: the chip-wide
       bounded-retry budget (JOCKEY3_RECOVERY_MAX_ATTEMPTS per
       JOCKEY3_RECOVERY_WINDOW_MS) was already spent, so this occurrence was
       not even escalated to a reset. Since Stage 3 trimmed the watchdog's
