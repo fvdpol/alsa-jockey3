@@ -2331,8 +2331,8 @@ static void jockey3_watchdog_work(struct work_struct *work)
  * jockey3_check_urb_stream_alive() -- "something completed just now", enough
  * for the cold-start paths that only ask whether the ring came up. With it
  * true the bar is jockey3_stream_streaming_healthy(), which a trickle of
- * FIFO-drain completions cannot clear; used where a false pass would escalate
- * to a needless USB reset. Always logs a dev_warn on timeout regardless of
+ * FIFO-drain completions cannot clear; used where a false pass would skip a
+ * USB reset that is needed. Always logs a dev_warn on timeout regardless of
  * whether the caller acts on the result, so stall frequency (Playback and
  * Capture alike) stays trackable in the field via dmesg.
  */
@@ -2496,8 +2496,8 @@ static int jockey3_run_recovery_ladder(struct jockey3_chip *chip, const int dire
 	 * Start grace, and the strict health gate: the light restart above was
 	 * of a ring that was streaming moments earlier, so a real resume shows
 	 * a proper completion cadence quickly, while a trickle of implausibly
-	 * fast FIFO-drain completions must NOT count -- passing on those
-	 * escalates a merely jittery restart to the USB reset below.
+	 * fast FIFO-drain completions must NOT count -- passing on those would
+	 * call a ring that is still dead recovered and skip the USB reset below.
 	 */
 	grace = jockey3_start_grace_ms();
 	if (jockey3_wait_urb_stream_started(chip, direction, grace, true, true)) {
