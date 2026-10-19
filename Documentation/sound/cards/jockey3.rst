@@ -169,7 +169,16 @@ or a stream still dead after a reset should already explain why.
 Module parameters
 =================
 
-The driver takes the standard ALSA ``index``, ``id`` and ``enable`` parameters.
+The driver takes the standard ALSA ``index``, ``id`` and ``enable`` parameters,
+and one of its own:
+
+``start_grace_ms``
+    How long, in milliseconds, a PCM direction is given to reach steady
+    streaming after its URB ring is (re)started before it is treated as
+    stalled. Default 200, clamped to 50..5000; writable at runtime. Raising it
+    only delays recovery from a real stall, while setting it too low can turn a
+    restart that is merely slow into a needless device reset, so it should
+    normally be left alone.
 
 Kconfig
 =======
