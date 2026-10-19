@@ -126,9 +126,10 @@ A stall that triggers immediate recovery is logged with ``dev_warn()``; a
 stall on an idle, unused capture endpoint whose recovery is deferred is
 logged at ``dev_dbg()`` instead, since it is an expected, tolerated state
 rather than something acted on right away. Recovery outcomes -- a successful
-URB restart, an escalated reset, an exhausted retry budget, or a stream still
-dead after a reset -- are always logged with ``dev_warn()`` or ``dev_err()``,
-so real-world frequency and severity can be tracked via ``dmesg``.
+URB restart, an escalated reset, an exhausted retry budget, a reset that could
+not be performed, or a stream still dead after a reset -- are always logged
+with ``dev_warn()`` or ``dev_err()``, so real-world frequency and severity can
+be tracked via ``dmesg``.
 
 URB liveness watchdog
 =====================
@@ -164,7 +165,8 @@ deliberately tolerates without treating it as a fault: recovery for it is
 deferred to the next capture open, as described above, so it can persist
 indefinitely with nothing wrong. Every other persistent stall means recovery
 did not succeed, and the ``dev_err()`` logged for an exhausted retry budget
-or a stream still dead after a reset should already explain why.
+or a stream still dead after a reset, or the ``dev_warn()`` for a reset that
+could not be performed, should already explain why.
 
 Module parameters
 =================

@@ -188,8 +188,8 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * own tick disarming itself via the non-sync cancel above, which is exactly
  * the safe case: it never blocks and does not affect the tick already
  * running. It may also queue a full USB reset; that reset runs on system_wq
- * (usb_queue_reset_device(), drivers/usb/core/message.c), never
- * system_long_wq where the watchdog runs, so the two cannot serialize behind
+ * (chip->reset_work, see jockey3_reset_work()), never system_long_wq where
+ * the watchdog runs, so the two cannot serialize behind
  * one another, and rate_mutex is dropped before the wait for it, letting
  * jockey3_pre_reset()/jockey3_post_reset() take the mutex themselves to
  * complete.
@@ -457,10 +457,15 @@ struct jockey3_pcm_urb_stream {
  *	it on the way out.
  * @current_rate: sample rate the hardware is programmed to; @rate_mutex
  * @dev_idx: card slot held in jockey3_devices_used
- * @reset_done: completed by jockey3_post_reset(), and by jockey3_disconnect()
- *	so a waiter is released when the USB core skips post_reset() entirely.
- *	Re-armed by jockey3_queue_reset() for a reset this driver starts, and by
- *	jockey3_pre_reset() for one started anywhere else.
+ * @reset_done: completed by jockey3_reset_work() for a reset this driver
+ *	starts, by jockey3_post_reset() for one started anywhere else, and by
+ *	jockey3_disconnect() so a waiter is released when the work is cancelled
+ *	before it ran. Re-armed by jockey3_queue_reset() and jockey3_pre_reset()
+ *	respectively.
+ * @reset_work: runs the reset jockey3_queue_reset() asks for; see
+ *	jockey3_reset_work()
+ * @reset_rc: outcome of the last reset @reset_work ran or failed to run, 0 on
+ *	success; written before @reset_done is completed and read after it
  * @watchdog_work: periodic URB liveness check; see jockey3_watchdog_work().
  *	Armed by jockey3_start_urbs() and disarmed by jockey3_stop_urbs(), so it
  *	runs exactly when the URBs are supposed to be flowing -- which, for this
@@ -521,6 +526,8 @@ struct jockey3_chip {
 	unsigned int current_rate;
 	unsigned int dev_idx;
 	struct completion reset_done;
+	struct work_struct reset_work;
+	int reset_rc;
 	struct delayed_work watchdog_work;
 	atomic_t recovery_attempts;
 	atomic64_t recovery_window_start;
@@ -640,36 +647,15 @@ static void jockey3_set_current_rate(struct jockey3_chip *chip, unsigned int rat
  */
 
 /*
- * Bounded, synchronous wait for a device reset queued via
- * usb_queue_reset_device() to complete. chip->reset_done is completed by
- * jockey3_post_reset(), and also by jockey3_disconnect() so that a waiter is
- * released when the USB core skips post_reset() entirely (a failed reset marks
- * the interface for rebinding and unbinds it instead).
- *
- * Deliberately does NOT call usb_reset_device() itself. A failed or aborted
- * reset marks the interface for rebinding and unbinds it, so the call would
- * run jockey3_disconnect() -- and the card teardown behind it -- in the very
- * thread that is still executing an ioctl on one of that card's file
- * descriptors. Queuing the reset instead lets the disconnect run on the USB
- * core's own workqueue, where the ALSA core's own refcounting keeps the
- * substream alive until this ioctl returns and userspace closes it.
- *
- * Until the card was switched from snd_devm_card_new() to
- * snd_card_free_when_closed() this was worse still: the teardown blocked in
- * snd_card_free() waiting for that same file descriptor to be closed, which
- * could never happen. That specific self-deadlock is gone, but reaching a
- * disconnect from inside an ioctl on the disconnecting card remains something
- * to keep out of this driver's calling threads.
+ * Wait, bounded, for chip->reset_done. Shared by
+ * jockey3_wait_for_reset_completion() and jockey3_run_recovery_ladder().
  */
-static int jockey3_wait_for_reset_completion(struct jockey3_chip *chip)
+static int jockey3_wait_reset_done(struct jockey3_chip *chip)
 {
 	/*
 	 * Empirical testing shows that the reset cycle typically takes around
 	 * 334 ms; a 1000 ms timeout gives sufficient headroom.
 	 */
-	if (!jockey3_is_resetting(chip))
-		return 0;
-
 	dev_dbg(&chip->intf0->dev, "Waiting for reset completion\n");
 
 	if (!wait_for_completion_timeout(&chip->reset_done, msecs_to_jiffies(1000))) {
@@ -684,14 +670,85 @@ static int jockey3_wait_for_reset_completion(struct jockey3_chip *chip)
 }
 
 /*
+ * Bounded, synchronous wait for a device reset in flight, whether this driver
+ * queued it with jockey3_queue_reset() or it was started anywhere else.
+ * chip->reset_done is completed by jockey3_reset_work() or
+ * jockey3_post_reset() respectively, and also by jockey3_disconnect() so that
+ * a waiter is released when the reset work is cancelled before it ran.
+ *
+ * Deliberately does NOT call usb_reset_device() in the caller's thread. That
+ * needs the device lock, which every unbind holds across jockey3_disconnect()
+ * and the card teardown behind it, and a reset that ends in rebinding marked
+ * interfaces runs that teardown in the resetting thread itself. Neither
+ * belongs in a thread that is still executing an ioctl on one of that card's
+ * file descriptors, so the reset runs on chip->reset_work instead.
+ *
+ * Until the card was switched from snd_devm_card_new() to
+ * snd_card_free_when_closed() this was worse still: the teardown blocked in
+ * snd_card_free() waiting for that same file descriptor to be closed, which
+ * could never happen. That specific self-deadlock is gone, but reaching a
+ * disconnect from inside an ioctl on the disconnecting card remains something
+ * to keep out of this driver's calling threads.
+ */
+static int jockey3_wait_for_reset_completion(struct jockey3_chip *chip)
+{
+	if (!jockey3_is_resetting(chip))
+		return 0;
+
+	return jockey3_wait_reset_done(chip);
+}
+
+/*
+ * The reset jockey3_queue_reset() asks for, run here rather than through
+ * usb_queue_reset_device(). The USB core's own work skips the reset, and with
+ * it pre_reset() and post_reset(), whenever usb_lock_device_for_reset() fails:
+ * the device is suspended or gone, the interface is unbinding, or the lock is
+ * not free within a second. Nothing would then clear RESETTING, and every
+ * path gated on it would stay shut until replug.
+ * Here the outcome is recorded and RESETTING cleared whether or not the reset
+ * ran.
+ *
+ * The chip outlives this work: jockey3_disconnect() and
+ * jockey3_free_resources() cancel it, and neither can run inside it.
+ * usb_reset_device() unbinds an interface in the resetting thread only if it
+ * is marked for rebinding while still bound: after a pre_reset() or
+ * post_reset() that returned non-zero, which this driver's never do, or a
+ * reset-resume of a driver without reset_resume(), which this driver never
+ * is while bound. A failed reset leaves the unbind to hub_wq.
+ */
+static void jockey3_reset_work(struct work_struct *work)
+{
+	struct jockey3_chip *chip = container_of(work, struct jockey3_chip, reset_work);
+	int ret;
+
+	ret = usb_lock_device_for_reset(chip->dev, chip->intf0);
+	if (!ret) {
+		ret = usb_reset_device(chip->dev);
+		usb_unlock_device(chip->dev);
+	}
+
+	chip->reset_rc = ret;
+	clear_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
+	complete_all(&chip->reset_done);
+}
+
+/*
  * Queue a full USB reset and arm chip->reset_done for a waiter. Does not
- * wait; pair with jockey3_wait_for_reset_completion() for that.
+ * wait; pair with jockey3_wait_reset_done() for that, and read
+ * chip->reset_rc after it.
+ *
+ * A reset already in flight is left to finish rather than queued again: that
+ * waiter's completion is the one to wait for, and re-arming it under a work
+ * whose tail is still to run would let that tail release the new waiter.
  */
 static void jockey3_queue_reset(struct jockey3_chip *chip)
 {
+	if (jockey3_is_resetting(chip))
+		return;
+
 	reinit_completion(&chip->reset_done);
 	set_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
-	usb_queue_reset_device(chip->intf0);
+	schedule_work(&chip->reset_work);
 }
 
 /*
@@ -2290,12 +2347,11 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
  * the non-sync cancel_delayed_work(), which never blocks and only prevents a
  * future queueing -- it does not affect the tick that is already running
  * (this one). The reset jockey3_recover_urb_stream() may queue runs on
- * system_wq (drivers/usb/core/message.c's usb_queue_reset_device()), not
- * system_long_wq where this tick runs, so the two cannot serialize behind
- * each other; and rate_mutex is not held across the wait for that reset
- * (jockey3_recover_urb_stream() drops it first), which is what lets
- * jockey3_pre_reset()/jockey3_post_reset() take the mutex themselves and
- * complete while this tick is blocked waiting.
+ * system_wq (chip->reset_work), not system_long_wq where this tick runs, so
+ * the two cannot serialize behind each other; and rate_mutex is not held
+ * across the wait for that reset (jockey3_recover_urb_stream() drops it
+ * first), which is what lets jockey3_pre_reset()/jockey3_post_reset() take
+ * the mutex themselves and complete while this tick is blocked waiting.
  */
 static void jockey3_watchdog_work(struct work_struct *work)
 {
@@ -2548,9 +2604,20 @@ static int jockey3_run_recovery_ladder(struct jockey3_chip *chip, const int dire
 		 JOCKEY3_RECOVERY_MAX_ATTEMPTS);
 	jockey3_queue_reset(chip);
 
-	ret = jockey3_wait_for_reset_completion(chip);
+	/*
+	 * Not jockey3_wait_for_reset_completion(): its RESETTING fast path would
+	 * read @reset_rc without the ordering the completion gives.
+	 */
+	ret = jockey3_wait_reset_done(chip);
 	if (ret < 0)
 		return ret;
+
+	if (chip->reset_rc) {
+		dev_warn(&chip->intf0->dev,
+			 "%s stream still stalled after URB restart; full USB reset not performed or failed: %d (%s)\n",
+			 type, chip->reset_rc, context);
+		return 0;
+	}
 
 	grace = jockey3_start_grace_ms();
 	if (!jockey3_wait_urb_stream_started(chip, direction, grace, false, true))
@@ -2583,9 +2650,9 @@ static int jockey3_run_recovery_ladder(struct jockey3_chip *chip, const int dire
  * and produce -EPROTO on every endpoint, needing a re-enumeration to clear.
  *
  * Ladder: a lightweight URB stop/start, then a full USB reset if that did not
- * take, queued with usb_queue_reset_device() and awaited by
- * jockey3_wait_for_reset_completion() rather than calling usb_reset_device()
- * from ioctl context -- see there for why. The reset step is gated on
+ * take, run on @chip->reset_work and awaited rather than calling
+ * usb_reset_device() from ioctl context -- see
+ * jockey3_wait_for_reset_completion() for why. The reset step is gated on
  * jockey3_recovery_budget_take(), so a chip that keeps stalling is not reset
  * in a tight loop.
  *
@@ -3458,6 +3525,12 @@ static void jockey3_free_resources(struct jockey3_chip *chip)
 	 */
 	cancel_delayed_work_sync(&chip->watchdog_work);
 
+	/*
+	 * The last fence on the reset work: a ladder in an ioctl that outlived
+	 * jockey3_disconnect() can still queue it, then time out waiting for it.
+	 */
+	cancel_work_sync(&chip->reset_work);
+
 	for (i = 0; i < JOCKEY3_N_URBS; i++) {
 		usb_free_urb(chip->playback.urbs[i]);
 		kfree(chip->playback.bufs[i]);
@@ -3793,6 +3866,7 @@ static int jockey3_probe(struct usb_interface *intf, const struct usb_device_id 
 	chip->capture.n_shift = ilog2(JOCKEY3_CAPTURE_N);
 	chip->capture.n_pkts = JOCKEY3_CAPTURE_N;
 	INIT_DELAYED_WORK(&chip->watchdog_work, jockey3_watchdog_work);
+	INIT_WORK(&chip->reset_work, jockey3_reset_work);
 
 	chip->xfer_buf = kmalloc(USB_XFER_BUF_SIZE, GFP_KERNEL);
 	if (!chip->xfer_buf) {
@@ -3863,6 +3937,7 @@ err_free_card:
 	usb_set_intfdata(intf, NULL);
 	set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
 	cancel_delayed_work_sync(&chip->watchdog_work);
+	cancel_work_sync(&chip->reset_work);
 	jockey3_stop_urbs(chip);
 	usb_driver_release_interface(&jockey3_driver, intf1);
 	snd_card_free_when_closed(card);
@@ -3901,9 +3976,9 @@ static void jockey3_disconnect(struct usb_interface *intf)
 	if (chip && intf == chip->intf0) {
 		clear_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 		/*
-		 * Release anyone blocked in jockey3_wait_for_reset_completion():
-		 * a failed reset unbinds the interface instead of calling
-		 * jockey3_post_reset(), so this is the only wakeup they get.
+		 * Release anyone blocked waiting for a reset: the reset work
+		 * cancelled below may never get to run, and then this is the only
+		 * wakeup they get.
 		 */
 		complete_all(&chip->reset_done);
 
@@ -3926,6 +4001,14 @@ static void jockey3_disconnect(struct usb_interface *intf)
 		 */
 		scoped_guard(mutex, &chip->rate_mutex)
 			jockey3_stop_urbs(chip);
+
+		/*
+		 * The reset work, if queued, cannot hold us up: it is either past
+		 * usb_lock_device_for_reset(), and then this disconnect cannot be
+		 * running, or it is in there and gives up with -EINTR now that
+		 * interface 0 is unbinding.
+		 */
+		cancel_work_sync(&chip->reset_work);
 
 		/*
 		 * Release interface 1 here, not from card->private_free: that
@@ -3962,10 +4045,10 @@ static void jockey3_disconnect(struct usb_interface *intf)
 
 /*
  * rate_mutex is taken and released within each of pre_reset()/post_reset()
- * rather than being held across the reset. The USB core does not guarantee
- * post_reset() runs at all: if the reset fails, the interface is marked for
- * rebinding and unbound instead, so a lock handed off from pre_reset() would
- * be leaked permanently and every later PCM ioctl would block on it forever.
+ * rather than being held across the reset. The USB core calls post_reset()
+ * only for an interface that is still bound and not marked for rebinding, so
+ * a lock handed off from pre_reset() could be leaked permanently and every
+ * later PCM ioctl would block on it forever.
  *
  * The window between the two callbacks is not left unguarded: the device is
  * physically in reset, so every EP0 transfer fails and is error-checked, and
@@ -4023,8 +4106,17 @@ static int jockey3_post_reset(struct usb_interface *intf)
 						  "a device reset");
 		}
 
-		clear_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
-		complete_all(&chip->reset_done);
+		/*
+		 * A reset this driver queued is finished by jockey3_reset_work(),
+		 * which also records its outcome. Finishing it here as well would
+		 * let a new ladder queue its reset in between and be released by
+		 * that work's tail before its own reset has run.
+		 */
+		if (current_work() != &chip->reset_work) {
+			chip->reset_rc = 0;
+			clear_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
+			complete_all(&chip->reset_done);
+		}
 	}
 	return 0;
 }
