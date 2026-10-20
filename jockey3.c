@@ -282,8 +282,11 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  * first runs at once, each later one waits twice as long as the one before,
  * up to the cap. A device that stays down is then retried a couple of times a
  * minute rather than every few hundred milliseconds for as long as it is
- * plugged in. Steady streaming resets it. Ladders a PCM ioctl starts are not
- * gated, so opening or re-preparing a stream still tries at once.
+ * plugged in. It starts afresh at probe, so after a replug or rebind, and once
+ * a direction has streamed steadily for as long as the hold it would impose
+ * next: a stream that comes back for only a moment between stalls keeps
+ * backing off. Ladders a PCM ioctl starts are not gated, so opening or
+ * re-preparing a stream still tries at once.
  */
 #define JOCKEY3_WATCHDOG_RETRY_MIN_MS	500
 #define JOCKEY3_WATCHDOG_RETRY_MAX_MS	30000
@@ -421,6 +424,9 @@ static unsigned int jockey3_start_grace_ms(void)
  *	another, in [JOCKEY3_WATCHDOG_RETRY_MIN_MS, JOCKEY3_WATCHDOG_RETRY_MAX_MS];
  *	jockey3_watchdog_check() only, which the work item never runs twice at
  *	once.
+ * @steady_since: ktime of the first watchdog tick of the current run of
+ *	steady streaming, 0 while there is none; jockey3_watchdog_check() only.
+ *	The backoff resets once this run lasts @retry_backoff_ms.
  * @n_shift: log2 of the Ploytec packets per URB ("N") the next resubmission
  *	will carry, in [0, 3]; @lock. Set by jockey3_pcm_hw_params() from the
  *	period size and reset to the default by jockey3_pcm_close(), so an idle
@@ -452,6 +458,7 @@ struct jockey3_pcm_urb_stream {
 	u64 stall_since;
 	atomic64_t retry_at;
 	unsigned int retry_backoff_ms;
+	u64 steady_since;
 	u8 n_shift;
 	u8 n_pkts;
 };
@@ -2374,14 +2381,24 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 	}
 
 	/*
-	 * Completing URBs past the start grace is steady streaming; anything
-	 * short of that, a restart included, leaves the backoff where it is.
+	 * Completing URBs past the start grace is steady streaming, and only
+	 * enough of it resets the backoff: as long as the hold the next ladder
+	 * would impose. A device that comes back for a moment after each
+	 * restart and then stalls again would otherwise reset it every round
+	 * and be retried at the pace of the start grace. Anything short of
+	 * steady streaming, a restart included, ends the run.
 	 */
 	if (!stalled && threshold_ms == JOCKEY3_WATCHDOG_STALL_MS) {
-		urb_stream->retry_backoff_ms = JOCKEY3_WATCHDOG_RETRY_MIN_MS;
-		atomic64_set(&urb_stream->retry_at, 0);
+		if (!urb_stream->steady_since) {
+			urb_stream->steady_since = now;
+		} else if (now - urb_stream->steady_since >=
+			   (u64)urb_stream->retry_backoff_ms * NSEC_PER_MSEC) {
+			urb_stream->retry_backoff_ms = JOCKEY3_WATCHDOG_RETRY_MIN_MS;
+			atomic64_set(&urb_stream->retry_at, 0);
+		}
 		return;
 	}
+	urb_stream->steady_since = 0;
 
 	if (!stalled || (direction != SNDRV_PCM_STREAM_PLAYBACK && !open) ||
 	    now < atomic64_read(&urb_stream->retry_at))

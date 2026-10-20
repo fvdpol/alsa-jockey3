@@ -163,8 +163,11 @@ alone would only bound it to the width of one poll interval.
 A device that stays down is retried for as long as it is bound, with backoff:
 the first attempt runs at once, and each further one waits twice as long as the
 one before, up to 30 seconds. Such a device logs a few lines per attempt
-rather than a continuous stream. Opening or re-preparing a PCM stream still
-attempts recovery at once.
+rather than a continuous stream. The backoff starts afresh when the device is
+bound again, and once the stream has run steadily for as long as the next
+wait would be; a stream that comes back only briefly between stalls keeps
+backing off. Opening or re-preparing a PCM stream still attempts recovery at
+once.
 
 An idle, unused capture endpoint stalling is the one case the driver
 deliberately tolerates without treating it as a fault: recovery for it is
