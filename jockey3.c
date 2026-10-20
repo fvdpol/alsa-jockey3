@@ -367,15 +367,16 @@ static unsigned int jockey3_start_grace_ms(void)
  * @bufs: transfer buffer for each URB, allocated at the maximum N; @n_pkts,
  *	not this width, governs how many bytes an URB actually transfers
  * @urbs_in_flight: number of submitted URBs; diagnostic, must reach 0 after a stop
- * @last_callback_time: ktime of the last completion, for stall detection. Zeroed
- *	by jockey3_stop_urbs() so a stopped stream is not reported as alive.
+ * @last_callback_time: ktime of the last successful completion, for stall
+ *	detection; see jockey3_note_completion() for what counts. Zeroed by
+ *	jockey3_stop_urbs() so a stopped stream is not reported as alive.
  * @first_callback_time: ktime of the first completion since the last
  *	jockey3_start_urbs(); zeroed there and by jockey3_stop_urbs(). With
  *	@completions_since_start it lets jockey3_stream_streaming_healthy()
  *	judge cadence, not just recency: the device can retire a URB
  *	microseconds after submit, which is a FIFO draining rather than audio.
  *	Set lock-free from the completion handler.
- * @completions_since_start: count of completions since the last
+ * @completions_since_start: count of successful completions since the last
  *	jockey3_start_urbs(); zeroed there and by jockey3_stop_urbs(). atomic_t,
  *	incremented lock-free from the completion handler.
  * @urbs_started_time: ktime at which jockey3_start_urbs() submitted this
@@ -1164,7 +1165,16 @@ static bool jockey3_urb_error_give_up(struct jockey3_chip *chip,
  * than audio actually clocked onto or off the wire -- so
  * jockey3_stream_streaming_healthy() needs the first completion's time and the
  * running count, not just the last time, to tell real flow from that trickle.
- * Lock-free; called at the top of each completion handler. If two completions
+ *
+ * Only a completion that moved data counts: not a transport error, not a
+ * capture URB too short to hold a packet, and nothing once the direction has
+ * given up. A device that fails every transfer still completes URBs, and
+ * counting those would let a restart into it pass the health check and skip
+ * the reset, and keep the watchdog from seeing the stall at all. A run of
+ * errors short of the give-up limit therefore reads as silence too; with a
+ * ring of JOCKEY3_N_URBS the other URBs normally keep completing through it.
+ *
+ * Lock-free; called by each completion handler once it knows. If two completions
  * race, exactly one sees the count go 1->1 and stamps @first_callback_time; a
  * transient @last_callback_time < @first_callback_time is harmless, the health
  * check rejects it and is re-polled.
@@ -1186,12 +1196,12 @@ static void jockey3_capture_callback(struct urb *urb)
 	int n_pkts = 0;
 	bool period_elapsed = false;
 	bool data_valid = true;
+	bool moved_data = false;
 	bool active = false;
 	bool stopping;
 	int sp, ret;
 
 	atomic_dec(&urb_stream->urbs_in_flight);
-	jockey3_note_completion(urb_stream);
 
 	switch (jockey3_urb_check(urb)) {
 	case JOCKEY3_URB_STOPPED:
@@ -1242,10 +1252,12 @@ static void jockey3_capture_callback(struct urb *urb)
 
 	/* Step 1: Safely fetch the pointer and join the safe zone */
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
-		if (data_valid && urb_stream->consec_errors < JOCKEY3_MAX_URB_ERRORS)
+		if (data_valid && urb_stream->consec_errors < JOCKEY3_MAX_URB_ERRORS) {
 			urb_stream->consec_errors = 0;
+			moved_data = true;
+		}
 
-		if (data_valid && !urb_stream->stopping &&
+		if (moved_data && !urb_stream->stopping &&
 		    urb_stream->running && urb_stream->substream) {
 			urb_stream->callbacks_active++;
 			active = true;
@@ -1268,6 +1280,9 @@ static void jockey3_capture_callback(struct urb *urb)
 					urb->transfer_buffer + sp * PLOYTEC_PKT_SIZE);
 		}
 	}
+
+	if (moved_data)
+		jockey3_note_completion(urb_stream);
 
 	/*
 	 * Step 2: Safe Zone. ALSA core can't free 'substream' because
@@ -1401,12 +1416,12 @@ static void jockey3_playback_callback(struct urb *urb)
 	unsigned int submit_pkts;
 	bool period_elapsed = false;
 	bool data_valid = true;
+	bool moved_data = false;
 	bool active = false;
 	bool stopping;
 	int i, sp, ret;
 
 	atomic_dec(&urb_stream->urbs_in_flight);
-	jockey3_note_completion(urb_stream);
 
 	switch (jockey3_urb_check(urb)) {
 	case JOCKEY3_URB_STOPPED:
@@ -1441,10 +1456,12 @@ static void jockey3_playback_callback(struct urb *urb)
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		submit_pkts = urb_stream->n_pkts;
 
-		if (data_valid && urb_stream->consec_errors < JOCKEY3_MAX_URB_ERRORS)
+		if (data_valid && urb_stream->consec_errors < JOCKEY3_MAX_URB_ERRORS) {
 			urb_stream->consec_errors = 0;
+			moved_data = true;
+		}
 
-		if (data_valid && !urb_stream->stopping &&
+		if (moved_data && !urb_stream->stopping &&
 		    urb_stream->running && urb_stream->substream) {
 			urb_stream->callbacks_active++;
 			active = true;
@@ -1458,6 +1475,9 @@ static void jockey3_playback_callback(struct urb *urb)
 				jockey3_silence_out_packet(buf + sp * PLOYTEC_PKT_SIZE);
 		}
 	}
+
+	if (moved_data)
+		jockey3_note_completion(urb_stream);
 
 	/*
 	 * The outgoing MIDI data is encapsulated in the playback stream, one
