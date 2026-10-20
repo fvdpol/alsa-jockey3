@@ -405,8 +405,10 @@ static unsigned int jockey3_start_grace_ms(void)
  *	jockey3_start_urbs(); @lock. Tested by the completion handler inside the
  *	same critical section that anchors and resubmits, so a callback can never
  *	re-anchor a URB after the kill has drained the anchor.
- * @consec_errors: consecutive URB transport errors; @lock. Reset on any
- *	successful completion and by jockey3_start_urbs().
+ * @consec_errors: consecutive URB transport errors; @lock. Reset by a
+ *	successful completion while below JOCKEY3_MAX_URB_ERRORS, and by
+ *	jockey3_start_urbs(). Once it reaches the limit the direction has given
+ *	up: no URB of it is resubmitted, successful or not, until the next start.
  * @stall_reported: the watchdog has logged the onset of the current stall;
  *	@lock. Edge flag, so a wedge produces one onset line and one closing
  *	line rather than one per tick. Cleared either by the stream completing a
@@ -1103,8 +1105,15 @@ static void jockey3_resubmit_failed(struct jockey3_chip *chip, int err, const ch
  * These are frequently transient -- marginal cabling and some host controllers
  * produce them routinely -- so a single one must not disable the card. Keep
  * resubmitting while the consecutive count stays below JOCKEY3_MAX_URB_ERRORS;
- * beyond that, stop feeding this direction and leave recovery to the next
+ * at the limit, stop the whole direction and leave recovery to the next
  * .prepare, which already carries the stall detection and reset path.
+ *
+ * The stop is for the whole ring, not just the URB that crossed the limit:
+ * the completion handlers resubmit nothing while the count is at the limit,
+ * and a success no longer resets it. Otherwise each burst would cost the URBs
+ * it hit, one success would let the rest carry on, and the ring would run on
+ * short until the device's FIFO underran -- audibly, and with nothing logged
+ * but a "stopped" that was not true.
  *
  * Return: true if the caller should give up and not resubmit.
  */
@@ -1233,7 +1242,7 @@ static void jockey3_capture_callback(struct urb *urb)
 
 	/* Step 1: Safely fetch the pointer and join the safe zone */
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
-		if (data_valid)
+		if (data_valid && urb_stream->consec_errors < JOCKEY3_MAX_URB_ERRORS)
 			urb_stream->consec_errors = 0;
 
 		if (data_valid && !urb_stream->stopping &&
@@ -1277,12 +1286,15 @@ static void jockey3_capture_callback(struct urb *urb)
 			wake_up(&urb_stream->drain_wait);
 
 		/*
-		 * Keep resubmitting the URB while the interface is alive. The
-		 * 'stopping' test and the anchor+submit below must stay in this
-		 * one critical section: that is what stops a URB being re-added
-		 * to an anchor jockey3_stop_urbs() has already drained.
+		 * Keep resubmitting the URB while the interface is alive and
+		 * this direction has not given up (see
+		 * jockey3_urb_error_give_up()). The 'stopping' test and the
+		 * anchor+submit below must stay in this one critical section:
+		 * that is what stops a URB being re-added to an anchor
+		 * jockey3_stop_urbs() has already drained.
 		 */
-		if (!urb_stream->stopping && !jockey3_is_disconnected(chip)) {
+		if (!urb_stream->stopping && !jockey3_is_disconnected(chip) &&
+		    urb_stream->consec_errors < JOCKEY3_MAX_URB_ERRORS) {
 			urb->transfer_buffer_length = urb_stream->n_pkts * PLOYTEC_PKT_SIZE;
 			atomic_inc(&urb_stream->urbs_in_flight);
 			usb_anchor_urb(urb, &urb_stream->anchor);
@@ -1429,7 +1441,7 @@ static void jockey3_playback_callback(struct urb *urb)
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		submit_pkts = urb_stream->n_pkts;
 
-		if (data_valid)
+		if (data_valid && urb_stream->consec_errors < JOCKEY3_MAX_URB_ERRORS)
 			urb_stream->consec_errors = 0;
 
 		if (data_valid && !urb_stream->stopping &&
@@ -1483,12 +1495,15 @@ static void jockey3_playback_callback(struct urb *urb)
 			wake_up(&urb_stream->drain_wait);
 
 		/*
-		 * Keep resubmitting the URB while the interface is alive. The
-		 * 'stopping' test and the anchor+submit below must stay in this
-		 * one critical section: that is what stops a URB being re-added
-		 * to an anchor jockey3_stop_urbs() has already drained.
+		 * Keep resubmitting the URB while the interface is alive and
+		 * this direction has not given up (see
+		 * jockey3_urb_error_give_up()). The 'stopping' test and the
+		 * anchor+submit below must stay in this one critical section:
+		 * that is what stops a URB being re-added to an anchor
+		 * jockey3_stop_urbs() has already drained.
 		 */
-		if (!urb_stream->stopping && !jockey3_is_disconnected(chip)) {
+		if (!urb_stream->stopping && !jockey3_is_disconnected(chip) &&
+		    urb_stream->consec_errors < JOCKEY3_MAX_URB_ERRORS) {
 			urb->transfer_buffer_length = submit_pkts * PLOYTEC_PKT_SIZE;
 			atomic_inc(&urb_stream->urbs_in_flight);
 			usb_anchor_urb(urb, &urb_stream->anchor);
