@@ -105,6 +105,19 @@ A case only honors this if it checks `c.stop_requested()` at the top of its
 loop. `cases/audio_engine_start.py` is the worked example; add the check to any
 case expected to run long.
 
+### A device lost between cases
+
+Before each case that requires the device, the runner looks for the card. If
+it is gone -- a wedge inside the previous case that ended in a failed
+re-enumeration -- and a power switch is configured (`device-power`), it cycles
+the device's mains power, waits up to 30 s for the card and 5 s more for it to
+settle, and carries on; the recovery is recorded in `run.json` under
+`env.device_recovery` and printed with the summary. If the device does not
+come back, or there is no switch, that case is recorded BLOCKED and the run
+ends, rather than failing every remaining case for a reason that has nothing
+to do with the driver. Only an absent card is detected: a device that is
+enumerated but not answering still looks present and is the case's to find.
+
 `restart_timing.py` folds each prod-kernel run that had dynamic debug on into a
 growing histogram keyed by architecture, stream, start type and sample rate
 (`report --split rate` breaks it out; the default aggregates over rates):

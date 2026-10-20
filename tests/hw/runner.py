@@ -49,7 +49,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from lib import (alsa, capabilities, case as case_mod, env, kmsg,  # noqa: E402
+from lib import (alsa, capabilities, case as case_mod, env, kmsg, power,  # noqa: E402
                  machineconf, priv,
                  results, term, yamlio)
 
@@ -617,6 +617,73 @@ def recover_host(ctx, style):
         note("the machine needs attention before the next run")
 
 
+# How long a power-cycled device gets to come back as a card, and how long it
+# is then left alone before a case touches it: JT-PROBE-003 needs a few seconds
+# of settle after a replug, and so does whatever runs after a cold boot here.
+DEVICE_RETURN_TIMEOUT_S = 30
+DEVICE_SETTLE_S = 5
+
+
+def ensure_device(ctx, case, style):
+    """Make sure the device a case needs is there, power-cycling it if not.
+
+    A device lost inside one case -- a wedge that ends in a failed
+    re-enumeration -- otherwise fails every later case until one of them
+    happens to power-cycle it, and those failures say nothing about the
+    driver. So before each case that requires the device, look for the card,
+    and if it is gone cycle the device's own mains power and wait for it.
+
+    Only an absent card is detected. A device that is enumerated but not
+    answering (issue #26) still looks present here, and is the case's to find.
+
+    Returns None when the case can run, or the reason it cannot. The card
+    index is re-read either way, since a re-enumerated device can come back
+    under another one. Every recovery is recorded in ctx["device_recovery"]
+    and printed with the run summary.
+    """
+    if "device" not in (case.get("requires") or []):
+        return None
+    card, _cid = alsa.find_card()
+    if card is not None:
+        ctx["card"], ctx["device"] = card, alsa.device_name(card)
+        return None
+
+    log = ctx["device_recovery"]
+
+    def note(line, *styles):
+        log.append(f"before {case['id']}: {line}")
+        print(f"  {style(line, *styles) if styles else line}", flush=True)
+
+    if not ctx.get("device_power"):
+        note("no Jockey 3 card present, and no power switch to bring it back",
+             "bold", "red")
+        return "device not present, and no power switch to recover it"
+
+    note("no Jockey 3 card present -- power-cycling the device", "bold")
+    # Marked, so the disconnect and enumeration noise that follows is not
+    # mistaken for a case's own: it lands before the next case's marker.
+    kmsg.Marker(f"device-recovery-before-{case['id']}").write()
+    ok, detail = power.cycle()
+    if not ok:
+        note(f"power cycle failed: {detail}", "bold", "red")
+        return f"device not present; power cycle failed: {detail}"
+
+    deadline = time.time() + DEVICE_RETURN_TIMEOUT_S
+    while time.time() < deadline:
+        card, _cid = alsa.find_card()
+        if card is not None:
+            time.sleep(DEVICE_SETTLE_S)
+            ctx["card"], ctx["device"] = card, alsa.device_name(card)
+            note(f"device back as card {card} after a power cycle",
+                 "bold", "green")
+            return None
+        time.sleep(0.5)
+    note(f"device still missing {DEVICE_RETURN_TIMEOUT_S}s after a power cycle",
+         "bold", "red")
+    return (f"device not present; still missing {DEVICE_RETURN_TIMEOUT_S}s "
+            f"after a power cycle")
+
+
 def run_case(case, iteration, params, ctx):
     """Execute one automated case and classify what the kernel said about it."""
     started = time.time()
@@ -1074,6 +1141,8 @@ def main():
         "live": live,
         "quiet": args.quiet,
         "unattended": args.unattended,
+        "device_power": "device-power" in caps,
+        "device_recovery": [],
     }
 
     run_json = os.path.join(run_path, "run.json")
@@ -1153,6 +1222,19 @@ def main():
             # the case ids line up in a column and the marks read down it.
             print(style(f"\n  ▶ {tag:<16}", "bold")
                   + f" {oneline(case.get('title'))}{counter}", flush=True)
+            missing = ensure_device(ctx, case, style)
+            if missing:
+                # Nothing after this can run either, so the run ends here
+                # rather than recording the same reason for every case left.
+                r = results.CaseResult(
+                    id=case["id"], iteration=i, mode=case.get("mode", ""),
+                    level=case.get("level", ""), area=case.get("area", ""),
+                    status=results.BLOCKED, reason=missing, params=params,
+                    started=results.utc_iso())
+                run.add(r)
+                print(f"  {mark(r.status, style)} {tag:<16} BLOCKED  {missing}")
+                aborted = True
+                break
             r = run_case(case, i, params, ctx)
             run.add(r)
             extra = f"  {r.reason}" if r.reason else ""
@@ -1185,6 +1267,7 @@ def main():
 
     run.outcome = decide_outcome(ctx, run.results)
 
+    run.env["device_recovery"] = ctx["device_recovery"]
     run.unclassified = ctx["unclassified"][:200]
     run.ended = results.utc_iso()
     if not run.env["driver"]["loaded"]:
@@ -1252,6 +1335,10 @@ def main():
         for line in ctx["host_fail"][:5]:
             print(f"  {line}")
         for line in ctx.get("host_recovery", []):
+            print(f"  {line}")
+    if ctx["device_recovery"]:
+        print("\nThe device went missing between cases:")
+        for line in ctx["device_recovery"]:
             print(f"  {line}")
     if ctx["investigate"]:
         print("\nA kernel defect was detected; the run was abandoned.")

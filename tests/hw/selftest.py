@@ -344,6 +344,73 @@ def test_host_controller_death(rules):
           "and the real pass behind it is still the pass on record")
 
 
+def test_device_recovery():
+    """A device lost inside one case must not fail every case after it.
+
+    The runner looks for the card before each case that requires the device
+    and power-cycles it when it is gone. Exercised with the card lookup, the
+    power switch and the kernel-log marker stubbed out: no hardware is
+    touched.
+    """
+    print("\ndevice recovery between cases")
+    import runner
+    from lib import alsa, kmsg, power
+
+    saved = (alsa.find_card, power.cycle, kmsg.Marker.write,
+             runner.DEVICE_SETTLE_S, runner.DEVICE_RETURN_TIMEOUT_S)
+    cycles = []
+    present = {"card": 1}
+
+    def find_card():
+        return (present["card"], "RJ3") if present["card"] is not None \
+            else (None, None)
+
+    def cycle(off_seconds=5.0):
+        cycles.append(off_seconds)
+        present["card"] = present.get("after_cycle")
+        return True, "cycled"
+
+    alsa.find_card, power.cycle = find_card, cycle
+    kmsg.Marker.write = lambda self: None
+    runner.DEVICE_SETTLE_S, runner.DEVICE_RETURN_TIMEOUT_S = 0, 1
+    style = lambda line, *styles: line
+    hw = {"id": "JT-X-001", "requires": ["device"]}
+    import io, contextlib
+
+    def ensure(state, case):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return runner.ensure_device(state, case, style)
+
+    try:
+        ctx = {"device_power": True, "device_recovery": [],
+               "card": None, "device": None}
+        check(ensure(ctx, {"id": "JT-BUILD-001"}) is None and not cycles,
+              "a case that does not need the device is not checked")
+        check(ensure(ctx, hw) is None and not cycles,
+              "a present device is left alone")
+        check(ctx["device"] == "hw:1,0", "and its card index is re-read")
+
+        present.update(card=None, after_cycle=2)
+        check(ensure(ctx, hw) is None and len(cycles) == 1,
+              "a missing device is power-cycled once and the case runs")
+        check(ctx["device"] == "hw:2,0", "under the index it came back with")
+        check(len(ctx["device_recovery"]) == 2,
+              "and the recovery is recorded", ctx["device_recovery"])
+
+        present.update(card=None, after_cycle=None)
+        why = ensure(ctx, hw)
+        check(why and "still missing" in why and len(cycles) == 2,
+              "a device that does not come back blocks the case", why)
+
+        ctx["device_power"] = False
+        why = ensure(ctx, hw)
+        check(why and "no power switch" in why and len(cycles) == 2,
+              "without a switch nothing is cycled", why)
+    finally:
+        (alsa.find_card, power.cycle, kmsg.Marker.write,
+         runner.DEVICE_SETTLE_S, runner.DEVICE_RETURN_TIMEOUT_S) = saved
+
+
 def test_wedged_device(rules):
     """The 2026-08-11 lockup, replayed line for line.
 
@@ -2284,6 +2351,7 @@ def main():
     test_host_controller_death(rules)
     test_case_timeout(targets)
     test_stop_file()
+    test_device_recovery()
     test_watchdog(rules)
     test_recovery_giveup(rules)
     test_error_handling(rules)
