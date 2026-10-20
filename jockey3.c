@@ -1235,6 +1235,18 @@ static void jockey3_capture_callback(struct urb *urb)
 			active = true;
 			substream = urb_stream->substream;
 
+			/*
+			 * No more than the N this direction runs at now. A URB
+			 * still in flight from before jockey3_pcm_set_n() lowered
+			 * N carries more packets than a period may hold: taking
+			 * them all could cross several period boundaries, which
+			 * the OR'd period_elapsed reports as one, or wrap a
+			 * buffer smaller than the URB within one callback. Only
+			 * the first few completions of a stream at a lower N are
+			 * affected, and they lose the excess.
+			 */
+			n_pkts = min_t(int, n_pkts, urb_stream->n_pkts);
+
 			for (sp = 0; sp < n_pkts; sp++)
 				period_elapsed |= jockey3_process_in_packet(chip,
 					urb->transfer_buffer + sp * PLOYTEC_PKT_SIZE);
@@ -3156,8 +3168,9 @@ static int jockey3_initialize_ploytec(struct jockey3_chip *chip, u32 *fw_version
  * Takes effect without tearing the URB ring down -- the firmware cannot tell
  * an N x 512 B bulk transfer apart from N separate 512 B ones, so each URB on
  * this direction simply picks up the new N at its own next resubmission; the
- * ring turns over onto it within at most JOCKEY3_N_URBS completions. See
- * re/streaming_overhead.md for the rationale and measurements.
+ * ring turns over onto it within at most JOCKEY3_N_URBS completions. Until it
+ * has, jockey3_capture_callback() takes no more than the new N packets from
+ * each URB. See re/streaming_overhead.md for the rationale and measurements.
  *
  * Called unconditionally on every hw_params(), including when the rate is
  * unchanged and the URB ring is never touched: N is a per-open, per-period
