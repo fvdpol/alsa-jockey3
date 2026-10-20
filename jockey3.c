@@ -2262,6 +2262,11 @@ static void jockey3_watchdog_back_off(struct jockey3_pcm_urb_stream *urb_stream)
  * The measured age is reported rather than the threshold, since the poll interval would
  * only bound it to one tick.
  *
+ * An unplugged device is left alone: usb_disconnect() marks it
+ * USB_STATE_NOTATTACHED before it unbinds the interfaces, and in that window a
+ * stall is the device leaving, not something to log or recover. Before the
+ * hub notices, an unplug looks exactly like a wedge and is treated as one.
+ *
  * Deliberately does not gate on urbs_in_flight: endpoints disabled underneath
  * the driver leave nothing in flight, which is the case that must not go
  * unnoticed. The count is reported as evidence -- a full ring means
@@ -2287,6 +2292,9 @@ static void jockey3_watchdog_check(struct jockey3_chip *chip, const int directio
 	u64 threshold_ms = JOCKEY3_WATCHDOG_STALL_MS;
 	unsigned int grace_ms = jockey3_start_grace_ms();
 	bool open = false, startup = false;
+
+	if (chip->dev->state == USB_STATE_NOTATTACHED)
+		return;
 
 	scoped_guard(spinlock_irqsave, &urb_stream->lock) {
 		/*
