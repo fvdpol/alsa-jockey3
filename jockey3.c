@@ -1111,10 +1111,10 @@ static void jockey3_resubmit_failed(struct jockey3_chip *chip, int err, const ch
  *
  * The stop is for the whole ring, not just the URB that crossed the limit:
  * the completion handlers resubmit nothing while the count is at the limit,
- * and a success no longer resets it. Otherwise each burst would cost the URBs
+ * and a success does not reset it. Otherwise each burst would cost the URBs
  * it hit, one success would let the rest carry on, and the ring would run on
- * short until the device's FIFO underran -- audibly, and with nothing logged
- * but a "stopped" that was not true.
+ * short until the device's FIFO underran, with nothing logged but a
+ * "stopped" that was not true.
  *
  * Return: true if the caller should give up and not resubmit.
  */
