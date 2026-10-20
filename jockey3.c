@@ -121,11 +121,11 @@ MODULE_PARM_DESC(enable, "Enable " CARD_NAME " soundcard.");
  *
  * That splits teardown in two, and the split is the thing to keep straight:
  *
- * - jockey3_disconnect() does everything that must happen while the device is
- *   still there: latch JOCKEY3_FLAG_DISCONNECTED (for either interface, since
- *   the core takes them down one at a time), release anyone waiting on a
- *   reset, stop the watchdog, kill the URBs, release interface 1, and hand the
- *   card to snd_card_free_when_closed().
+ * - jockey3_disconnect(), for whichever interface goes first, does everything
+ *   that must happen while the device is still there: latch
+ *   JOCKEY3_FLAG_DISCONNECTED, release anyone waiting on a reset, stop the
+ *   watchdog, kill the URBs, release the other interface, and hand the card to
+ *   snd_card_free_when_closed().
  *
  * - jockey3_card_free(), reached through card->private_free once the last file
  *   descriptor is closed, frees the buffers and URBs, destroys rate_mutex and
@@ -4046,28 +4046,27 @@ err_free_idx:
 static void jockey3_disconnect(struct usb_interface *intf)
 {
 	struct jockey3_chip *chip = usb_get_intfdata(intf);
+	struct usb_interface *other;
 
 	/*
-	 * Latch DISCONNECTED first, and for EITHER interface. Every ALSA entry
-	 * point tests it on the way in, so setting it before anything else is
-	 * torn down closes the window where e.g. jockey3_pcm_hw_params() had
-	 * already passed its check and would go on to resubmit URBs we just
-	 * killed.
+	 * Latch DISCONNECTED first. Every ALSA entry point tests it on the way
+	 * in, so setting it before anything else is torn down closes the window
+	 * where e.g. jockey3_pcm_hw_params() had already passed its check and
+	 * would go on to resubmit URBs we just killed.
 	 *
-	 * Doing it for interface 1 as well is what covers the unbind order. The
-	 * driver is bound to both interfaces and the USB core takes them down
-	 * one at a time, calling disconnect() and then usb_disable_interface()
-	 * for each, so whichever goes first has its endpoints flushed while the
-	 * other is still bound. Those URBs come back -ESHUTDOWN through the
-	 * ordinary completion path, and without this they are indistinguishable
-	 * from an endpoint torn down behind the driver's back. Losing either
-	 * interface means the card is going away regardless -- interface 1 owns
-	 * the capture endpoint -- so there is nothing to keep running for.
+	 * The driver is bound to both interfaces, and either can be unbound
+	 * first: interface 1 goes alone on a sysfs unbind or a usbfs
+	 * DISCONNECT_CLAIM, and goes first when the driver is detached. Losing
+	 * either means the card is going away -- interface 1 owns the capture
+	 * endpoint -- so whichever disconnects first tears everything down and
+	 * releases the other. test_and_set_bit() picks it: the other's
+	 * disconnect, recursing from the release below, finds the bit set and
+	 * only clears its intfdata. probe's error path sets the bit itself
+	 * before it releases interface 1, for the same reason.
 	 */
-	if (chip)
-		set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags);
+	if (chip && !test_and_set_bit(JOCKEY3_FLAG_DISCONNECTED, &chip->flags)) {
+		other = intf == chip->intf0 ? chip->intf1 : chip->intf0;
 
-	if (chip && intf == chip->intf0) {
 		clear_bit(JOCKEY3_FLAG_RESETTING, &chip->flags);
 		/*
 		 * Release anyone blocked waiting for a reset: the reset work
@@ -4097,30 +4096,28 @@ static void jockey3_disconnect(struct usb_interface *intf)
 			jockey3_stop_urbs(chip);
 
 		/*
-		 * The reset work, if queued, cannot hold us up: it is either past
-		 * usb_lock_device_for_reset(), and then this disconnect cannot be
-		 * running, or it is in there and gives up with -EINTR now that
-		 * interface 0 is unbinding.
-		 */
-		cancel_work_sync(&chip->reset_work);
-
-		/*
-		 * Release interface 1 here, not from card->private_free: that
-		 * runs when the last file descriptor is closed, by which time
-		 * usb_disconnect() may already have freed the interface. This
-		 * recurses into jockey3_disconnect() for interface 1, which only
-		 * latches DISCONNECTED and clears its intfdata; if the core got
-		 * there first, usb_driver_release_interface() sees a condition
-		 * other than USB_INTERFACE_BOUND and returns.
+		 * Release the other interface here, not from card->private_free:
+		 * that runs when the last file descriptor is closed, by which time
+		 * usb_disconnect() may already have freed the interface.
 		 *
 		 * The two disconnects never overlap: every unbind of either
 		 * interface holds the usb_device lock. usb_disconnect() holds it
 		 * throughout, and a sysfs unbind or driver detach takes it first
-		 * because usb_bus_type sets need_parent_lock. So interface 1's
-		 * disconnect has either finished already or runs inside this
-		 * call, and the chip is not freed under it.
+		 * because usb_bus_type sets need_parent_lock. So the other
+		 * interface's disconnect runs inside this call, and the chip is not
+		 * freed under it.
 		 */
-		usb_driver_release_interface(&jockey3_driver, chip->intf1);
+		usb_driver_release_interface(&jockey3_driver, other);
+
+		/*
+		 * Only now that interface 0 is unbinding or unbound, whichever
+		 * interface this is. The reset work, if queued, is either past
+		 * usb_lock_device_for_reset(), and then this disconnect cannot be
+		 * running, or it is in there and gives up with -EINTR. Cancelled
+		 * before the release, it would instead spin for the lock this
+		 * unbind holds until it gives up with -EBUSY a second later.
+		 */
+		cancel_work_sync(&chip->reset_work);
 
 		/*
 		 * snd_card_free_when_closed() disconnects the card now and frees
